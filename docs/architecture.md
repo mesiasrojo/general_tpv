@@ -187,6 +187,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - Los maestros se publican con versión monotónica por entidad y viajan en el outbox como `master_data.upsert` / `master_data.deleted`.
 - La central mantiene `central_master_data` por tenant/tienda/tipo/entidad; las versiones antiguas se ignoran y las divergencias con la misma versión se registran en `central_master_conflicts`.
 - La copia local aplica la misma política; `GET /api/v1/master-data/conflicts` expone los conflictos auditados.
+- Los maestros de producto y cliente se persisten en el catálogo local al publicar o aplicar un cambio; las bajas se propagan como entidad inactiva.
 - Los usuarios centrales generan `user.provisioned` con el hash Argon2id y una revisión monotónica. El terminal los aplica con `upsert_provisioned`, ignora revisiones antiguas y limpia bloqueos al cambiar la contraseña.
 - Una cuenta desactivada centralmente se propaga al terminal y el login local devuelve `usuario desactivado`.
 - Un evento rechazado o agotado se marca en `sync_outbox` con `failed_at`, `attempts` y `last_error`; deja de bloquear la cola y aparece en la consola de cuarentena.
@@ -216,6 +217,7 @@ Implementado:
 - Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC` y gasto de caja automático para reembolsos en efectivo.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
+- Clientes editables desde la UI, selector de cliente en la venta, validación de NIF y sincronización maestra.
 - Protección del último administrador activo y de la propia cuenta.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.

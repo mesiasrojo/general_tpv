@@ -7,6 +7,7 @@ use tpv_domain::ids::{StoreId, TenantId};
 use tpv_domain::master_data::{
     MasterDataApplyResult, MasterDataChange, MasterDataConflict, MasterDataKind, resolve_change,
 };
+use tpv_domain::people::Customer;
 use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
@@ -133,12 +134,29 @@ impl MasterDataRepository for SqliteStore {
                 upsert_master_change_tx(&mut tx, tenant_id, store_id, change, now).await?;
             }
             tx.commit().await?;
-            if resolution.applied() && change.kind == MasterDataKind::Product {
-                if let Ok(mut product) = serde_json::from_value::<Product>(change.payload.clone()) {
-                    if change.deleted {
-                        product.active = false;
+            if resolution.applied() {
+                match change.kind {
+                    MasterDataKind::Product => {
+                        if let Ok(mut product) =
+                            serde_json::from_value::<Product>(change.payload.clone())
+                        {
+                            if change.deleted {
+                                product.active = false;
+                            }
+                            self.persist_product(&product).await?;
+                        }
                     }
-                    self.persist_product(&product).await?;
+                    MasterDataKind::Customer => {
+                        if let Ok(mut customer) =
+                            serde_json::from_value::<Customer>(change.payload.clone())
+                        {
+                            if change.deleted {
+                                customer.active = false;
+                            }
+                            self.persist_customer(&customer).await?;
+                        }
+                    }
+                    _ => {}
                 }
             }
             Ok(MasterDataApplyResult {
@@ -199,13 +217,28 @@ impl MasterDataRepository for SqliteStore {
             )?;
             enqueue_event_tx(&mut tx, &event).await?;
             tx.commit().await?;
-            if kind == MasterDataKind::Product {
-                if let Ok(mut product) = serde_json::from_value::<Product>(change.payload.clone()) {
-                    if deleted {
-                        product.active = false;
+            match kind {
+                MasterDataKind::Product => {
+                    if let Ok(mut product) =
+                        serde_json::from_value::<Product>(change.payload.clone())
+                    {
+                        if deleted {
+                            product.active = false;
+                        }
+                        self.persist_product(&product).await?;
                     }
-                    self.persist_product(&product).await?;
                 }
+                MasterDataKind::Customer => {
+                    if let Ok(mut customer) =
+                        serde_json::from_value::<Customer>(change.payload.clone())
+                    {
+                        if deleted {
+                            customer.active = false;
+                        }
+                        self.persist_customer(&customer).await?;
+                    }
+                }
+                _ => {}
             }
             Ok(event)
         }

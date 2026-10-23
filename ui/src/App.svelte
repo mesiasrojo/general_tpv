@@ -8,6 +8,7 @@
     type AppInfo,
     type CashMovementKind,
     type CashSession,
+    type Customer,
     type Invoice,
     type LineKind,
     type MasterDataConflict,
@@ -17,6 +18,7 @@
     type PrintSummary,
     type QuarantinedEvent,
     type SaleView,
+    type SaveCustomerRequest,
     type SessionUser,
     type Store,
     type SyncStatus,
@@ -62,6 +64,19 @@
   let refundMethod = $state<'cash' | 'card'>('cash');
   let refundQuantities = $state<Record<string, string>>({});
   let refundBusy = $state(false);
+  let customers = $state<Customer[]>([]);
+  let customerId = $state<string | null>(null);
+  let customersOpen = $state(false);
+  let customerBusy = $state(false);
+  let customerError = $state('');
+  let editCustomerId = $state<string | null>(null);
+  let customerFirstName = $state('');
+  let customerLastName1 = $state('');
+  let customerLastName2 = $state('');
+  let customerNif = $state('');
+  let customerPhone = $state('');
+  let customerEmail = $state('');
+  let customerActive = $state(true);
   let usersOpen = $state(false);
   let users = $state<UserAccount[]>([]);
   let stores = $state<Store[]>([]);
@@ -209,6 +224,12 @@
     return value.length > 12 ? `${value.slice(0, 8)}…` : value;
   }
 
+  function customerLabel(customer: Customer): string {
+    return [customer.first_name, customer.last_name1, customer.last_name2]
+      .filter(Boolean)
+      .join(' ');
+  }
+
   function movementLabel(kind: CashMovementKind): string {
     switch (kind) {
       case 'expense':
@@ -228,6 +249,8 @@
     try {
       info = await api.bootstrap();
       cash = info.open_cash;
+      customerId = info.customer_id;
+      await refreshCustomers();
       await refreshSales();
       await refreshSync();
       message = `Caja lista · ${info.store_name}`;
@@ -241,6 +264,75 @@
       lastSales = await api.listSales();
     } catch {
       lastSales = [];
+    }
+  }
+
+  async function refreshCustomers() {
+    try {
+      customers = await api.listCustomers();
+    } catch {
+      customers = [];
+    }
+  }
+
+  function resetCustomerForm() {
+    editCustomerId = null;
+    customerFirstName = '';
+    customerLastName1 = '';
+    customerLastName2 = '';
+    customerNif = '';
+    customerPhone = '';
+    customerEmail = '';
+    customerActive = true;
+  }
+
+  async function openCustomers() {
+    customersOpen = true;
+    customerError = '';
+    resetCustomerForm();
+    await refreshCustomers();
+  }
+
+  function editCustomer(customer: Customer) {
+    editCustomerId = customer.id;
+    customerFirstName = customer.first_name;
+    customerLastName1 = customer.last_name1;
+    customerLastName2 = customer.last_name2 ?? '';
+    customerNif = customer.nif ?? '';
+    customerPhone = customer.phone1 ?? '';
+    customerEmail = customer.email ?? '';
+    customerActive = customer.active;
+    customerError = '';
+  }
+
+  async function saveCustomer() {
+    if (customerBusy) return;
+    if (!customerFirstName.trim() || !customerLastName1.trim()) {
+      customerError = 'Nombre y primer apellido son obligatorios.';
+      return;
+    }
+    customerBusy = true;
+    customerError = '';
+    try {
+      const request: SaveCustomerRequest = {
+        customer_id: editCustomerId,
+        first_name: customerFirstName.trim(),
+        last_name1: customerLastName1.trim(),
+        last_name2: customerLastName2.trim() || null,
+        nif: customerNif.trim() || null,
+        phone: customerPhone.trim() || null,
+        email: customerEmail.trim() || null,
+        active: customerActive
+      };
+      const saved = await api.saveCustomer(request);
+      await refreshCustomers();
+      customerId = saved.id;
+      message = `Cliente ${customerLabel(saved)} guardado.`;
+      resetCustomerForm();
+    } catch (error) {
+      customerError = String(error);
+    } finally {
+      customerBusy = false;
     }
   }
 
@@ -519,7 +611,7 @@
     busy = true;
     try {
       if (!sale) {
-        sale = await api.startSale();
+        sale = await api.startSale(customerId);
       }
       sale = await api.addLine(sale.sale.id, sku, '1', 'sale');
       query = '';
@@ -857,6 +949,7 @@
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
       {#if session.user.role === 'admin' || session.user.role === 'manager'}
         <button class="icon" type="button" onclick={() => void openCatalog()}>Catálogo</button>
+        <button class="icon" type="button" onclick={() => void openCustomers()}>Clientes</button>
         <button
           class="icon"
           type="button"
@@ -892,6 +985,20 @@
             <span class="badge">Sin venta</span>
           {/if}
         </div>
+      </div>
+
+      <div class="customer-picker">
+        <label class="field">
+          <span>Cliente</span>
+          <select bind:value={customerId} disabled={!!sale}>
+            {#each customers.filter((customer) => customer.active) as customer (customer.id)}
+              <option value={customer.id}>
+                {customerLabel(customer)}{customer.nif ? ` · ${customer.nif}` : ''}
+              </option>
+            {/each}
+          </select>
+        </label>
+        <span class="muted small">El cliente se asigna al iniciar la venta.</span>
       </div>
 
       <form class="search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
@@ -1538,6 +1645,95 @@
     </div>
   {/if}
 
+  {#if customersOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal customer-modal" role="dialog" aria-modal="true" aria-label="Clientes">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">DATOS MAESTROS</p>
+            <h2>Clientes</h2>
+          </div>
+          <button class="icon" type="button" onclick={() => (customersOpen = false)}>Esc</button>
+        </div>
+
+        {#if customerError}
+          <p class="error" role="alert">{customerError}</p>
+        {/if}
+
+        <form
+          class="customer-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveCustomer();
+          }}
+        >
+          <label class="field">
+            <span>Nombre</span>
+            <input bind:value={customerFirstName} autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Primer apellido</span>
+            <input bind:value={customerLastName1} autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Segundo apellido</span>
+            <input bind:value={customerLastName2} autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>NIF</span>
+            <input bind:value={customerNif} autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Teléfono</span>
+            <input bind:value={customerPhone} inputmode="tel" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input bind:value={customerEmail} type="email" autocomplete="off" />
+          </label>
+          <div class="field">
+            <span>Estado</span>
+            <label class="inline">
+              <input type="checkbox" bind:checked={customerActive} />
+              Activo
+            </label>
+          </div>
+          <div class="product-actions customer-actions">
+            <button class="primary" type="submit" disabled={customerBusy}>
+              {customerBusy ? 'Guardando…' : 'Guardar cliente'}
+            </button>
+            <button class="secondary" type="button" onclick={resetCustomerForm}>
+              Nuevo cliente
+            </button>
+          </div>
+        </form>
+
+        <div class="customer-list">
+          {#each customers as customer (customer.id)}
+            <div class="customer-row">
+              <div>
+                <strong>{customerLabel(customer)}</strong>
+                <span class="muted small">
+                  {customer.nif ?? 'sin NIF'} · {customer.phone1 ?? 'sin teléfono'} · {customer.email ?? 'sin email'}
+                </span>
+              </div>
+              <div class="product-row-actions">
+                <span class="badge" class:inactive={!customer.active}>
+                  {customer.active ? 'ACTIVO' : 'INACTIVO'}
+                </span>
+                <button class="secondary" type="button" onclick={() => editCustomer(customer)}>
+                  Editar
+                </button>
+              </div>
+            </div>
+          {:else}
+            <p class="muted small">No hay clientes.</p>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if refundOpen && refundInvoice}
     <div class="modal-backdrop" role="presentation">
       <div
@@ -2120,6 +2316,48 @@
     width: min(900px, 100%);
     max-height: 90vh;
     overflow: auto;
+  }
+
+  .customer-picker {
+    display: grid;
+    grid-template-columns: minmax(260px, 380px) 1fr;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 12px;
+  }
+
+  .customer-modal {
+    width: min(900px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .customer-form {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    align-items: end;
+    padding-bottom: 14px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .customer-actions {
+    grid-column: 1 / -1;
+  }
+
+  .customer-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .customer-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
   }
 
   .product-form {

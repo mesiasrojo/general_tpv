@@ -45,6 +45,34 @@ pub struct UpsertProductRequest {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertCustomerRequest {
+    #[serde(default)]
+    pub customer_id: Option<CustomerId>,
+    pub first_name: String,
+    pub last_name1: String,
+    #[serde(default)]
+    pub last_name2: Option<String>,
+    #[serde(default)]
+    pub nif: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub street: Option<String>,
+    #[serde(default)]
+    pub number: Option<String>,
+    #[serde(default)]
+    pub locality: Option<String>,
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    #[serde(default)]
+    pub province: Option<String>,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
 fn default_active() -> bool {
     true
 }

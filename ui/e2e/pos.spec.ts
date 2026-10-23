@@ -10,6 +10,20 @@ test.describe('TPV desktop UI', () => {
       const userId = '00000000-0000-7000-8000-000000000005';
       const now = () => new Date().toISOString();
 
+      const customerRecords: any[] = [
+        {
+          id: customerId,
+          first_name: 'Cliente',
+          last_name1: 'Contado',
+          last_name2: null,
+          phone1: null,
+          email: null,
+          nif: '12345678Z',
+          address: { street: '', number: '', locality: '', postal_code: '', province: '' },
+          active: true
+        }
+      ];
+
       let session: Record<string, unknown> | null = null;
       let sale: Record<string, unknown> | null = null;
       let totals = {
@@ -150,13 +164,44 @@ test.describe('TPV desktop UI', () => {
             }
           ];
         },
-        async start_sale() {
+        async list_customers() {
+          return customerRecords;
+        },
+        async save_customer(request: any) {
+          const existing = request.customer_id
+            ? customerRecords.find((customer) => customer.id === request.customer_id)
+            : null;
+          const record = {
+            id: existing?.id ?? crypto.randomUUID(),
+            first_name: request.first_name,
+            last_name1: request.last_name1,
+            last_name2: request.last_name2 ?? null,
+            phone1: request.phone ?? null,
+            email: request.email ?? null,
+            nif: request.nif ?? null,
+            address: existing?.address ?? {
+              street: '',
+              number: '',
+              locality: '',
+              postal_code: '',
+              province: ''
+            },
+            active: request.active
+          };
+          if (existing) {
+            Object.assign(existing, record);
+          } else {
+            customerRecords.push(record);
+          }
+          return record;
+        },
+        async start_sale(customerIdArg?: string) {
           sale = {
             id: crypto.randomUUID(),
             store_id: storeId,
             register_id: registerId,
             seller_id: sellerId,
-            customer_id: customerId,
+            customer_id: customerIdArg ?? customerId,
             lines: [],
             payments: [],
             state: 'draft',
@@ -240,7 +285,7 @@ test.describe('TPV desktop UI', () => {
           invoiceRecord = {
             id: sale.invoice_id,
             sale_id: sale.id,
-            customer_id: customerId,
+            customer_id: sale.customer_id ?? customerId,
             series: 'FAC',
             number: 1,
             issued_at: now(),
@@ -270,7 +315,7 @@ test.describe('TPV desktop UI', () => {
           return {
             id: crypto.randomUUID(),
             sale_id: sale?.id ?? '',
-            customer_id: customerId,
+            customer_id: sale?.customer_id ?? customerId,
             series: 'REC',
             number: 1,
             issued_at: now(),
@@ -312,7 +357,7 @@ test.describe('TPV desktop UI', () => {
             invoice: {
               id: crypto.randomUUID(),
               sale_id: invoiceRecord.sale_id,
-              customer_id: customerId,
+              customer_id: invoiceRecord.customer_id,
               series: 'REC',
               number: 1,
               issued_at: now(),
@@ -352,6 +397,10 @@ test.describe('TPV desktop UI', () => {
               return api.logout();
             case 'bootstrap':
               return api.bootstrap();
+            case 'list_customers':
+              return api.list_customers();
+            case 'save_customer':
+              return api.save_customer(args.request);
             case 'open_cash':
               return api.open_cash();
             case 'cash_status':
@@ -409,7 +458,7 @@ test.describe('TPV desktop UI', () => {
               return saved;
             }
             case 'start_sale':
-              return api.start_sale();
+              return api.start_sale(args.customerId ? String(args.customerId) : undefined);
             case 'add_line':
               return api.add_line(String(args.saleId), String(args.sku));
             case 'apply_payment':
@@ -460,6 +509,17 @@ test.describe('TPV desktop UI', () => {
 
     await page.getByRole('button', { name: 'Sincronizar ahora' }).click();
     await expect(page.getByText(/Sincronizado: 1 aceptados, 1 usuario/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Clientes' }).click();
+    const customers = page.getByRole('dialog', { name: 'Clientes' });
+    await expect(customers).toBeVisible();
+    await customers.getByLabel('Nombre').fill('Cliente');
+    await customers.getByLabel('Primer apellido').fill('UI');
+    await customers.getByLabel('NIF').fill('12345678Z');
+    await customers.getByRole('button', { name: 'Guardar cliente' }).click();
+    await expect(customers.locator('.customer-row', { hasText: 'Cliente UI' })).toBeVisible();
+    await customers.getByRole('button', { name: 'Esc' }).click();
+    await page.getByLabel('Cliente').selectOption({ label: 'Cliente UI · 12345678Z' });
 
     await page.getByRole('button', { name: 'Abrir caja · fondo 100,00 €' }).click();
     await expect(page.getByText('Caja abierta con fondo de 100,00 €.')).toBeVisible();

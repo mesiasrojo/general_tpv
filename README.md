@@ -23,6 +23,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
 | Edición de maestros en el TPV | Implementado (catálogo de productos, versión maestra y outbox) |
+| Clientes en el TPV | Implementado (alta/edición, NIF, selector de venta y sync maestro) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
 | Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
@@ -181,6 +182,8 @@ npm run dev
 Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` y el resto de paquetes indicados en la sección de arranque). El crate `apps/desktop` está excluido del workspace principal, pero se compila y prueba desde `apps/desktop/src-tauri`.
 
 Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados.
+
+El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
 
 Tras emitir una factura, el histórico de ventas muestra los botones **Rectificar** y **Devolver** para administradores y responsables. **Rectificar** emite una nota de crédito de la factura completa. **Devolver** abre el detalle de líneas, permite indicar cantidades parciales, motivo y forma de reembolso (efectivo o tarjeta), emite la rectificativa `REC` y, si el reembolso es en efectivo, registra automáticamente el gasto de caja con la referencia de la devolución.
 

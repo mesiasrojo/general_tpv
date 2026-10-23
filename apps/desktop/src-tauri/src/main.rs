@@ -10,13 +10,13 @@ use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
     CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
-    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceLineSelection,
+    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, CustomerService, InvoiceLineSelection,
     InvoiceRepository, InvoiceService, MasterDataRepository, MasterDataService, OpenCashRequest,
     PrintQueueRepository, PrintService, PrinterPort, ProductService, QuarantinedEvent,
     RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository,
     SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
-    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UpsertProductRequest,
-    UserRepository,
+    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UpsertCustomerRequest,
+    UpsertProductRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -26,7 +26,7 @@ use tpv_domain::ids::{
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
-use tpv_domain::people::{Role, UserAccount, UserProvision};
+use tpv_domain::people::{Customer, Role, UserAccount, UserProvision};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{
     EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
@@ -37,6 +37,7 @@ use tpv_sync::{RetryPolicy, SyncClient, SyncWorker};
 #[derive(Clone)]
 struct AppState {
     catalog: CatalogService,
+    customers: CustomerService,
     sales: SaleService,
     invoices: InvoiceService,
     cash: CashService,
@@ -193,7 +194,10 @@ async fn search_products(
 }
 
 #[tauri::command]
-async fn start_sale(state: State<'_, AppState>) -> Result<SaleView, String> {
+async fn start_sale(
+    state: State<'_, AppState>,
+    customer_id: Option<CustomerId>,
+) -> Result<SaleView, String> {
     require_sell(state.inner())?;
     let state = state.inner().clone();
     let sale = state
@@ -202,7 +206,7 @@ async fn start_sale(state: State<'_, AppState>) -> Result<SaleView, String> {
             store_id: state.demo.store_id,
             register_id: state.demo.register_id,
             seller_id: state.demo.seller_id,
-            customer_id: Some(state.demo.customer_id),
+            customer_id: customer_id.or(Some(state.demo.customer_id)),
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -288,12 +292,18 @@ async fn issue_invoice(
 ) -> Result<Invoice, String> {
     require_sell(state.inner())?;
     let state = state.inner().clone();
+    let sale = state
+        .sales
+        .get_sale(sale_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let customer_id = sale.customer_id.unwrap_or(state.demo.customer_id);
     let year = u16::try_from(OffsetDateTime::now_utc().year()).unwrap_or(2026);
     state
         .invoices
         .issue_invoice(tpv_application::IssueInvoiceRequest {
             sale_id,
-            customer_id: state.demo.customer_id,
+            customer_id,
             series: "FAC".into(),
             year,
         })
@@ -747,6 +757,31 @@ async fn list_products(state: State<'_, AppState>) -> Result<Vec<Product>, Strin
 }
 
 #[tauri::command]
+async fn list_customers(state: State<'_, AppState>) -> Result<Vec<Customer>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .customers
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_customer(
+    state: State<'_, AppState>,
+    request: UpsertCustomerRequest,
+) -> Result<Customer, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .customers
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn save_product(
     state: State<'_, AppState>,
     request: UpsertProductRequest,
@@ -1008,7 +1043,8 @@ async fn build_app_state(
     let sync_service = SyncService::new(sync_repo.clone());
     let backup_service = BackupService::new(backup_repo);
     let master_data = MasterDataService::new(master_data_repo, clock.clone());
-    let products = ProductService::new(catalog_repo, master_data.clone());
+    let products = ProductService::new(catalog_repo.clone(), master_data.clone());
+    let customers = CustomerService::new(catalog_repo, master_data.clone());
     let auth = AuthService::new(
         user_repo.clone(),
         Arc::new(Argon2PasswordHasher),
@@ -1018,6 +1054,7 @@ async fn build_app_state(
     auth.bootstrap_password("admin", "admin123").await?;
     Ok(AppState {
         catalog,
+        customers,
         sales,
         invoices,
         cash,
@@ -1125,6 +1162,8 @@ fn main() {
             list_stores,
             list_products,
             save_product,
+            list_customers,
+            save_customer,
             list_master_data_conflicts,
             backup_now,
             sync_now
@@ -1214,6 +1253,8 @@ mod e2e_tests {
                 list_stores,
                 list_products,
                 save_product,
+                list_customers,
+                save_customer,
                 list_master_data_conflicts,
                 backup_now,
                 sync_now
@@ -1268,6 +1309,31 @@ mod e2e_tests {
         assert_eq!(info["store_name"], "100%SHOPPING");
         let store_id = info["store_id"].as_str().expect("store id").to_string();
 
+        let customer = invoke(
+            &webview,
+            "save_customer",
+            json!({
+                "request": {
+                    "first_name": "Cliente",
+                    "last_name1": "E2E",
+                    "nif": "12345678Z",
+                    "phone": "600123123",
+                    "active": true
+                }
+            }),
+        )
+        .expect("save customer");
+        let customer_id = customer["id"].as_str().expect("customer id").to_string();
+        assert_eq!(customer["nif"], "12345678Z");
+        let customers = invoke(&webview, "list_customers", json!({})).expect("list customers");
+        assert!(
+            customers
+                .as_array()
+                .expect("customers array")
+                .iter()
+                .any(|item| item["id"] == customer_id)
+        );
+
         let opened = invoke(&webview, "open_cash", json!({})).expect("open cash");
         let cash_id = opened["id"].as_str().expect("cash session id").to_string();
         let cash = invoke(
@@ -1283,7 +1349,8 @@ mod e2e_tests {
         .expect("cash expense");
         assert_eq!(cash["movements"][0]["kind"], "expense");
         assert_eq!(cash["movements"][0]["amount"], 500);
-        let sale = invoke(&webview, "start_sale", json!({})).expect("start sale");
+        let sale = invoke(&webview, "start_sale", json!({ "customerId": customer_id }))
+            .expect("start sale");
         let sale_id = sale["sale"]["id"].as_str().expect("sale id").to_string();
 
         let sale = invoke(
@@ -1330,6 +1397,7 @@ mod e2e_tests {
             invoke(&webview, "issue_invoice", json!({ "saleId": sale_id })).expect("issue invoice");
         let invoice_id = invoice["id"].as_str().expect("invoice id").to_string();
         assert_eq!(invoice["kind"]["type"], "standard");
+        assert_eq!(invoice["customer_id"], customer_id);
         let line_id = invoice["lines"][0]["source_line_id"]
             .as_str()
             .expect("invoice line id")
@@ -1465,6 +1533,24 @@ mod e2e_tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("gestionar usuarios")
+        );
+        let forbidden = invoke(
+            &webview,
+            "save_customer",
+            json!({
+                "request": {
+                    "first_name": "Cliente",
+                    "last_name1": "Cajero",
+                    "active": true
+                }
+            }),
+        )
+        .expect_err("cashier cannot save customers");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("responsable")
         );
         let forbidden = invoke(
             &webview,

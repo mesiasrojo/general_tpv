@@ -51,6 +51,40 @@ export interface SaveProductRequest {
   active: boolean;
 }
 
+export interface Customer {
+  id: string;
+  first_name: string;
+  last_name1: string;
+  last_name2: string | null;
+  phone1: string | null;
+  email: string | null;
+  nif: string | null;
+  address: {
+    street: string;
+    number: string;
+    locality: string;
+    postal_code: string;
+    province: string;
+  };
+  active: boolean;
+}
+
+export interface SaveCustomerRequest {
+  customer_id?: string | null;
+  first_name: string;
+  last_name1: string;
+  last_name2?: string | null;
+  nif?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  street?: string | null;
+  number?: string | null;
+  locality?: string | null;
+  postal_code?: string | null;
+  province?: string | null;
+  active: boolean;
+}
+
 export interface MasterDataChange {
   kind: string;
   entity_id: string;
@@ -307,9 +341,13 @@ export const api = {
   searchProducts: (query: string) => invoke<ProductSearchResult[]>('search_products', { query }),
   listProducts: () => invoke<Product[]>('list_products'),
   saveProduct: (request: SaveProductRequest) => invoke<Product>('save_product', { request }),
+  listCustomers: () => invoke<Customer[]>('list_customers'),
+  saveCustomer: (request: SaveCustomerRequest) =>
+    invoke<Customer>('save_customer', { request }),
   listMasterDataConflicts: (limit = 100) =>
     invoke<MasterDataConflict[]>('list_master_data_conflicts', { limit }),
-  startSale: () => invoke<SaleView>('start_sale'),
+  startSale: (customerId?: string | null) =>
+    invoke<SaleView>('start_sale', { customerId: customerId ?? null }),
   addLine: (saleId: string, sku: string, quantity: string, kind: LineKind) =>
     invoke<SaleView>('add_line', { saleId, sku, quantity, kind }),
   applyPayment: (
