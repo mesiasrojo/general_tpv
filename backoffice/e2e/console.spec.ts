@@ -148,9 +148,9 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
 
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
   await page.getByRole('button', { name: 'Oscuro' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_them');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_theme');
   await page.reload();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_them');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_theme');
   await page.getByRole('button', { name: 'Claro' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
 

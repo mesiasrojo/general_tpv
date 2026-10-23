@@ -1,4 +1,4 @@
-export const themes = ['light_theme', 'dark_them'] as const;
+export const themes = ['light_theme', 'dark_theme'] as const;
 export type Theme = (typeof themes)[number];
 export const defaultTheme: Theme = 'light_theme';
 
@@ -7,7 +7,7 @@ const storageKey = 'general-tpv-theme';
 export function storedTheme(): Theme {
   try {
     const value = localStorage.getItem(storageKey);
-    if (value === 'light_theme' || value === 'dark_them') {
+    if (value === 'light_theme' || value === 'dark_theme') {
       return value;
     }
   } catch {
@@ -26,5 +26,5 @@ export function applyTheme(theme: Theme): void {
 }
 
 export function nextTheme(theme: Theme): Theme {
-  return theme === 'light_theme' ? 'dark_them' : 'light_theme';
+  return theme === 'light_theme' ? 'dark_theme' : 'light_theme';
 }

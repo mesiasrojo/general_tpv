@@ -1,7 +1,7 @@
 /*
  * General TPV appearance themes.
  * The application default is light_theme. The previous dark appearance is
- * preserved verbatim as dark_them.
+ * preserved verbatim as dark_theme.
  */
 :root,
 [data-theme="light_theme"] {
@@ -42,7 +42,7 @@
   --button-danger-text: #ffffff;
 }
 
-[data-theme="dark_them"] {
+[data-theme="dark_theme"] {
   color-scheme: dark;
   --bg: #081114;
   --bg-2: #0d191d;

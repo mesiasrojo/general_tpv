@@ -219,7 +219,7 @@ Implementado:
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
 - Clientes editables desde la UI, selector de cliente en la venta, validación de NIF y sincronización maestra.
-- Temas compartidos `light_theme` (por defecto, blanco y azul) y `dark_them`, con selector persistido en `localStorage`.
+- Temas compartidos `light_theme` (por defecto, blanco y azul) y `dark_theme`, con selector persistido en `localStorage`.
 - Protección del último administrador activo y de la propia cuenta.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.

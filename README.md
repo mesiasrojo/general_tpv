@@ -18,7 +18,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (eventos, usuarios, dispositivos y conflictos) |
-| Temas de apariencia | Implementado (`light_theme` por defecto y `dark_them` conservado) |
+| Temas de apariencia | Implementado (`light_theme` por defecto y `dark_theme` conservado) |
 | Usuarios centrales y aprovisionamiento | Implementado (API, backoffice, pull del CLI y sync automática Tauri) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
@@ -192,7 +192,7 @@ Los roles administrador y responsable disponen del botón **Catálogo** en la ba
 
 El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
 
-La apariencia del TPV y del backoffice se define en `themes.css`. El tema por defecto es `light_theme`, con fondo blanco y tonos azulados; el tema oscuro anterior se conserva como `dark_them`. El botón **Claro/Oscuro** permite cambiar el tema y la selección se recuerda en `localStorage`.
+La apariencia del TPV y del backoffice se define en `themes.css`. El tema por defecto es `light_theme`, con fondo blanco y tonos azulados; el tema oscuro anterior se conserva como `dark_theme`. El botón **Claro/Oscuro** permite cambiar el tema y la selección se recuerda en `localStorage`.
 
 Tras emitir una factura, el histórico de ventas muestra los botones **Rectificar** y **Devolver** para administradores y responsables. **Rectificar** emite una nota de crédito de la factura completa. **Devolver** abre el detalle de líneas, permite indicar cantidades parciales, motivo, forma de reembolso y referencia del justificante. Los reembolsos con tarjeta exigen esa referencia, que queda guardada en la rectificativa `REC`; los reembolsos en efectivo registran además un gasto de caja automático.
 
