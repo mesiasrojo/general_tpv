@@ -67,7 +67,9 @@ Base local **SQLCipher** (SQLite + AES-256) con WAL y migraciones embebidas:
 
 SQLite guarda enums como texto, UUID como TEXT, fechas RFC3339 y dinero como INTEGER de céntimos.
 
-La clave aleatoria de 256 bits se guarda en un fichero sidecar con permisos `0600` (`<base>.key` en CLI, `tpv.key` en el directorio de datos de Tauri). Al abrir una base antigua en texto plano se exporta a SQLCipher con `sqlcipher_export`, se verifica la copia cifrada y solo entonces se sustituye el original. Los backups se generan con `VACUUM INTO`, heredan la misma clave y pueden abrirse con `SqliteStore::connect` usando esa clave.
+La clave aleatoria de 256 bits se guarda en el keychain del sistema: Secret Service en Linux, Keychain en macOS y Credential Manager en Windows. El servicio es `general-tpv` y la cuenta se deriva del hash de la ruta absoluta de la base. Si existe un `<base>.key` antiguo, se importa al keychain y se elimina; si el keychain no está disponible (CI, servidor headless), se mantiene el fichero sidecar con permisos `0600` como fallback. Nunca se genera una clave nueva para una base existente sin clave localizable: el arranque falla con una instrucción para usar `--key-file` o `--import-key`.
+
+El CLI permite exportar la clave (`--export-key`), abrir una base con una clave externa (`--key-file`) e importarla al keychain (`--import-key`). Al abrir una base antigua en texto plano se exporta a SQLCipher con `sqlcipher_export`, se verifica la copia cifrada y solo entonces se sustituye el original. Los backups se generan con `VACUUM INTO`, heredan la misma clave y pueden abrirse con `SqliteStore::connect` usando esa clave.
 
 ## 4.1 Impresión
 
@@ -205,10 +207,11 @@ Implementado:
 - Enrolamiento de dispositivos con token aleatorio hasheado en la central.
 - Revocación inmediata y sync push/pull autenticados y limitados a tenant/tienda.
 - Datos maestros versionados con resolución determinista y registro de conflictos.
+- Clave SQLCipher en el keychain del sistema con migración desde fichero y fallback headless.
+- Exportación, importación y uso de claves externas para backups y recuperación.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
-- Mover la clave local del fichero `0600` al keychain del sistema.
 - Gestión de usuarios y dispositivos desde backoffice central.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
 - Firma de actualizaciones, SBOM y pipeline de release.
@@ -220,9 +223,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Clave local en keychain del sistema.
-2. Adaptadores USB/serie y hardware-in-the-loop.
-3. Pruebas E2E Tauri.
-4. Gestión de usuarios desde el backoffice central.
-5. Consola de dispositivos y conflictos de maestros en el backoffice.
-6. Edición de maestros desde la UI del TPV.
+1. Adaptadores USB/serie y hardware-in-the-loop.
+2. Pruebas E2E Tauri.
+3. Gestión de usuarios desde el backoffice central.
+4. Consola de dispositivos y conflictos de maestros en el backoffice.
+5. Edición de maestros desde la UI del TPV.
+6. Firma de actualizaciones, SBOM y pipeline de release.

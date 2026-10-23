@@ -15,7 +15,7 @@ use tpv_domain::master_data::{MasterDataChange, MasterDataKind};
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
-use tpv_storage_sqlite::{DatabaseKey, SqliteStore};
+use tpv_storage_sqlite::{DatabaseKey, KeyStore, SqliteStore};
 use tpv_sync::{EnrollRequest, RetryPolicy, SyncClient, SyncWorker};
 
 #[tokio::main]
@@ -34,6 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut master_data_demo = false;
     let mut sync_url = None;
     let mut backup_path = None;
+    let mut key_file = None;
+    let mut export_key_path = None;
+    let mut import_key_path = None;
     let mut device_name = "TPV CLI".to_string();
     let mut path = None;
     let mut iter = args.iter().skip(1);
@@ -45,6 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--master-data-demo" => master_data_demo = true,
             "--sync-url" => sync_url = iter.next().cloned(),
             "--backup" => backup_path = iter.next().cloned(),
+            "--key-file" => key_file = iter.next().cloned(),
+            "--export-key" => export_key_path = iter.next().cloned(),
+            "--import-key" => import_key_path = iter.next().cloned(),
             "--device-name" => {
                 device_name = iter
                     .next()
@@ -67,15 +73,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let key_path = if in_memory {
-        None
+    if import_key_path.is_some() && key_file.is_some() {
+        return Err("--import-key y --key-file son incompatibles".into());
+    }
+    if let Some(import_path) = &import_key_path {
+        let imported = DatabaseKey::load(import_path)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no existe la clave {import_path}"),
+            )
+        })?;
+        let key_store = KeyStore::for_database(Path::new(&path), format!("{path}.key"));
+        key_store.import_key(&imported)?;
+        println!("Clave importada al keychain desde {import_path}");
+    }
+
+    let key = if in_memory {
+        DatabaseKey::generate()
+    } else if let Some(key_file) = &key_file {
+        let key = DatabaseKey::load_or_create(key_file)?;
+        println!("Clave local: fichero explícito {key_file}");
+        key
     } else {
-        Some(format!("{path}.key"))
+        let key_store = KeyStore::for_database(std::path::Path::new(&path), format!("{path}.key"));
+        let loaded = key_store.load_or_create()?;
+        println!("Clave local: {}", loaded.origin.label());
+        loaded.key
     };
-    let key = match &key_path {
-        Some(key_path) => DatabaseKey::load_or_create(key_path)?,
-        None => DatabaseKey::generate(),
-    };
+    if let Some(export_path) = &export_key_path {
+        key.save_new(export_path)?;
+        println!("Clave exportada a {export_path} (permisos 0600; guárdala de forma segura).");
+    }
     let store = if in_memory {
         SqliteStore::in_memory_with_key(&key).await?
     } else {
@@ -142,9 +170,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Base de datos: {} (SQLCipher)",
         if in_memory { ":memory:" } else { &path }
     );
-    if let Some(key_path) = &key_path {
-        println!("Clave local: {key_path}");
-    }
     println!("Tienda: {}", demo.store_id);
     println!("Caja: {}", demo.register_id);
 

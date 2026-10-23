@@ -21,7 +21,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
-| USB/serie nativo y clave en keychain | Pendiente de siguiente iteración |
+| Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
+| USB/serie nativo | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 
@@ -72,10 +73,20 @@ cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 \
   --master-data-demo
 ```
 
-La base local se cifra con SQLCipher. En modo fichero, la clave se genera una sola vez en `<base>.key` con permisos `0600`; si la base ya existía en texto plano, se migra automáticamente. Para crear un backup cifrado consistente:
+La base local se cifra con SQLCipher. La clave se guarda en el keychain del sistema (Secret Service en Linux, Keychain en macOS, Credential Manager en Windows). Si existía un `<base>.key` antiguo, se migra automáticamente y se elimina; si el keychain no está disponible, se usa ese fichero como fallback con permisos `0600`. Si la base ya existía en texto plano, también se migra automáticamente.
+
+Para backups y recuperación:
 
 ```bash
-cargo run -p tpv-cli -- data/tpv.db --backup data/tpv-backup.db
+# Backup cifrado + exportación de la clave
+cargo run -p tpv-cli -- data/tpv.db --backup data/tpv-backup.db \
+  --export-key data/tpv-key.export
+
+# Abrir una copia o restaurar en otro equipo con la clave exportada
+cargo run -p tpv-cli -- data/tpv-backup.db --key-file data/tpv-key.export
+
+# Importar la clave en el keychain de este equipo
+cargo run -p tpv-cli -- data/tpv.db --import-key data/tpv-key.export
 ```
 
 El servidor expone:

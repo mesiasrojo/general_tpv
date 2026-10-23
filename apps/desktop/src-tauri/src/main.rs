@@ -22,7 +22,7 @@ use tpv_domain::invoice::Invoice;
 use tpv_domain::people::{Role, UserAccount};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{DirectoryPrinter, EscPosRenderer};
-use tpv_storage_sqlite::{DatabaseKey, DemoData, SqliteStore};
+use tpv_storage_sqlite::{DemoData, KeyStore, SqliteStore};
 
 #[derive(Clone)]
 struct AppState {
@@ -604,8 +604,11 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let key = DatabaseKey::load_or_create(data_dir.join("tpv.key"))?;
             let db_path = data_dir.join("tpv.db");
+            let key_store = KeyStore::for_database(&db_path, data_dir.join("tpv.key"));
+            let loaded = key_store.load_or_create()?;
+            println!("Clave local: {}", loaded.origin.label());
+            let key = loaded.key;
             let (store, demo) = tauri::async_runtime::block_on(async {
                 let store = SqliteStore::connect(
                     db_path.to_str().ok_or_else(|| {

@@ -51,6 +51,36 @@ impl DatabaseKey {
     /// permissions when the file does not exist yet.
     pub fn load_or_create(path: impl AsRef<Path>) -> StorageResult<Self> {
         let path = path.as_ref();
+        if let Some(key) = Self::load(path)? {
+            return Ok(key);
+        }
+        let key = Self::generate();
+        match Self::write_new(path, &key.0) {
+            Ok(()) => Ok(key),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Self::load(path)?
+                .ok_or_else(|| {
+                    StorageError::InvalidData(format!(
+                        "key file disappeared while creating {}",
+                        path.display()
+                    ))
+                }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Reads an existing key file without creating anything.
+    pub fn load(path: impl AsRef<Path>) -> StorageResult<Option<Self>> {
+        match fs::read_to_string(path.as_ref()) {
+            Ok(contents) => Ok(Some(Self::from_hex(&contents)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Writes the key to a new file with mode `0600`. Existing files are only
+    /// accepted when they contain the same key.
+    pub fn save_new(&self, path: impl AsRef<Path>) -> StorageResult<()> {
+        let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 StorageError::InvalidData(format!(
@@ -59,17 +89,22 @@ impl DatabaseKey {
                 ))
             })?;
         }
-        match fs::read_to_string(path) {
-            Ok(contents) => Self::from_hex(&contents),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let key = Self::generate();
-                match Self::write_new(path, &key.0) {
-                    Ok(()) => Ok(key),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let contents = fs::read_to_string(path)?;
-                        Self::from_hex(&contents)
-                    }
-                    Err(error) => Err(error.into()),
+        match Self::write_new(path, &self.0) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = Self::load(path)?.ok_or_else(|| {
+                    StorageError::InvalidData(format!(
+                        "key file disappeared while saving {}",
+                        path.display()
+                    ))
+                })?;
+                if existing == *self {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidData(format!(
+                        "key file {} already contains a different key",
+                        path.display()
+                    )))
                 }
             }
             Err(error) => Err(error.into()),
@@ -77,6 +112,9 @@ impl DatabaseKey {
     }
 
     fn write_new(path: &Path, hex_key: &str) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
