@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust · fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+
+  frontend:
+    name: Svelte · check and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            backoffice/package-lock.json
+      - name: Install TPV UI
+        working-directory: ui
+        run: npm ci
+      - name: Check TPV UI
+        working-directory: ui
+        run: npm run check
+      - name: Build TPV UI
+        working-directory: ui
+        run: npm run build
+      - name: Install backoffice
+        working-directory: backoffice
+        run: npm ci
+      - name: Check backoffice
+        working-directory: backoffice
+        run: npm run check
+      - name: Build backoffice
+        working-directory: backoffice
+        run: npm run build

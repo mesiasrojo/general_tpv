@@ -1,0 +1,14 @@
+/target
+/data
+*.db
+*.db-shm
+*.db-wal
+.env
+node_modules
+/dist
+/ui/dist
+/apps/desktop/target
+.DS_Store
+/ui/.svelte-kit
+/backoffice/build
+/backoffice/.svelte-kit

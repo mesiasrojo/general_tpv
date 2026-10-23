@@ -1,0 +1,23 @@
+[package]
+name = "tpv-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tpv-cli"
+path = "src/main.rs"
+
+[dependencies]
+rust_decimal.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+tpv-application = { path = "../../crates/tpv-application" }
+tpv-domain = { path = "../../crates/tpv-domain" }
+tpv-storage-sqlite = { path = "../../crates/tpv-storage-sqlite" }
+tpv-sync = { path = "../../crates/tpv-sync" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
