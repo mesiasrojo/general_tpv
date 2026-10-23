@@ -7,12 +7,12 @@ use serde::Serialize;
 use tauri::{Manager, State};
 use time::OffsetDateTime;
 use tpv_application::{
-    AddLineRequest, ApplyPaymentRequest, AuthService, CashRepository, CashService,
-    CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, CreateUserRequest,
-    InvoiceRepository, InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService,
-    QuarantinedEvent, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
-    SequenceRepository, SessionUser, StartSaleRequest, SyncOutboxRepository, SyncService,
-    SyncStatus, UpdateUserRequest, UserRepository,
+    AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
+    CashRepository, CashService, CatalogRepository, CatalogService, CloseCashRequest,
+    ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
+    PrintQueueRepository, PrintService, QuarantinedEvent, ResetPasswordRequest, SaleRepository,
+    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncOutboxRepository,
+    SyncService, SyncStatus, UpdateUserRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
@@ -22,7 +22,7 @@ use tpv_domain::invoice::Invoice;
 use tpv_domain::people::{Role, UserAccount};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{DirectoryPrinter, EscPosRenderer};
-use tpv_storage_sqlite::{DemoData, SqliteStore};
+use tpv_storage_sqlite::{DatabaseKey, DemoData, SqliteStore};
 
 #[derive(Clone)]
 struct AppState {
@@ -32,7 +32,9 @@ struct AppState {
     cash: CashService,
     print: PrintService,
     sync: SyncService,
+    backup: BackupService,
     print_dir: PathBuf,
+    backup_dir: PathBuf,
     auth: AuthService,
     session: Arc<RwLock<Option<SessionUser>>>,
     demo: DemoData,
@@ -349,6 +351,12 @@ struct PrintSummary {
     success: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct BackupSummary {
+    path: String,
+    bytes: u64,
+}
+
 #[tauri::command]
 async fn print_ticket(
     state: State<'_, AppState>,
@@ -570,17 +578,44 @@ async fn list_stores(state: State<'_, AppState>) -> Result<Vec<tpv_domain::peopl
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn backup_now(state: State<'_, AppState>) -> Result<BackupSummary, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let filename = format!(
+        "tpv-backup-{}.db",
+        OffsetDateTime::now_utc().unix_timestamp_nanos()
+    );
+    let destination = state.backup_dir.join(filename);
+    let bytes = state
+        .backup
+        .backup_to(&destination)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(BackupSummary {
+        path: destination.display().to_string(),
+        bytes,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            let key = DatabaseKey::load_or_create(data_dir.join("tpv.key"))?;
             let db_path = data_dir.join("tpv.db");
             let (store, demo) = tauri::async_runtime::block_on(async {
-                let store = SqliteStore::connect(db_path.to_str().ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid database path")
-                })?)
+                let store = SqliteStore::connect(
+                    db_path.to_str().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "invalid database path",
+                        )
+                    })?,
+                    &key,
+                )
                 .await?;
                 let demo = store.seed_demo().await?;
                 Ok::<_, Box<dyn std::error::Error>>((store, demo))
@@ -595,8 +630,11 @@ fn main() {
             let sync_repo: Arc<dyn SyncOutboxRepository> = store.clone();
             let user_repo: Arc<dyn UserRepository> = store.clone();
             let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
+            let backup_repo: Arc<dyn BackupRepository> = store.clone();
             let tickets_dir = data_dir.join("tickets");
+            let backup_dir = data_dir.join("backups");
             std::fs::create_dir_all(&tickets_dir)?;
+            std::fs::create_dir_all(&backup_dir)?;
             let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
             let sync = tauri::async_runtime::block_on(store.sync_context())?;
             let catalog = CatalogService::new(catalog_repo.clone());
@@ -625,6 +663,7 @@ fn main() {
                 clock.clone(),
             );
             let sync_service = SyncService::new(sync_repo);
+            let backup_service = BackupService::new(backup_repo);
             let auth =
                 AuthService::new(user_repo, Arc::new(Argon2PasswordHasher), audit_repo, clock);
             tauri::async_runtime::block_on(auth.bootstrap_password("admin", "admin123"))?;
@@ -635,7 +674,9 @@ fn main() {
                 cash,
                 print,
                 sync: sync_service,
+                backup: backup_service,
                 print_dir: tickets_dir,
+                backup_dir,
                 auth,
                 session: Arc::new(RwLock::new(None)),
                 demo,
@@ -668,7 +709,8 @@ fn main() {
             create_user,
             update_user,
             reset_password,
-            list_stores
+            list_stores,
+            backup_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running General TPV");

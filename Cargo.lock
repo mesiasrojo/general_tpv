@@ -2321,6 +2321,8 @@ name = "tpv-storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "hex",
+ "libsqlite3-sys",
  "rust_decimal",
  "serde",
  "serde_json",

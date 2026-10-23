@@ -16,6 +16,9 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
 
     #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
     Domain(#[from] DomainError),
 
     #[error("invalid stored data: {0}")]

@@ -9,7 +9,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Área | Estado |
 |---|---|
 | Dominio puro Rust (ventas, IVA, pagos, cambio, caja, facturas, NIF, secuencias, auditoría, sync) | Implementado |
-| Persistencia SQLite + migraciones + seed | Implementado |
+| Persistencia SQLite cifrada con SQLCipher + migraciones + seed | Implementado (migra bases antiguas en texto plano) |
 | Casos de uso y puertos de aplicación | Implementado |
 | Servidor central Axum + PostgreSQL | Implementado (con fallback en memoria para desarrollo) |
 | Cliente HTTP + worker de sync con backoff | Implementado (backoff, cuarentena y reintento manual) |
@@ -18,7 +18,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Impresión ESC/POS + cola persistente | Implementado (renderer, fichero, directorio y red TCP) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
-| SQLCipher y USB/serie nativo | Pendiente de siguiente iteración |
+| Backups cifrados | Implementado (CLI y botón Backup de la UI) |
+| USB/serie nativo y clave en keychain | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 
@@ -53,6 +54,12 @@ El CLI empuja los eventos del outbox con reintentos, muestra el estado local de 
 
 ```bash
 cargo run -p tpv-cli -- --memory --sync-url http://127.0.0.1:8080 --retry-failed
+```
+
+La base local se cifra con SQLCipher. En modo fichero, la clave se genera una sola vez en `<base>.key` con permisos `0600`; si la base ya existía en texto plano, se migra automáticamente. Para crear un backup cifrado consistente:
+
+```bash
+cargo run -p tpv-cli -- data/tpv.db --backup data/tpv-backup.db
 ```
 
 El servidor expone:

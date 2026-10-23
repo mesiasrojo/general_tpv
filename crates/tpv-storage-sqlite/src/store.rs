@@ -1,3 +1,5 @@
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,9 +10,13 @@ use tpv_domain::catalog::Product;
 use tpv_domain::ids::{CustomerId, ProductId, SellerId, StoreId};
 use tpv_domain::people::{Address, Customer, Seller, Sex, Store};
 use tpv_domain::{Sku, TaxRate};
+use uuid::Uuid;
 
+use crate::db_key::DatabaseKey;
 use crate::error::{StorageError, StorageResult};
 use crate::helpers::{enum_from_text, enum_to_text, parse_decimal, parse_uuid};
+
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -18,30 +24,28 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    pub async fn connect(path: &str) -> StorageResult<Self> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
-            .await?;
-        let store = Self { pool };
-        store.migrate().await?;
-        Ok(store)
+    pub async fn connect(path: &str, key: &DatabaseKey) -> StorageResult<Self> {
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        migrate_plaintext_database(path, key).await?;
+        Self::open(encrypted_options(path, key), 5).await
     }
 
     pub async fn in_memory() -> StorageResult<Self> {
+        Self::in_memory_with_key(&DatabaseKey::generate()).await
+    }
+
+    pub async fn in_memory_with_key(key: &DatabaseKey) -> StorageResult<Self> {
         let options = SqliteConnectOptions::new()
             .filename(":memory:")
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+            .foreign_keys(true)
+            .pragma("key", key.pragma_value());
+        Self::open(options, 1).await
+    }
+
+    async fn open(options: SqliteConnectOptions, max_connections: u32) -> StorageResult<Self> {
+        let pool = open_pool(options, max_connections).await?;
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
@@ -55,6 +59,88 @@ impl SqliteStore {
         sqlx::migrate!("./migrations").run(&self.pool).await?;
         Ok(())
     }
+}
+
+fn encrypted_options(path: &str, key: &DatabaseKey) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("key", key.pragma_value())
+}
+
+async fn open_pool(
+    options: SqliteConnectOptions,
+    max_connections: u32,
+) -> StorageResult<SqlitePool> {
+    Ok(SqlitePoolOptions::new()
+        .max_connections(max_connections)
+        .connect_with(options)
+        .await?)
+}
+
+/// Upgrades a legacy plaintext SQLite database to SQLCipher in place.
+///
+/// The plaintext file is only removed after the encrypted copy has been
+/// exported and successfully reopened with the key.
+async fn migrate_plaintext_database(path: &str, key: &DatabaseKey) -> StorageResult<()> {
+    let path_ref = Path::new(path);
+    if !path_ref.exists() {
+        return Ok(());
+    }
+    let mut file = std::fs::File::open(path_ref)?;
+    let mut header = [0_u8; 16];
+    let read = file.read(&mut header)?;
+    drop(file);
+    if read != header.len() || &header != SQLITE_HEADER {
+        // Already encrypted, empty, or not a SQLite database.
+        return Ok(());
+    }
+
+    let encrypted_path = path_ref.with_extension(format!("sqlcipher-{}", Uuid::new_v4()));
+    let plaintext_pool = open_pool(
+        SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .foreign_keys(true),
+        1,
+    )
+    .await?;
+    // Include any committed pages that still live in the WAL file.
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&plaintext_pool)
+        .await?;
+    let escaped_path = encrypted_path.to_string_lossy().replace('\'', "''");
+    let attach = format!(
+        "ATTACH DATABASE '{escaped_path}' AS encrypted KEY \"x'{}'\";",
+        key.as_hex()
+    );
+    sqlx::query(&attach).execute(&plaintext_pool).await?;
+    sqlx::query("SELECT sqlcipher_export('encrypted');")
+        .execute(&plaintext_pool)
+        .await?;
+    sqlx::query("DETACH DATABASE encrypted;")
+        .execute(&plaintext_pool)
+        .await?;
+    plaintext_pool.close().await;
+
+    let encrypted_str = encrypted_path.to_str().ok_or_else(|| {
+        StorageError::InvalidData("encrypted database path is not valid UTF-8".into())
+    })?;
+    let verify_pool = open_pool(encrypted_options(encrypted_str, key), 1).await?;
+    let row = sqlx::query("SELECT count(*) AS tables FROM sqlite_master")
+        .fetch_one(&verify_pool)
+        .await?;
+    let _: i64 = row.try_get("tables")?;
+    verify_pool.close().await;
+
+    std::fs::remove_file(path_ref)?;
+    std::fs::rename(&encrypted_path, path_ref)?;
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+    Ok(())
 }
 
 fn row_to_product(row: &SqliteRow) -> StorageResult<Product> {

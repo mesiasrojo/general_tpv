@@ -117,6 +117,13 @@ pub trait SyncOutboxRepository: Send + Sync {
     async fn requeue_failed(&self, event_ids: &[uuid::Uuid]) -> Result<u64>;
 }
 
+#[async_trait]
+pub trait BackupRepository: Send + Sync {
+    /// Writes a consistent, encrypted copy of the local database and returns
+    /// the size of the resulting file.
+    async fn backup_to(&self, destination: &std::path::Path) -> Result<u64>;
+}
+
 pub trait TicketRenderer: Send + Sync {
     fn render_ticket(&self, document: &crate::dto::TicketDocument) -> Result<Vec<u8>>;
 }

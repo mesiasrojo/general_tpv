@@ -45,6 +45,7 @@
   let syncStatus = $state<SyncStatus | null>(null);
   let syncQuarantine = $state<QuarantinedEvent[]>([]);
   let syncBusy = $state(false);
+  let backupBusy = $state(false);
   let usersOpen = $state(false);
   let users = $state<UserAccount[]>([]);
   let stores = $state<Store[]>([]);
@@ -185,6 +186,19 @@
       message = String(error);
     } finally {
       syncBusy = false;
+    }
+  }
+
+  async function backupNow() {
+    if (backupBusy) return;
+    backupBusy = true;
+    try {
+      const backup = await api.backupNow();
+      message = `Backup cifrado creado: ${backup.path} (${backup.bytes} bytes)`;
+    } catch (error) {
+      message = String(error);
+    } finally {
+      backupBusy = false;
     }
   }
 
@@ -524,6 +538,16 @@
       <span class="badge online">OFFLINE-FIRST</span>
       <span class="badge">{session.user.display_name} · {roleLabel(session.user.role)}</span>
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
+      {#if session.user.role === 'admin' || session.user.role === 'manager'}
+        <button
+          class="icon"
+          type="button"
+          disabled={backupBusy}
+          onclick={() => void backupNow()}
+        >
+          {backupBusy ? 'Copiando…' : 'Backup'}
+        </button>
+      {/if}
       {#if session.user.role === 'admin'}
         <button class="icon" type="button" onclick={() => void openUsers()}>Usuarios</button>
       {/if}

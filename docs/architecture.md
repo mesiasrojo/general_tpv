@@ -54,7 +54,7 @@ La venta confirmada es inmutable. Cualquier corrección posterior debe ser devol
 
 ## 4. Persistencia
 
-Base local SQLite con WAL y migraciones embebidas:
+Base local **SQLCipher** (SQLite + AES-256) con WAL y migraciones embebidas:
 
 - `stores`, `registers`, `users`, `sellers`, `customers`, `products`.
 - `sales`, `sale_lines`, `payments`.
@@ -66,6 +66,8 @@ Base local SQLite con WAL y migraciones embebidas:
 - `audit_log` append-only.
 
 SQLite guarda enums como texto, UUID como TEXT, fechas RFC3339 y dinero como INTEGER de céntimos.
+
+La clave aleatoria de 256 bits se guarda en un fichero sidecar con permisos `0600` (`<base>.key` en CLI, `tpv.key` en el directorio de datos de Tauri). Al abrir una base antigua en texto plano se exporta a SQLCipher con `sqlcipher_export`, se verifica la copia cifrada y solo entonces se sustituye el original. Los backups se generan con `VACUUM INTO`, heredan la misma clave y pueden abrirse con `SqliteStore::connect` usando esa clave.
 
 ## 4.1 Impresión
 
@@ -177,10 +179,12 @@ Implementado:
 - Token bearer opcional en la central.
 - CORS y trazas HTTP.
 - Reintentos con backoff, cuarentena persistente y reintento manual.
+- SQLCipher con clave local de 256 bits y migración automática desde texto plano.
+- Backups cifrados consistentes desde CLI y UI, con la misma clave del terminal.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
-- SQLCipher y gestión de clave en keychain.
+- Mover la clave local del fichero `0600` al keychain del sistema.
 - Gestión de usuarios desde backoffice central.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
 - Enrolamiento y revocación de dispositivos en la central.
@@ -194,9 +198,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. SQLCipher y backups cifrados.
-2. Enrolamiento/revocación de dispositivos.
-3. Resolución de conflictos de maestros.
+1. Enrolamiento/revocación de dispositivos.
+2. Resolución de conflictos de maestros.
+3. Clave local en keychain del sistema.
 4. Adaptadores USB/serie y hardware-in-the-loop.
 5. Pruebas E2E Tauri.
 6. Gestión de usuarios desde el backoffice central.

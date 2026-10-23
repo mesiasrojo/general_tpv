@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use time::format_description::well_known::Rfc3339;
@@ -13,7 +14,7 @@ use tpv_domain::cash::CashCount;
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
-use tpv_storage_sqlite::SqliteStore;
+use tpv_storage_sqlite::{DatabaseKey, SqliteStore};
 use tpv_sync::{RetryPolicy, SyncClient, SyncWorker};
 
 #[tokio::main]
@@ -29,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut in_memory = false;
     let mut retry_failed = false;
     let mut sync_url = None;
+    let mut backup_path = None;
     let mut path = None;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -36,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--memory" => in_memory = true,
             "--retry-failed" => retry_failed = true,
             "--sync-url" => sync_url = iter.next().cloned(),
+            "--backup" => backup_path = iter.next().cloned(),
             other if other.starts_with("--") => {}
             other => {
                 if path.is_none() {
@@ -52,10 +55,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let store = if in_memory {
-        SqliteStore::in_memory().await?
+    let key_path = if in_memory {
+        None
     } else {
-        SqliteStore::connect(&path).await?
+        Some(format!("{path}.key"))
+    };
+    let key = match &key_path {
+        Some(key_path) => DatabaseKey::load_or_create(key_path)?,
+        None => DatabaseKey::generate(),
+    };
+    let store = if in_memory {
+        SqliteStore::in_memory_with_key(&key).await?
+    } else {
+        SqliteStore::connect(&path, &key).await?
     };
     let demo = store.seed_demo().await?;
     let store = Arc::new(store);
@@ -113,9 +125,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sync_service = SyncService::new(sync_repo.clone());
 
     println!(
-        "Base de datos: {}",
+        "Base de datos: {} (SQLCipher)",
         if in_memory { ":memory:" } else { &path }
     );
+    if let Some(key_path) = &key_path {
+        println!("Clave local: {key_path}");
+    }
     println!("Tienda: {}", demo.store_id);
     println!("Caja: {}", demo.register_id);
 
@@ -307,6 +322,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         println!("Usa --retry-failed para devolverlos a la cola.");
+    }
+
+    if let Some(backup_path) = backup_path {
+        let destination = Path::new(&backup_path);
+        let bytes = store.backup_to(destination).await?;
+        println!(
+            "\nBackup cifrado: {} ({bytes} bytes)",
+            destination.display()
+        );
     }
 
     println!("\nDemo completada.");

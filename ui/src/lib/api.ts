@@ -183,6 +183,11 @@ export interface SessionUser {
   started_at: string;
 }
 
+export interface BackupSummary {
+  path: string;
+  bytes: number;
+}
+
 export interface AppInfo {
   store_name: string;
   store_id: string;
@@ -296,7 +301,8 @@ export const api = {
     }),
   resetPassword: (userId: string, newPassword: string) =>
     invoke<void>('reset_password', { userId, newPassword }),
-  listStores: () => invoke<Store[]>('list_stores')
+  listStores: () => invoke<Store[]>('list_stores'),
+  backupNow: () => invoke<BackupSummary>('backup_now')
 };
 
 export function formatMoney(cents: MoneyCents): string {
