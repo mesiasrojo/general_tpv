@@ -11,14 +11,14 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Dominio puro Rust (ventas, IVA, pagos, cambio, caja, facturas, NIF, secuencias, auditoría, sync) | Implementado |
 | Persistencia SQLite + migraciones + seed | Implementado |
 | Casos de uso y puertos de aplicación | Implementado |
-| Servidor central Axum + sync push/pull idempotente | Implementado (ledger en memoria en esta primera rebanada) |
-| Cliente HTTP de sincronización | Implementado |
+| Servidor central Axum + PostgreSQL | Implementado (con fallback en memoria para desarrollo) |
+| Cliente HTTP + worker de sync con backoff | Implementado |
 | CLI de demostración end-to-end | Implementado |
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
 | Impresión ESC/POS + cola persistente | Implementado (renderer, fichero, directorio y red TCP) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo por intentos, roles y auditoría) |
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
-| SQLCipher, PostgreSQL persistente, USB/serie nativo | Pendiente de siguiente iteración |
+| SQLCipher, RBAC granular, USB/serie nativo | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 
@@ -32,11 +32,16 @@ Ejecuta: login con `admin` / `admin123`, apertura de caja, venta de 2 líneas, c
 
 ### 2. Central + sincronización
 
-Terminal A:
+Terminal A (PostgreSQL con Docker):
 
 ```bash
-TPV_CENTRAL_ADDR=127.0.0.1:8080 cargo run -p tpv-server
+docker compose up -d postgres
+DATABASE_URL=postgres://tpv:tpv@127.0.0.1:55432/tpv \
+TPV_CENTRAL_ADDR=127.0.0.1:8080 \
+cargo run -p tpv-server
 ```
+
+Sin `DATABASE_URL`, la central usa un ledger en memoria para desarrollo.
 
 Terminal B:
 
@@ -44,7 +49,7 @@ Terminal B:
 cargo run -p tpv-cli -- --memory --sync-url http://127.0.0.1:8080
 ```
 
-El CLI empuja los eventos del outbox y hace un pull de verificación. El servidor expone:
+El CLI empuja los eventos del outbox con reintentos y hace un pull de verificación. El servidor expone:
 
 - `GET /health`
 - `POST /api/v1/sync/push`
@@ -88,7 +93,7 @@ crates/tpv-storage-sqlite     Adaptadores SQLite y migraciones
 crates/tpv-sync               Cliente HTTP de sincronización
 crates/tpv-print              Renderer ESC/POS y adaptadores de impresora
 crates/tpv-auth               Hashing Argon2id
-crates/tpv-server             Central Axum
+crates/tpv-server             Central Axum + PostgreSQL/MemoryStore
 apps/cli                      Demo end-to-end
 apps/desktop/src-tauri        Cliente Tauri
 ui                            Interfaz Svelte 5 del TPV

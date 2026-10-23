@@ -1,10 +1,12 @@
 //! Central synchronization server.
 //!
-//! The first slice keeps the event ledger in memory. The HTTP contract is
-//! intentionally storage-agnostic so it can be backed by PostgreSQL without
-//! changing clients.
+//! The HTTP contract is storage-agnostic. PostgreSQL is used when
+//! `DATABASE_URL` is present; otherwise an in-memory ledger is used for local
+//! development and tests.
 
 #![forbid(unsafe_code)]
+
+mod store;
 
 use std::sync::Arc;
 
@@ -14,30 +16,20 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
+pub use store::{
+    CentralStore, MemoryStore, PostgresStore, PushStoreResult, StoreError, StoreHealth, StoredEvent,
+};
+
 #[derive(Clone)]
 pub struct AppState {
     token: Option<String>,
-    inner: Arc<RwLock<CentralLedger>>,
-}
-
-#[derive(Default)]
-struct CentralLedger {
-    events: Vec<StoredEvent>,
-    next_seq: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredEvent {
-    pub seq: u64,
-    pub event: SyncEvent,
-    pub received_at: time::OffsetDateTime,
+    store: Arc<dyn CentralStore>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,8 +67,8 @@ pub struct PullResponse {
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
-    pub events: usize,
-    pub cursor: u64,
+    pub events: i64,
+    pub cursor: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +96,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -121,10 +120,12 @@ impl IntoResponse for ApiError {
 impl AppState {
     #[must_use]
     pub fn new(token: Option<String>) -> Self {
-        Self {
-            token,
-            inner: Arc::new(RwLock::new(CentralLedger::default())),
-        }
+        Self::with_store(token, Arc::new(MemoryStore::new()))
+    }
+
+    #[must_use]
+    pub fn with_store(token: Option<String>, store: Arc<dyn CentralStore>) -> Self {
+        Self { token, store }
     }
 
     fn authorize(&self, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -159,13 +160,17 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let ledger = state.inner.read().await;
-    Json(HealthResponse {
+async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
+    let health = state
+        .store
+        .health()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(HealthResponse {
         status: "ok",
-        events: ledger.events.len(),
-        cursor: ledger.next_seq,
-    })
+        events: health.events,
+        cursor: health.cursor,
+    }))
 }
 
 async fn push(
@@ -186,40 +191,28 @@ async fn push(
             "batch contains an event from another device",
         ));
     }
-    let mut ledger = state.inner.write().await;
-    let mut accepted = Vec::new();
-    let mut duplicates = Vec::new();
     let mut rejected = Vec::new();
+    let mut valid = Vec::new();
     for event in request.events {
-        if !event.verify_hash() {
+        if event.verify_hash() {
+            valid.push(event);
+        } else {
             rejected.push(RejectedEvent {
                 event_id: event.event_id,
                 reason: "invalid envelope hash".into(),
             });
-            continue;
         }
-        if ledger
-            .events
-            .iter()
-            .any(|stored| stored.event.event_id == event.event_id)
-        {
-            duplicates.push(event.event_id);
-            continue;
-        }
-        ledger.next_seq += 1;
-        let seq = ledger.next_seq;
-        accepted.push(event.event_id);
-        ledger.events.push(StoredEvent {
-            seq,
-            event,
-            received_at: time::OffsetDateTime::now_utc(),
-        });
     }
+    let result: PushStoreResult = state
+        .store
+        .push(valid)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(PushResponse {
-        accepted,
-        duplicates,
+        accepted: result.accepted,
+        duplicates: result.duplicates,
         rejected,
-        cursor: ledger.next_seq,
+        cursor: result.cursor,
     }))
 }
 
@@ -230,18 +223,11 @@ async fn pull(
 ) -> Result<Json<PullResponse>, ApiError> {
     state.authorize(&headers)?;
     let cursor = query.cursor.unwrap_or(0);
-    let ledger = state.inner.read().await;
-    let events = ledger
-        .events
-        .iter()
-        .filter(|stored| stored.seq > cursor)
-        .filter(|stored| {
-            query
-                .store_id
-                .is_none_or(|store_id| stored.event.store_id.as_uuid() == store_id)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let events = state
+        .store
+        .pull(cursor, query.store_id, 1000)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let next_cursor = events.last().map_or(cursor, |stored| stored.seq);
     Ok(Json(PullResponse {
         events,
@@ -254,8 +240,12 @@ async fn list_events(
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredEvent>>, ApiError> {
     state.authorize(&headers)?;
-    let ledger = state.inner.read().await;
-    Ok(Json(ledger.events.clone()))
+    let events = state
+        .store
+        .list_events(1000)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(events))
 }
 
 async fn list_sales(
@@ -263,15 +253,12 @@ async fn list_sales(
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredEvent>>, ApiError> {
     state.authorize(&headers)?;
-    let ledger = state.inner.read().await;
-    Ok(Json(
-        ledger
-            .events
-            .iter()
-            .filter(|stored| stored.event.aggregate_type == "sale")
-            .cloned()
-            .collect(),
-    ))
+    let events = state
+        .store
+        .list_sales(1000)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(events))
 }
 
 #[cfg(test)]

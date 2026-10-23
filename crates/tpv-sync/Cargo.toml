@@ -11,5 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
+tpv-application = { path = "../tpv-application" }
 tpv-domain = { path = "../tpv-domain" }
 uuid.workspace = true

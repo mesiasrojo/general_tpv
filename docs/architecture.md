@@ -107,6 +107,21 @@ Roles: `admin`, `manager`, `cashier`, `auditor`. Los comandos de venta exigen `c
 ## 5. Sincronización
 
 ```text
+SyncWorker::push_pending
+  ├─ SyncOutboxRepository::pending_events
+  ├─ SyncClient::push
+  │    └─ reintentos con backoff exponencial (máx. 5 intentos)
+  └─ mark_events_sent (accepted + duplicates)
+
+Central
+  ├─ MemoryStore (desarrollo/tests)
+  └─ PostgresStore (DATABASE_URL)
+       ├─ migraciones embebidas
+       ├─ deduplicación por event_id (ON CONFLICT)
+       └─ cursor global por seq BIGSERIAL
+```
+
+```text
 outbox local → SyncClient::push → POST /api/v1/sync/push
                                       ├─ valida hash del sobre
                                       ├─ deduplica por event_id
@@ -118,7 +133,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - Lotes máximos de 100 eventos.
 - `event_id` UUIDv7 y deduplicación idempotente.
 - El hash del sobre es integridad técnica, **no** una cadena fiscal.
-- La central actual usa un ledger en memoria; el contrato HTTP está preparado para PostgreSQL.
+- La central usa PostgreSQL cuando existe `DATABASE_URL`; sin ella cae a un ledger en memoria para desarrollo y tests.
 
 ## 6. Central y backoffice
 
@@ -143,7 +158,7 @@ Pendiente para producción:
 - SQLCipher y gestión de clave en keychain.
 - RBAC granular por comando y gestión de usuarios desde backoffice.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
-- PostgreSQL persistente y migraciones centrales.
+- Enrolamiento y revocación de dispositivos en la central.
 - Reintentos con backoff, cuarentena y resolución de conflictos de maestros.
 - Firma de actualizaciones, SBOM y pipeline de release.
 - Pruebas hardware-in-the-loop y de carga.
@@ -154,9 +169,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. PostgreSQL central y migraciones.
-2. Worker de sync con backoff y estado visible en UI.
-3. SQLCipher y backups cifrados.
-4. RBAC granular y gestión de usuarios.
+1. Estado de sync visible en UI y consola de cuarentena.
+2. SQLCipher y backups cifrados.
+3. RBAC granular y gestión de usuarios.
+4. Enrolamiento/revocación de dispositivos.
 5. Adaptadores USB/serie y hardware-in-the-loop.
 6. Pruebas E2E Tauri.

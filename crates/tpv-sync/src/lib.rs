@@ -14,6 +14,9 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum SyncError {
+    #[error(transparent)]
+    Application(#[from] tpv_application::ApplicationError),
+
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -138,5 +141,122 @@ mod tests {
     fn trims_trailing_slashes() {
         let client = SyncClient::new("http://localhost:8080///", None);
         assert_eq!(client.base_url, "http://localhost:8080");
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay: std::time::Duration::from_millis(500),
+            max_delay: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+impl RetryPolicy {
+    #[must_use]
+    pub fn delay_for(&self, attempt: u32) -> std::time::Duration {
+        let exponent = attempt.saturating_sub(1).min(10);
+        let multiplier = 1u32 << exponent;
+        self.base_delay
+            .saturating_mul(multiplier)
+            .min(self.max_delay)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PushReport {
+    pub accepted: usize,
+    pub duplicates: usize,
+    pub rejected: usize,
+    pub attempts: u32,
+}
+
+pub struct SyncWorker {
+    client: SyncClient,
+    policy: RetryPolicy,
+}
+
+impl SyncWorker {
+    #[must_use]
+    pub fn new(client: SyncClient, policy: RetryPolicy) -> Self {
+        Self { client, policy }
+    }
+
+    pub async fn push_pending(
+        &self,
+        outbox: &dyn tpv_application::SyncOutboxRepository,
+        device_id: DeviceId,
+        batch_size: u32,
+    ) -> Result<PushReport, SyncError> {
+        let events = outbox.pending_events(batch_size).await?;
+        if events.is_empty() {
+            return Ok(PushReport {
+                accepted: 0,
+                duplicates: 0,
+                rejected: 0,
+                attempts: 0,
+            });
+        }
+        let mut attempt = 1;
+        loop {
+            match self.client.push(device_id, events.clone()).await {
+                Ok(response) => {
+                    let mut acknowledged = response.accepted.clone();
+                    acknowledged.extend(response.duplicates.iter().copied());
+                    outbox.mark_events_sent(&acknowledged).await?;
+                    return Ok(PushReport {
+                        accepted: response.accepted.len(),
+                        duplicates: response.duplicates.len(),
+                        rejected: response.rejected.len(),
+                        attempts: attempt,
+                    });
+                }
+                Err(error) if attempt < self.policy.max_attempts && is_retryable(&error) => {
+                    tokio::time::sleep(self.policy.delay_for(attempt)).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+fn is_retryable(error: &SyncError) -> bool {
+    match error {
+        SyncError::Http(error) => {
+            error.is_timeout()
+                || error.is_connect()
+                || error.status().is_none_or(|status| status.is_server_error())
+        }
+        SyncError::Rejected { status, .. } => *status >= 500,
+        SyncError::InvalidResponse(_) => false,
+        SyncError::Application(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_grows_and_is_capped() {
+        let policy = RetryPolicy {
+            max_attempts: 6,
+            base_delay: std::time::Duration::from_millis(100),
+            max_delay: std::time::Duration::from_millis(350),
+        };
+        assert_eq!(policy.delay_for(1), std::time::Duration::from_millis(100));
+        assert_eq!(policy.delay_for(2), std::time::Duration::from_millis(200));
+        assert_eq!(policy.delay_for(3), std::time::Duration::from_millis(350));
+        assert_eq!(policy.delay_for(10), std::time::Duration::from_millis(350));
     }
 }

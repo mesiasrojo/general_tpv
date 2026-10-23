@@ -15,7 +15,7 @@ use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::SqliteStore;
-use tpv_sync::SyncClient;
+use tpv_sync::{RetryPolicy, SyncClient, SyncWorker};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -261,20 +261,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(url) = sync_url {
         let client = SyncClient::new(url, std::env::var("TPV_CENTRAL_TOKEN").ok());
-        let pending = sync_repo.pending_events(100).await?;
-        if pending.is_empty() {
+        let worker = SyncWorker::new(client.clone(), RetryPolicy::default());
+        let report = worker
+            .push_pending(sync_repo.as_ref(), sync.device_id, 100)
+            .await?;
+        if report.attempts == 0 {
             println!("\nSync: no hay eventos pendientes.");
         } else {
-            let response = client.push(sync.device_id, pending).await?;
-            let mut acknowledged = response.accepted.clone();
-            acknowledged.extend(response.duplicates.iter().copied());
-            sync_repo.mark_events_sent(&acknowledged).await?;
             println!(
-                "\nSync: {} aceptados, {} duplicados, {} rechazados, cursor {}",
-                response.accepted.len(),
-                response.duplicates.len(),
-                response.rejected.len(),
-                response.cursor
+                "\nSync: {} aceptados, {} duplicados, {} rechazados, {} intento(s)",
+                report.accepted, report.duplicates, report.rejected, report.attempts
             );
         }
         let pulled = client.pull(0, Some(demo.store_id.as_uuid())).await?;
