@@ -143,7 +143,7 @@ async fn migrate_plaintext_database(path: &str, key: &DatabaseKey) -> StorageRes
     Ok(())
 }
 
-fn row_to_product(row: &SqliteRow) -> StorageResult<Product> {
+pub(crate) fn row_to_product(row: &SqliteRow) -> StorageResult<Product> {
     let tax_rate = TaxRate::new(
         row.try_get::<String, _>("tax_code")?,
         u32::try_from(row.try_get::<i64, _>("tax_percent_bp")?)

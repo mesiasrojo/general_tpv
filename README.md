@@ -25,6 +25,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
 | Edición de maestros en el TPV | Implementado (catálogo de productos, versión maestra y outbox) |
+| Importación CSV de artículos | Implementado (validación, previsualización, commit atómico e idempotencia) |
 | Clientes en el TPV | Implementado (alta/edición, NIF, selector de venta y sync maestro) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
@@ -118,6 +119,25 @@ cargo run -p tpv-cli -- data/tpv-backup.db --key-file data/tpv-key.export
 cargo run -p tpv-cli -- data/tpv.db --import-key data/tpv-key.export
 ```
 
+
+### Importación CSV de artículos
+
+La migración desde el sistema anterior se puede validar sin escribir nada y confirmar después en una única transacción:
+
+```bash
+# Simulación: valida el fichero y clasifica las filas sin tocar la base
+cargo run -p tpv-cli -- data/tpv.db --import-products articulos.csv \
+  --import-source micro_server --import-report informe.json
+
+# Confirmación atómica: o entra todo el fichero, o no entra ninguna fila
+cargo run -p tpv-cli -- data/tpv.db --import-products articulos.csv \
+  --import-source micro_server --import-commit
+```
+
+El fichero debe ser UTF-8 (BOM opcional). Se detecta el separador entre `;`, `,`, tabulador y `|`. Son obligatorias las columnas `source_id`, `sku`, `nombre`, `precio` e `iva`; se admiten alias habituales (`codigo`, `codigo_articulo`, `referencia`, `id_origen`, etc.) y columnas opcionales como `codigo_barras`, `familia`, `codigo_iva` y `activo`. Los importes aceptan coma o punto decimal y el IVA puede venir como porcentaje (`21`) o en puntos básicos (`2100`).
+
+`--import-batch` permite fijar el identificador del lote; si se omite se deriva del SHA-256 del contenido. La clave `(source_system, batch_id)` hace que repetir un lote sea idempotente, y `(source_system, source_id)` mantiene estable el producto local aunque cambie su SKU. Cualquier fila inválida bloquea la confirmación y se devuelve en el informe con su número de línea. En la app Tauri, el modal **Catálogo** incluye la sección **Migración CSV** con previsualización, confirmación y listado de errores.
+
 El servidor expone:
 
 - `GET /health`
@@ -198,7 +218,7 @@ npm run dev
 
 Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` y el resto de paquetes indicados en la sección de arranque). El crate `apps/desktop` está excluido del workspace principal, pero se compila y prueba desde `apps/desktop/src-tauri`.
 
-Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados.
+Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados y permite importar el catálogo heredado desde CSV.
 
 El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
 

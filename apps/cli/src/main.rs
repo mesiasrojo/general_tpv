@@ -6,18 +6,112 @@ use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
     InvoiceService, MasterDataRepository, MasterDataService, OpenCashRequest, PrintQueueRepository,
-    PrintService, SaleRepository, SaleService, SequenceRepository, StartSaleRequest,
-    SyncOutboxRepository, SyncService, SyncStatus, UserRepository,
+    PrintService, ProductImportReport, ProductImportRepository, ProductImportService,
+    SaleRepository, SaleService, SequenceRepository, StartSaleRequest, SyncOutboxRepository,
+    SyncService, SyncStatus, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
+use tpv_domain::ids::StoreId;
 use tpv_domain::master_data::{MasterDataChange, MasterDataKind};
 use tpv_domain::money::Money;
-use tpv_domain::people::UserProvision;
+use tpv_domain::people::{Store, UserProvision};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, apply_profile_defaults, build_printer, printer_profile};
 use tpv_storage_sqlite::{DatabaseKey, KeyStore, SqliteStore};
 use tpv_sync::{EnrollRequest, RetryPolicy, SyncClient, SyncWorker};
+
+async fn run_product_import(
+    store: &Arc<SqliteStore>,
+    csv_path: &str,
+    source_system: &str,
+    batch_id: Option<&str>,
+    commit: bool,
+    report_path: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(csv_path)?;
+    let content = String::from_utf8(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "el CSV debe estar codificado en UTF-8",
+        )
+    })?;
+    let catalog: Arc<dyn CatalogRepository> = store.clone();
+    let repository: Arc<dyn ProductImportRepository> = store.clone();
+    let service = ProductImportService::new(repository);
+    let plan = service.prepare(source_system, batch_id, &content)?;
+    let report = if commit && plan.is_valid() {
+        let store_id = ensure_import_store(&catalog).await?;
+        let context = store.sync_context().await?;
+        service.commit(&context, store_id, &plan).await?
+    } else if commit {
+        service.report(&plan, false)
+    } else {
+        service.preview(&plan).await?
+    };
+    print_import_report(&report);
+    if let Some(path) = report_path {
+        std::fs::write(path, serde_json::to_string_pretty(&report)?)?;
+        println!("Informe JSON escrito en {path}");
+    }
+    if report.has_errors() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "el CSV contiene filas con errores; no se ha aplicado nada",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn print_import_report(report: &ProductImportReport) {
+    println!(
+        "Importación {} · lote {}",
+        report.source_system, report.batch_id
+    );
+    println!(
+        "Filas: {} · válidas: {} · con error: {}",
+        report.total_rows, report.valid_rows, report.invalid_rows
+    );
+    println!(
+        "Nuevos: {} · actualizados: {} · sin cambios: {}",
+        report.inserted, report.updated, report.unchanged
+    );
+    if report.already_imported {
+        println!("El lote ya estaba confirmado; no se han duplicado datos.");
+    }
+    if !report.errors.is_empty() {
+        println!("Errores:");
+        for error in &report.errors {
+            let source = error
+                .source_id
+                .as_deref()
+                .map_or_else(|| "-".to_string(), str::to_string);
+            println!(
+                "  línea {} · origen {}: {}",
+                error.line, source, error.message
+            );
+        }
+    }
+    if report.committed {
+        println!("Importación confirmada.");
+    } else if report.dry_run && !report.has_errors() {
+        println!("Simulación correcta. Repite con --import-commit para aplicar.");
+    }
+}
+
+async fn ensure_import_store(
+    catalog: &Arc<dyn CatalogRepository>,
+) -> Result<StoreId, Box<dyn std::error::Error>> {
+    if let Some(store) = catalog.list_stores().await?.first() {
+        return Ok(store.id);
+    }
+    let store = Store::new(StoreId::new(), "BEN01", "100%SHOPPING", "B00000000")?;
+    let id = store.id;
+    catalog.save_store(&store).await?;
+    println!("Creada la tienda BEN01 para la importación.");
+    Ok(id)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,6 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut force_enroll = false;
     let mut master_data_demo = false;
     let mut list_users = false;
+    let mut import_products = None;
+    let mut import_source = "micro_server".to_string();
+    let mut import_batch = None;
+    let mut import_commit = false;
+    let mut import_report = None;
     let mut sync_url = None;
     let mut backup_path = None;
     let mut key_file = None;
@@ -54,6 +153,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--enroll" => force_enroll = true,
             "--master-data-demo" => master_data_demo = true,
             "--list-users" => list_users = true,
+            "--import-products" => import_products = iter.next().cloned(),
+            "--import-source" => import_source = iter.next().cloned().unwrap_or_default(),
+            "--import-batch" => import_batch = iter.next().cloned(),
+            "--import-commit" => import_commit = true,
+            "--import-report" => import_report = iter.next().cloned(),
             "--sync-url" => sync_url = iter.next().cloned(),
             "--backup" => backup_path = iter.next().cloned(),
             "--key-file" => key_file = iter.next().cloned(),
@@ -136,8 +240,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    let demo = store.seed_demo().await?;
     let store = Arc::new(store);
+    if let Some(import_path) = import_products {
+        return run_product_import(
+            &store,
+            &import_path,
+            &import_source,
+            import_batch.as_deref(),
+            import_commit,
+            import_report.as_deref(),
+        )
+        .await;
+    }
+    let demo = store.seed_demo().await?;
 
     let catalog_repo: Arc<dyn CatalogRepository> = store.clone();
     let sale_repo: Arc<dyn SaleRepository> = store.clone();

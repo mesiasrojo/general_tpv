@@ -12,11 +12,12 @@ use tpv_application::{
     CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
     CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, CustomerService, InvoiceLineSelection,
     InvoiceRepository, InvoiceService, MasterDataRepository, MasterDataService, OpenCashRequest,
-    PrintQueueRepository, PrintService, PrinterPort, ProductService, QuarantinedEvent,
-    RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository,
-    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
-    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UpsertCustomerRequest,
-    UpsertProductRequest, UserRepository,
+    PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
+    ProductImportService, ProductService, QuarantinedEvent, RectifyInvoiceLinesRequest,
+    RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
+    SequenceRepository, SessionUser, StartSaleRequest, SyncContext, SyncOutboxRepository,
+    SyncService, SyncStatus, UpdateUserRequest, UpsertCustomerRequest, UpsertProductRequest,
+    UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -56,6 +57,7 @@ struct AppState {
     users: Arc<dyn UserRepository>,
     master_data: MasterDataService,
     products: ProductService,
+    imports: ProductImportService,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -804,6 +806,46 @@ async fn save_product(
 }
 
 #[tauri::command]
+async fn preview_product_import(
+    state: State<'_, AppState>,
+    source_system: String,
+    batch_id: Option<String>,
+    csv: String,
+) -> Result<ProductImportReport, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let plan = state
+        .imports
+        .prepare(&source_system, batch_id.as_deref(), &csv)
+        .map_err(|error| error.to_string())?;
+    state
+        .imports
+        .preview(&plan)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn commit_product_import(
+    state: State<'_, AppState>,
+    source_system: String,
+    batch_id: Option<String>,
+    csv: String,
+) -> Result<ProductImportReport, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let plan = state
+        .imports
+        .prepare(&source_system, batch_id.as_deref(), &csv)
+        .map_err(|error| error.to_string())?;
+    state
+        .imports
+        .commit(&state.sync_ctx, state.demo.store_id, &plan)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn list_master_data_conflicts(
     state: State<'_, AppState>,
     limit: Option<u32>,
@@ -1028,6 +1070,7 @@ async fn build_app_state(
     let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
     let backup_repo: Arc<dyn BackupRepository> = store.clone();
     let master_data_repo: Arc<dyn MasterDataRepository> = store.clone();
+    let import_repo: Arc<dyn ProductImportRepository> = store.clone();
     let tickets_dir = data_dir.join("tickets");
     let backup_dir = data_dir.join("backups");
     std::fs::create_dir_all(&tickets_dir)?;
@@ -1082,6 +1125,7 @@ async fn build_app_state(
     let backup_service = BackupService::new(backup_repo);
     let master_data = MasterDataService::new(master_data_repo, clock.clone());
     let products = ProductService::new(catalog_repo.clone(), master_data.clone());
+    let imports = ProductImportService::new(import_repo);
     let customers = CustomerService::new(catalog_repo, master_data.clone());
     let auth = AuthService::new(
         user_repo.clone(),
@@ -1111,6 +1155,7 @@ async fn build_app_state(
         users: user_repo,
         master_data,
         products,
+        imports,
         sync_lock: Arc::new(tokio::sync::Mutex::new(())),
     })
 }
@@ -1200,6 +1245,8 @@ fn main() {
             list_stores,
             list_products,
             save_product,
+            preview_product_import,
+            commit_product_import,
             list_customers,
             save_customer,
             list_master_data_conflicts,
@@ -1291,6 +1338,8 @@ mod e2e_tests {
                 list_stores,
                 list_products,
                 save_product,
+                preview_product_import,
+                commit_product_import,
                 list_customers,
                 save_customer,
                 list_master_data_conflicts,
@@ -1561,6 +1610,63 @@ mod e2e_tests {
         .expect("update product");
         assert_eq!(updated["name"], "Producto UI actualizado");
         assert_eq!(updated["unit_price"], "10.95");
+
+        let import_csv = "source_id,sku,name,unit_price,tax_percent_bp\n\
+                          legacy-1,IMP-1,Producto importado,3.25,2100\n";
+        let preview = invoke(
+            &webview,
+            "preview_product_import",
+            json!({
+                "sourceSystem": "legacy",
+                "batchId": null,
+                "csv": import_csv
+            }),
+        )
+        .expect("preview product import");
+        assert_eq!(preview["valid_rows"], 1);
+        assert_eq!(preview["inserted"], 1);
+        assert_eq!(preview["committed"], false);
+
+        let imported = invoke(
+            &webview,
+            "commit_product_import",
+            json!({
+                "sourceSystem": "legacy",
+                "batchId": null,
+                "csv": import_csv
+            }),
+        )
+        .expect("commit product import");
+        assert_eq!(imported["committed"], true);
+        assert_eq!(imported["inserted"], 1);
+        assert_eq!(
+            imported["inserted"].as_u64().unwrap_or(0)
+                + imported["updated"].as_u64().unwrap_or(0)
+                + imported["unchanged"].as_u64().unwrap_or(0),
+            imported["valid_rows"].as_u64().unwrap_or(0)
+        );
+
+        let replay = invoke(
+            &webview,
+            "commit_product_import",
+            json!({
+                "sourceSystem": "legacy",
+                "batchId": null,
+                "csv": import_csv
+            }),
+        )
+        .expect("replay product import");
+        assert_eq!(replay["already_imported"], true);
+        assert_eq!(replay["inserted"], 1);
+
+        let products = invoke(&webview, "list_products", json!({})).expect("imported products");
+        assert!(
+            products
+                .as_array()
+                .expect("products array")
+                .iter()
+                .any(|item| item["sku"] == "IMP-1")
+        );
 
         let backup = invoke(&webview, "backup_now", json!({})).expect("backup");
         assert!(backup["bytes"].as_u64().unwrap_or(0) > 0);

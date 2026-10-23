@@ -9,6 +9,7 @@ mod db_key;
 mod error;
 mod helpers;
 mod identity;
+mod import;
 mod key_store;
 mod master_data;
 mod persistence;

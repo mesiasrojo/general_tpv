@@ -15,6 +15,7 @@
     type MasterDataConflict,
     type PaymentMethod,
     type Product,
+    type ProductImportReport,
     type ProductSearchResult,
     type PrintSummary,
     type QuarantinedEvent,
@@ -106,6 +107,14 @@
   let productTaxCode = $state('IVA21');
   let productTaxPercentBp = $state(2100);
   let productActive = $state(true);
+  let importSourceSystem = $state('micro_server');
+  let importBatchId = $state('');
+  let importFileName = $state('');
+  let importCsv = $state('');
+  let importReport = $state<ProductImportReport | null>(null);
+  let importError = $state('');
+  let importBusy = $state(false);
+  let importInput = $state<HTMLInputElement>();
 
   let change = $derived(Math.max(0, receivedCents - amountCents));
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
@@ -536,6 +545,86 @@
     } finally {
       catalogBusy = false;
     }
+  }
+
+
+  async function selectImportFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    importFileName = file.name;
+    importError = '';
+    importReport = null;
+    try {
+      importCsv = await file.text();
+      await previewImport();
+    } catch (error) {
+      importError = `No se pudo leer el fichero: ${String(error)}`;
+    }
+  }
+
+  async function previewImport() {
+    if (importBusy) return;
+    importError = '';
+    if (!importCsv.trim()) {
+      importError = 'Selecciona un fichero CSV.';
+      return;
+    }
+    if (!importSourceSystem.trim()) {
+      importError = 'Indica el sistema de origen.';
+      return;
+    }
+    importBusy = true;
+    try {
+      importReport = await api.previewProductImport(
+        importSourceSystem.trim(),
+        importBatchId.trim() || null,
+        importCsv
+      );
+    } catch (error) {
+      importError = String(error);
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  async function commitImport() {
+    if (importBusy || !importReport) return;
+    importError = '';
+    importBusy = true;
+    try {
+      const report = await api.commitProductImport(
+        importSourceSystem.trim(),
+        importBatchId.trim() || null,
+        importCsv
+      );
+      importReport = report;
+      if (report.committed) {
+        message = report.already_imported
+          ? `Lote ${report.batch_id} ya importado; no se han duplicado datos.`
+          : `Importación confirmada: ${report.inserted} nuevos, ${report.updated} actualizados.`;
+        await refreshCatalog();
+        try {
+          info = await api.bootstrap();
+        } catch {
+          // The catalogue is already refreshed; a bootstrap race must not hide
+          // the successful import report.
+        }
+      }
+    } catch (error) {
+      importError = String(error);
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  function resetImport() {
+    importCsv = '';
+    importFileName = '';
+    importBatchId = '';
+    importReport = null;
+    importError = '';
+    if (importInput) importInput.value = '';
   }
 
   async function createUser() {
@@ -1685,6 +1774,99 @@
             {/each}
           {/if}
         </div>
+
+        <div class="import-panel">
+          <p class="eyebrow">MIGRACIÓN CSV</p>
+          <p class="muted small">
+            Obligatorias: source_id, sku, nombre, precio e IVA. Opcionales: código de barras,
+            familia, código fiscal y activo. Se admite coma decimal y separadores ; , tabulador o |.
+          </p>
+          <div class="import-grid">
+            <label class="field">
+              <span>Sistema de origen</span>
+              <input bind:value={importSourceSystem} autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Lote (opcional)</span>
+              <input bind:value={importBatchId} placeholder="Se calcula del contenido" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Fichero CSV</span>
+              <input
+                bind:this={importInput}
+                type="file"
+                accept=".csv,text/csv"
+                onchange={selectImportFile}
+              />
+            </label>
+            <div class="field">
+              <span>Acciones</span>
+              <div class="import-actions">
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={importBusy || !importCsv}
+                  onclick={() => void previewImport()}
+                >
+                  {importBusy ? 'Procesando…' : 'Previsualizar'}
+                </button>
+                <button
+                  class="primary"
+                  type="button"
+                  disabled={importBusy ||
+                    !importReport ||
+                    importReport.invalid_rows > 0 ||
+                    importReport.committed}
+                  onclick={() => void commitImport()}
+                >
+                  Confirmar importación
+                </button>
+                <button class="secondary" type="button" disabled={importBusy} onclick={resetImport}>
+                  Limpiar
+                </button>
+              </div>
+            </div>
+          </div>
+          {#if importFileName}
+            <p class="muted small mono">{importFileName}</p>
+          {/if}
+          {#if importError}
+            <p class="error" role="alert">{importError}</p>
+          {/if}
+          {#if importReport}
+            <div class="import-report">
+              <div class="import-summary">
+                <span class="badge">Lote {importReport.batch_id}</span>
+                <span class="muted small">
+                  {importReport.total_rows} fila(s) · {importReport.valid_rows} válida(s) · {importReport.invalid_rows} con error
+                </span>
+              </div>
+              <p class="small">
+                Nuevos: <strong>{importReport.inserted}</strong> · Actualizados: <strong>{importReport.updated}</strong>
+                · Sin cambios: <strong>{importReport.unchanged}</strong>
+              </p>
+              {#if importReport.already_imported}
+                <p class="muted small">
+                  Este lote ya estaba confirmado; no se han duplicado datos.
+                </p>
+              {/if}
+              {#if importReport.errors.length > 0}
+                <ul class="import-errors">
+                  {#each importReport.errors as error}
+                    <li>
+                      Línea {error.line}{error.source_id ? ` · ${error.source_id}` : ''}: {error.message}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if importReport.committed}
+                <p><span class="badge ok">IMPORTACIÓN CONFIRMADA</span></p>
+              {:else}
+                <p class="muted small">Simulación: todavía no se ha escrito nada.</p>
+              {/if}
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
   {/if}
@@ -2521,6 +2703,64 @@
     padding: 6px 0;
   }
 
+  .import-panel {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+
+  .import-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    align-items: end;
+    margin: 10px 0;
+  }
+
+  .import-grid .field {
+    margin: 0;
+    min-width: 0;
+  }
+
+  .import-grid input[type='file'] {
+    padding: 6px;
+    font-size: 0.82rem;
+  }
+
+  .import-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .import-report {
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .import-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .import-errors {
+    margin: 8px 0 0;
+    padding-left: 20px;
+    color: var(--danger-text);
+    font-size: 0.82rem;
+  }
+
+  .badge.ok {
+    background: var(--success-soft);
+    color: var(--success);
+    border-color: var(--success-border);
+  }
+
   .modal-heading {
     display: flex;
     justify-content: space-between;
@@ -2640,6 +2880,10 @@
 
     .product-actions {
       grid-column: 1 / -1;
+    }
+
+    .import-grid {
+      grid-template-columns: 1fr;
     }
 
     .customer-picker,

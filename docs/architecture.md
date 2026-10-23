@@ -67,6 +67,7 @@ Base local **SQLCipher** (SQLite + AES-256) con WAL y migraciones embebidas:
 - `cash_sessions` con movimientos, cierres y reaperturas en JSON.
 - Los movimientos de caja admiten gasto, retirada e ingreso; cada uno exige importe positivo y motivo.
 - `sync_outbox` con el sobre completo del evento.
+- `product_import_batches` y `product_import_sources` para lotes CSV idempotentes y el mapeo `source_id` → producto local.
 - `local_identity` con el tenant y dispositivo estables del terminal.
 - `audit_log` append-only.
 
@@ -189,6 +190,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - La central mantiene `central_master_data` por tenant/tienda/tipo/entidad; las versiones antiguas se ignoran y las divergencias con la misma versión se registran en `central_master_conflicts`.
 - La copia local aplica la misma política; `GET /api/v1/master-data/conflicts` expone los conflictos auditados.
 - Los maestros de producto y cliente se persisten en el catálogo local al publicar o aplicar un cambio; las bajas se propagan como entidad inactiva.
+- La importación CSV de artículos valida en la capa de aplicación (UTF-8/BOM, separador, alias de cabeceras, coma decimal e IVA en porcentaje o puntos básicos) y concentra el commit en una transacción SQLite. El lote se identifica por `(source_system, batch_id)` derivado del SHA-256 del contenido si no se indica; `(source_system, source_id)` conserva la identidad del producto aunque cambie el SKU. Solo las filas nuevas o modificadas emiten `master_data.upsert` y eventos de outbox; una fila inválida impide toda escritura y se devuelve con su línea en el informe.
 - Los usuarios centrales generan `user.provisioned` con el hash Argon2id y una revisión monotónica. El terminal los aplica con `upsert_provisioned`, ignora revisiones antiguas y limpia bloqueos al cambiar la contraseña.
 - Una cuenta desactivada centralmente se propaga al terminal y el login local devuelve `usuario desactivado`.
 - Un evento rechazado o agotado se marca en `sync_outbox` con `failed_at`, `attempts` y `last_error`; deja de bloquear la cola y aparece en la consola de cuarentena.
@@ -222,6 +224,7 @@ Implementado:
 - Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC`, gasto de caja automático para efectivo y referencia obligatoria del justificante para tarjeta.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
+- Importación CSV de artículos con previsualización, informe de errores, commit transaccional e idempotencia por lote y por identificador de origen.
 - Clientes editables desde la UI, selector de cliente en la venta, validación de NIF y sincronización maestra.
 - Temas compartidos `light_theme` (por defecto, blanco y azul) y `dark_theme`, con selector persistido en `localStorage`.
 - Protección del último administrador activo y de la propia cuenta.

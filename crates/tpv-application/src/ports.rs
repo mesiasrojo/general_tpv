@@ -13,6 +13,7 @@ use tpv_domain::sale::Sale;
 use tpv_domain::sync::SyncEvent;
 
 use crate::error::Result;
+use crate::import::{ProductImportPreview, ProductImportRow};
 
 /// Deterministic clock port. Tests can supply a fixed implementation.
 pub trait Clock: Send + Sync {
@@ -123,6 +124,29 @@ pub trait BackupRepository: Send + Sync {
     /// Writes a consistent, encrypted copy of the local database and returns
     /// the size of the resulting file.
     async fn backup_to(&self, destination: &std::path::Path) -> Result<u64>;
+}
+
+#[async_trait]
+pub trait ProductImportRepository: Send + Sync {
+    /// Classifies rows against the local catalogue and checks whether the batch
+    /// was already committed.
+    async fn preview_import(
+        &self,
+        source_system: &str,
+        batch_id: &str,
+        rows: &[ProductImportRow],
+    ) -> Result<ProductImportPreview>;
+
+    /// Applies every row, records the batch and publishes master-data events in
+    /// a single transaction. Replaying a committed batch is a no-op.
+    async fn commit_import(
+        &self,
+        context: &crate::dto::SyncContext,
+        store_id: StoreId,
+        source_system: &str,
+        batch_id: &str,
+        rows: &[ProductImportRow],
+    ) -> Result<ProductImportPreview>;
 }
 
 #[async_trait]

@@ -51,6 +51,27 @@ export interface SaveProductRequest {
   active: boolean;
 }
 
+export interface ProductImportError {
+  line: number;
+  source_id: string | null;
+  message: string;
+}
+
+export interface ProductImportReport {
+  source_system: string;
+  batch_id: string;
+  dry_run: boolean;
+  committed: boolean;
+  already_imported: boolean;
+  total_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  errors: ProductImportError[];
+}
+
 export interface Customer {
   id: string;
   first_name: string;
@@ -341,6 +362,10 @@ export const api = {
   searchProducts: (query: string) => invoke<ProductSearchResult[]>('search_products', { query }),
   listProducts: () => invoke<Product[]>('list_products'),
   saveProduct: (request: SaveProductRequest) => invoke<Product>('save_product', { request }),
+  previewProductImport: (sourceSystem: string, batchId: string | null, csv: string) =>
+    invoke<ProductImportReport>('preview_product_import', { sourceSystem, batchId, csv }),
+  commitProductImport: (sourceSystem: string, batchId: string | null, csv: string) =>
+    invoke<ProductImportReport>('commit_product_import', { sourceSystem, batchId, csv }),
   listCustomers: () => invoke<Customer[]>('list_customers'),
   saveCustomer: (request: SaveCustomerRequest) =>
     invoke<Customer>('save_customer', { request }),

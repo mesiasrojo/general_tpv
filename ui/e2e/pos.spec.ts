@@ -468,6 +468,36 @@ test.describe('TPV desktop UI', () => {
               }
               return saved;
             }
+            case 'preview_product_import':
+              return {
+                source_system: String(args.sourceSystem),
+                batch_id: 'e2e-batch',
+                dry_run: true,
+                committed: false,
+                already_imported: false,
+                total_rows: 2,
+                valid_rows: 2,
+                invalid_rows: 0,
+                inserted: 1,
+                updated: 1,
+                unchanged: 0,
+                errors: []
+              };
+            case 'commit_product_import':
+              return {
+                source_system: String(args.sourceSystem),
+                batch_id: 'e2e-batch',
+                dry_run: false,
+                committed: true,
+                already_imported: false,
+                total_rows: 2,
+                valid_rows: 2,
+                invalid_rows: 0,
+                inserted: 1,
+                updated: 1,
+                unchanged: 0,
+                errors: []
+              };
             case 'start_sale':
               return api.start_sale(args.customerId ? String(args.customerId) : undefined);
             case 'add_line':
@@ -565,6 +595,21 @@ test.describe('TPV desktop UI', () => {
     await page.getByLabel('Nombre').fill('Producto E2E editado');
     await page.getByRole('button', { name: 'Guardar producto' }).click();
     await expect(page.locator('.product-row', { hasText: 'Producto E2E editado' })).toBeVisible();
+
+    await page.getByLabel('Fichero CSV').setInputFiles({
+      name: 'productos.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from(
+        'source_id,sku,name,unit_price,tax_percent_bp\nlegacy-1,IMP-1,Importado,2.00,2100\n'
+      )
+    });
+    await expect(page.getByText('Lote e2e-batch')).toBeVisible();
+    await expect(page.getByText('Simulación: todavía no se ha escrito nada.')).toBeVisible();
+    await page.getByRole('button', { name: 'Confirmar importación' }).click();
+    await expect(page.getByText('IMPORTACIÓN CONFIRMADA', { exact: true })).toBeVisible();
+    await expect(
+      page.getByText('Importación confirmada: 1 nuevos, 1 actualizados.')
+    ).toBeVisible();
     await page.getByRole('dialog', { name: 'Catálogo' }).getByRole('button', { name: 'Esc' }).click();
     await page.getByRole('button', { name: 'Usuarios' }).click();
     const usersDialog = page.getByRole('dialog', { name: 'Gestión de usuarios' });

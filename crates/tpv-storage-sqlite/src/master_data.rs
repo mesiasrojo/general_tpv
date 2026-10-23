@@ -18,7 +18,7 @@ use crate::helpers::{
 use crate::persistence::enqueue_event_tx;
 use crate::store::SqliteStore;
 
-async fn read_master_change_tx(
+pub(crate) async fn read_master_change_tx(
     tx: &mut Transaction<'_, Sqlite>,
     tenant_id: TenantId,
     store_id: StoreId,
@@ -42,7 +42,7 @@ async fn read_master_change_tx(
     .transpose()
 }
 
-async fn upsert_master_change_tx(
+pub(crate) async fn upsert_master_change_tx(
     tx: &mut Transaction<'_, Sqlite>,
     tenant_id: TenantId,
     store_id: StoreId,
