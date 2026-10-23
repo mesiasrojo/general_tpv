@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use time::format_description::well_known::Rfc3339;
 use tpv_application::{
-    AddLineRequest, ApplyPaymentRequest, CashRepository, CashService, CatalogRepository,
-    CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService,
-    OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository, SaleService,
-    SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository,
+    AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
+    CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
+    InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository,
+    SaleService, SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository,
+    UserRepository,
 };
+use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
 use tpv_domain::ids::{DeviceId, TenantId};
 use tpv_domain::money::Money;
@@ -62,11 +64,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
     let sync_repo: Arc<dyn SyncOutboxRepository> = store.clone();
     let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
+    let user_repo: Arc<dyn UserRepository> = store.clone();
+    let audit_repo: Arc<dyn AuditRepository> = store.clone();
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
     let sync = SyncContext {
         tenant_id: TenantId::new(),
         device_id: DeviceId::new(),
     };
+
+    let auth = AuthService::new(
+        user_repo,
+        Arc::new(Argon2PasswordHasher),
+        audit_repo,
+        clock.clone(),
+    );
+    auth.bootstrap_password("admin", "admin123").await?;
+    let session = auth.login("admin", "admin123").await?;
+    println!(
+        "Sesión iniciada: {} ({:?}) · {}",
+        session.user.display_name, session.user.role, session.session_id
+    );
 
     let sale_service = SaleService::new(
         sale_repo.clone(),
@@ -105,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(OpenCashRequest {
             store_id: demo.store_id,
             register_id: demo.register_id,
-            opened_by: demo.user_id,
+            opened_by: session.user.id,
             opening_float_cents: 10_000,
         })
         .await?;
@@ -220,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let close = cash_service
         .close(CloseCashRequest {
             session_id: cash.id,
-            closed_by: demo.user_id,
+            closed_by: session.user.id,
             counted: CashCount::new(counted_cash, Money::ZERO, Money::ZERO),
         })
         .await?;

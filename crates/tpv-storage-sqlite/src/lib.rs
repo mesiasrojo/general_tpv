@@ -12,6 +12,7 @@ mod sales;
 mod seed;
 mod store;
 mod sync_outbox;
+mod users;
 
 pub use error::{StorageError, StorageResult};
 pub use seed::DemoData;

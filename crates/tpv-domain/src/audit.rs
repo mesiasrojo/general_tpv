@@ -9,7 +9,10 @@ use crate::ids::{AuditEventId, StoreId, UserId};
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
     Login,
+    LoginFailed,
     Logout,
+    UserCreated,
+    PasswordChanged,
     SaleConfirmed,
     SaleCancelled,
     InvoiceIssued,

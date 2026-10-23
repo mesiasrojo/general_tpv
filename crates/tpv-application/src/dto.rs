@@ -264,3 +264,10 @@ pub struct PrintResult {
     pub success: bool,
     pub error: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionUser {
+    pub session_id: uuid::Uuid,
+    pub user: tpv_domain::people::UserAccount,
+    pub started_at: time::OffsetDateTime,
+}

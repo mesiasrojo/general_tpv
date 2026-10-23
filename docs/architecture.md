@@ -11,6 +11,7 @@ Este documento describe la primera rebanada vertical implementada del plan v2. E
 - `tpv-storage-sqlite`: adaptador de persistencia.
 - `tpv-sync`: cliente HTTP de sincronización.
 - `tpv-print`: renderer ESC/POS y adaptadores de impresora.
+- `tpv-auth`: hashing Argon2id.
 - `tpv-server`: central Axum.
 - `apps/desktop`: shell Tauri y comandos IPC.
 - `ui`: Svelte 5, sin lógica de negocio.
@@ -85,6 +86,24 @@ PrintService::process_pending
 
 El ticket incluye cabecera de tienda, vendedor, cliente, líneas, desglose de IVA, total, entregado, cambio, pie legal, corte y pulso de cajón. La reimpresión se marca como "COPIA". La cola es persistente: si la impresora falla, el trabajo queda en estado `failed` y puede reintentarse.
 
+## 4.2 Autenticación y RBAC
+
+```text
+login(username, password)
+  └─ AuthService::login
+       ├─ UserRepository::find_by_username
+       ├─ Argon2PasswordHasher::verify
+       ├─ bloqueo tras 5 intentos durante 15 minutos
+       ├─ UserRepository::record_login
+       └─ AuditRepository::append (login / login_failed)
+
+Comandos Tauri protegidos
+  └─ require_session / require_sell
+       └─ AppState.session (RwLock<Option<SessionUser>>)
+```
+
+Roles: `admin`, `manager`, `cashier`, `auditor`. Los comandos de venta exigen `can_sell`; las operaciones sensibles están preparadas para exigir permisos específicos. Las contraseñas se almacenan como hashes Argon2id con sal; nunca en texto plano.
+
 ## 5. Sincronización
 
 ```text
@@ -113,6 +132,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 Implementado:
 - `#![forbid(unsafe_code)]` en las crates de lógica.
 - Renderer ESC/POS probado con vectores de bytes y cola persistente.
+- Login local con Argon2id, bloqueo por intentos, roles y auditoría.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.
 - Token bearer opcional en la central.
@@ -121,7 +141,7 @@ Implementado:
 
 Pendiente para producción:
 - SQLCipher y gestión de clave en keychain.
-- Autenticación Argon2id y RBAC completo.
+- RBAC granular por comando y gestión de usuarios desde backoffice.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
 - PostgreSQL persistente y migraciones centrales.
 - Reintentos con backoff, cuarentena y resolución de conflictos de maestros.
@@ -134,9 +154,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Autenticación y RBAC con Argon2id.
-2. PostgreSQL central y migraciones.
-3. Worker de sync con backoff y estado visible en UI.
-4. SQLCipher y backups cifrados.
+1. PostgreSQL central y migraciones.
+2. Worker de sync con backoff y estado visible en UI.
+3. SQLCipher y backups cifrados.
+4. RBAC granular y gestión de usuarios.
 5. Adaptadores USB/serie y hardware-in-the-loop.
 6. Pruebas E2E Tauri.

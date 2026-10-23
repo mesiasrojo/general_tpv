@@ -20,3 +20,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 tpv-print = { path = "../tpv-print" }
+
+tpv-auth = { path = "../tpv-auth" }

@@ -17,6 +17,12 @@ pub enum ApplicationError {
     #[error("validation error: {0}")]
     Validation(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
+
     #[error("repository error: {0}")]
     Repository(String),
 

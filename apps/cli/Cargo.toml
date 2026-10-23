@@ -15,6 +15,7 @@ serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 tpv-application = { path = "../../crates/tpv-application" }
+tpv-auth = { path = "../../crates/tpv-auth" }
 tpv-domain = { path = "../../crates/tpv-domain" }
 tpv-print = { path = "../../crates/tpv-print" }
 tpv-storage-sqlite = { path = "../../crates/tpv-storage-sqlite" }

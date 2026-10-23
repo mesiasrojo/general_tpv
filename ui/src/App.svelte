@@ -13,9 +13,15 @@
     type Product,
     type ProductSearchResult,
     type PrintSummary,
-    type SaleView
+    type SaleView,
+    type SessionUser
   } from './lib/api';
 
+  let session = $state<SessionUser | null>(null);
+  let loginUsername = $state('admin');
+  let loginPassword = $state('admin123');
+  let loginError = $state('');
+  let loggingIn = $state(false);
   let info = $state<AppInfo | null>(null);
   let sale = $state<SaleView | null>(null);
   let query = $state('');
@@ -36,8 +42,68 @@
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
 
   onMount(() => {
-    void load();
+    void restoreSession();
   });
+
+  async function restoreSession() {
+    try {
+      const current = await api.currentUser();
+      if (current) {
+        session = current;
+        await load();
+      } else {
+        message = 'Introduce tus credenciales para abrir la caja.';
+      }
+    } catch (error) {
+      message = String(error);
+    }
+  }
+
+  async function login() {
+    loggingIn = true;
+    loginError = '';
+    try {
+      session = await api.login(loginUsername, loginPassword);
+      loginPassword = '';
+      await load();
+    } catch (error) {
+      loginError = String(error);
+    } finally {
+      loggingIn = false;
+    }
+  }
+
+  async function logout() {
+    try {
+      await api.logout();
+    } catch {
+      // The local session is cleared even if the central audit is unavailable.
+    }
+    session = null;
+    info = null;
+    sale = null;
+    cash = null;
+    invoice = null;
+    printSummary = null;
+    results = [];
+    lastSales = [];
+    message = 'Sesión cerrada.';
+  }
+
+  function roleLabel(role: string): string {
+    switch (role) {
+      case 'admin':
+        return 'Administrador';
+      case 'manager':
+        return 'Responsable';
+      case 'cashier':
+        return 'Cajero';
+      case 'auditor':
+        return 'Auditor';
+      default:
+        return role;
+    }
+  }
 
   async function load() {
     try {
@@ -249,6 +315,32 @@
 
 <svelte:window onkeydown={onKeyDown} />
 
+{#if !session}
+  <main class="shell login-shell">
+    <section class="panel login-card">
+      <p class="eyebrow">GENERAL TPV · ACCESO</p>
+      <h1>Identifícate</h1>
+      <p class="muted">Cada venta y movimiento de caja queda a nombre del operador.</p>
+      <form onsubmit={(event) => { event.preventDefault(); void login(); }}>
+        <label class="field">
+          <span>Usuario</span>
+          <input bind:value={loginUsername} autocomplete="username" />
+        </label>
+        <label class="field">
+          <span>Contraseña</span>
+          <input bind:value={loginPassword} type="password" autocomplete="current-password" />
+        </label>
+        {#if loginError}
+          <p class="error" role="alert">{loginError}</p>
+        {/if}
+        <button class="primary full" type="submit" disabled={loggingIn}>
+          {loggingIn ? 'Comprobando…' : 'Entrar'}
+        </button>
+      </form>
+      <p class="muted small demo-hint">Demo local: admin / admin123</p>
+    </section>
+  </main>
+{:else}
 <main class="shell">
   <header class="topbar">
     <div>
@@ -258,7 +350,9 @@
     <div class="topbar-meta">
       <span class="badge">CAJA 1</span>
       <span class="badge online">OFFLINE-FIRST</span>
+      <span class="badge">{session.user.display_name} · {roleLabel(session.user.role)}</span>
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
+      <button class="icon" type="button" onclick={() => void logout()}>Salir</button>
     </div>
   </header>
 
@@ -532,6 +626,7 @@
     </div>
   {/if}
 </main>
+{/if}
 
 <style>
   .shell {
@@ -866,6 +961,35 @@
     justify-content: flex-end;
     gap: 10px;
     margin-top: 18px;
+  }
+
+  .login-shell {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+  }
+
+  .login-card {
+    width: min(420px, 100%);
+  }
+
+  .login-card h1 {
+    margin: 4px 0 8px;
+  }
+
+  .login-card form {
+    margin-top: 18px;
+  }
+
+  .error {
+    color: var(--danger);
+    font-size: 0.86rem;
+    margin: 8px 0;
+  }
+
+  .demo-hint {
+    margin-top: 14px;
+    text-align: center;
   }
 
   @media (max-width: 980px) {

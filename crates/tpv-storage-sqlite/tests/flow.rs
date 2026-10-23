@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use sqlx::Row;
 use tpv_application::{
-    AddLineRequest, ApplyPaymentRequest, AuditRepository, CashRepository, CashService,
+    AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
     PrintQueueRepository, PrintService, SaleRepository, SaleService, SequenceRepository,
-    StartSaleRequest, SyncContext, SyncOutboxRepository,
+    StartSaleRequest, SyncContext, SyncOutboxRepository, UserRepository,
 };
+use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{DeviceId, TenantId};
@@ -24,6 +25,7 @@ struct Services {
     sequence: Arc<dyn SequenceRepository>,
     audit: Arc<dyn AuditRepository>,
     print_service: PrintService,
+    auth: AuthService,
 }
 
 async fn services() -> Services {
@@ -35,6 +37,7 @@ async fn services() -> Services {
     let cash_repo: Arc<dyn CashRepository> = store.clone();
     let sequence: Arc<dyn SequenceRepository> = store.clone();
     let audit: Arc<dyn AuditRepository> = store.clone();
+    let user_repo: Arc<dyn UserRepository> = store.clone();
     let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
     let sync = SyncContext {
@@ -58,6 +61,12 @@ async fn services() -> Services {
         sync.clone(),
     );
     let cash = CashService::new(cash_repo, sales_repo.clone(), clock.clone(), sync);
+    let auth = AuthService::new(
+        user_repo,
+        Arc::new(Argon2PasswordHasher),
+        audit.clone(),
+        clock.clone(),
+    );
     let print_service = PrintService::new(
         sales_repo,
         catalog,
@@ -74,6 +83,7 @@ async fn services() -> Services {
         sequence,
         audit,
         print_service,
+        auth,
     }
 }
 
@@ -467,4 +477,43 @@ async fn prints_ticket_through_persistent_queue() {
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].status, tpv_application::PrintJobStatus::Printed);
     let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn authenticates_admin_and_rejects_bad_password() {
+    let services = services().await;
+    services
+        .auth
+        .bootstrap_password("admin", "admin123")
+        .await
+        .unwrap();
+    let session = services.auth.login("admin", "admin123").await.unwrap();
+    assert_eq!(session.user.username, "admin");
+    assert_eq!(session.user.role, tpv_domain::people::Role::Admin);
+    assert!(
+        services
+            .auth
+            .login("admin", "wrong-password")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn password_hash_is_not_stored_in_plain_text() {
+    let services = services().await;
+    services
+        .auth
+        .bootstrap_password("admin", "admin123")
+        .await
+        .unwrap();
+    let stored = services
+        .store
+        .find_by_username("admin")
+        .await
+        .unwrap()
+        .expect("admin must exist");
+    let hash = stored.password_hash.expect("hash must exist");
+    assert_ne!(hash, "admin123");
+    assert!(hash.starts_with("$argon2"));
 }

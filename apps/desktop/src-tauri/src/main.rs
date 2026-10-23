@@ -1,16 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 use tauri::{Manager, State};
+use time::OffsetDateTime;
 use tpv_application::{
-    AddLineRequest, ApplyPaymentRequest, CatalogRepository, CatalogService, CashRepository,
-    CashService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService,
-    OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository, SaleService,
-    SequenceRepository, StartSaleRequest, SaleView, SyncContext,
+    AddLineRequest, ApplyPaymentRequest, AuthService, CashRepository, CashService,
+    CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
+    InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository,
+    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
+    UserRepository,
 };
+use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
 use tpv_domain::ids::{CustomerId, DeviceId, RegisterId, SellerId, StoreId, TenantId, UserId};
@@ -18,7 +21,6 @@ use tpv_domain::invoice::Invoice;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{DirectoryPrinter, EscPosRenderer};
 use tpv_storage_sqlite::{DemoData, SqliteStore};
-use time::OffsetDateTime;
 
 #[derive(Clone)]
 struct AppState {
@@ -28,6 +30,8 @@ struct AppState {
     cash: CashService,
     print: PrintService,
     print_dir: PathBuf,
+    auth: AuthService,
+    session: Arc<RwLock<Option<SessionUser>>>,
     demo: DemoData,
 }
 
@@ -43,8 +47,67 @@ struct AppInfo {
     open_cash: Option<CashSession>,
 }
 
+fn require_session(state: &AppState) -> Result<SessionUser, String> {
+    state
+        .session
+        .read()
+        .map_err(|_| "session lock poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "sesión no iniciada".to_string())
+}
+
+fn require_sell(state: &AppState) -> Result<SessionUser, String> {
+    let session = require_session(state)?;
+    if session.user.role.can_sell() {
+        Ok(session)
+    } else {
+        Err("el usuario no tiene permiso para vender".to_string())
+    }
+}
+
+#[tauri::command]
+async fn login(
+    state: State<'_, AppState>,
+    username: String,
+    password: String,
+) -> Result<SessionUser, String> {
+    let session = state
+        .inner()
+        .auth
+        .login(&username, &password)
+        .await
+        .map_err(|error| error.to_string())?;
+    *state
+        .inner()
+        .session
+        .write()
+        .map_err(|_| "session lock poisoned".to_string())? = Some(session.clone());
+    Ok(session)
+}
+
+#[tauri::command]
+async fn logout(state: State<'_, AppState>) -> Result<(), String> {
+    *state
+        .inner()
+        .session
+        .write()
+        .map_err(|_| "session lock poisoned".to_string())? = None;
+    Ok(())
+}
+
+#[tauri::command]
+async fn current_user(state: State<'_, AppState>) -> Result<Option<SessionUser>, String> {
+    Ok(state
+        .inner()
+        .session
+        .read()
+        .map_err(|_| "session lock poisoned".to_string())?
+        .clone())
+}
+
 #[tauri::command]
 async fn bootstrap(state: State<'_, AppState>) -> Result<AppInfo, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     let store = state
         .catalog
@@ -78,6 +141,7 @@ async fn search_products(
     state: State<'_, AppState>,
     query: String,
 ) -> Result<Vec<tpv_application::ProductSearchResult>, String> {
+    require_sell(state.inner())?;
     state
         .inner()
         .clone()
@@ -89,6 +153,7 @@ async fn search_products(
 
 #[tauri::command]
 async fn start_sale(state: State<'_, AppState>) -> Result<SaleView, String> {
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     let sale = state
         .sales
@@ -111,6 +176,7 @@ async fn add_line(
     quantity: String,
     kind: String,
 ) -> Result<SaleView, String> {
+    require_sell(state.inner())?;
     let sale = state
         .inner()
         .clone()
@@ -135,6 +201,7 @@ async fn apply_payment(
     amount_cents: i64,
     received_cents: i64,
 ) -> Result<SaleView, String> {
+    require_sell(state.inner())?;
     let method = match method.as_str() {
         "cash" | "efectivo" => PaymentMethod::Cash,
         "card" | "tarjeta" => PaymentMethod::Card,
@@ -162,6 +229,7 @@ async fn confirm_sale(
     state: State<'_, AppState>,
     sale_id: tpv_domain::ids::SaleId,
 ) -> Result<SaleView, String> {
+    require_sell(state.inner())?;
     let sale = state
         .inner()
         .clone()
@@ -177,6 +245,7 @@ async fn issue_invoice(
     state: State<'_, AppState>,
     sale_id: tpv_domain::ids::SaleId,
 ) -> Result<Invoice, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     let year = u16::try_from(OffsetDateTime::now_utc().year()).unwrap_or(2026);
     state
@@ -193,6 +262,7 @@ async fn issue_invoice(
 
 #[tauri::command]
 async fn open_cash(state: State<'_, AppState>) -> Result<CashSession, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     if let Some(session) = state
         .cash
@@ -222,6 +292,7 @@ async fn close_cash(
     counted_card_cents: i64,
     counted_voucher_cents: i64,
 ) -> Result<tpv_domain::cash::CashCloseRecord, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     state
         .cash
@@ -240,6 +311,7 @@ async fn close_cash(
 
 #[tauri::command]
 async fn cash_status(state: State<'_, AppState>) -> Result<Option<CashSession>, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     state
         .cash
@@ -262,6 +334,7 @@ async fn print_ticket(
     sale_id: tpv_domain::ids::SaleId,
     reprint: bool,
 ) -> Result<PrintSummary, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     let job = state
         .print
@@ -287,7 +360,10 @@ async fn print_ticket(
 }
 
 #[tauri::command]
-async fn print_pending(state: State<'_, AppState>) -> Result<Vec<tpv_application::PrintResult>, String> {
+async fn print_pending(
+    state: State<'_, AppState>,
+) -> Result<Vec<tpv_application::PrintResult>, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     let printer = DirectoryPrinter::new(state.print_dir.clone());
     state
@@ -298,7 +374,10 @@ async fn print_pending(state: State<'_, AppState>) -> Result<Vec<tpv_application
 }
 
 #[tauri::command]
-async fn list_print_jobs(state: State<'_, AppState>) -> Result<Vec<tpv_application::PrintJob>, String> {
+async fn list_print_jobs(
+    state: State<'_, AppState>,
+) -> Result<Vec<tpv_application::PrintJob>, String> {
+    require_session(state.inner())?;
     state
         .inner()
         .clone()
@@ -310,6 +389,7 @@ async fn list_print_jobs(state: State<'_, AppState>) -> Result<Vec<tpv_applicati
 
 #[tauri::command]
 async fn list_sales(state: State<'_, AppState>) -> Result<Vec<SaleView>, String> {
+    require_session(state.inner())?;
     let state = state.inner().clone();
     let sales = state
         .sales
@@ -330,14 +410,9 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("tpv.db");
             let (store, demo) = tauri::async_runtime::block_on(async {
-                let store = SqliteStore::connect(
-                    db_path.to_str().ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "invalid database path",
-                        )
-                    })?,
-                )
+                let store = SqliteStore::connect(db_path.to_str().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid database path")
+                })?)
                 .await?;
                 let demo = store.seed_demo().await?;
                 Ok::<_, Box<dyn std::error::Error>>((store, demo))
@@ -349,6 +424,8 @@ fn main() {
             let cash_repo: Arc<dyn CashRepository> = store.clone();
             let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
             let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
+            let user_repo: Arc<dyn UserRepository> = store.clone();
+            let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
             let tickets_dir = data_dir.join("tickets");
             std::fs::create_dir_all(&tickets_dir)?;
             let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
@@ -379,8 +456,11 @@ fn main() {
                 catalog_repo,
                 print_repo,
                 Arc::new(EscPosRenderer::default()),
-                clock,
+                clock.clone(),
             );
+            let auth =
+                AuthService::new(user_repo, Arc::new(Argon2PasswordHasher), audit_repo, clock);
+            tauri::async_runtime::block_on(auth.bootstrap_password("admin", "admin123"))?;
             app.manage(AppState {
                 catalog,
                 sales,
@@ -388,11 +468,16 @@ fn main() {
                 cash,
                 print,
                 print_dir: tickets_dir,
+                auth,
+                session: Arc::new(RwLock::new(None)),
                 demo,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            login,
+            logout,
+            current_user,
             bootstrap,
             search_products,
             start_sale,

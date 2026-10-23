@@ -101,6 +101,7 @@ pub trait CashRepository: Send + Sync {
 
 #[async_trait]
 pub trait AuditRepository: Send + Sync {
+    async fn append(&self, audit: &AuditEvent) -> Result<()>;
     async fn list_recent(&self, store_id: Option<StoreId>, limit: u32) -> Result<Vec<AuditEvent>>;
 }
 
@@ -126,4 +127,42 @@ pub trait PrintQueueRepository: Send + Sync {
     async fn mark_printed(&self, id: tpv_domain::ids::PrintJobId) -> Result<()>;
     async fn mark_failed(&self, id: tpv_domain::ids::PrintJobId, error: &str) -> Result<()>;
     async fn list_recent(&self, limit: u32) -> Result<Vec<crate::dto::PrintJob>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredUser {
+    pub account: tpv_domain::people::UserAccount,
+    pub password_hash: Option<String>,
+    pub failed_attempts: u32,
+    pub locked_until: Option<time::OffsetDateTime>,
+    pub last_login_at: Option<time::OffsetDateTime>,
+}
+
+pub trait PasswordHasher: Send + Sync {
+    fn hash(&self, password: &str) -> Result<String>;
+    fn verify(&self, password: &str, hash: &str) -> Result<bool>;
+}
+
+#[async_trait]
+pub trait UserRepository: Send + Sync {
+    async fn find_by_username(&self, username: &str) -> Result<Option<StoredUser>>;
+    async fn find_by_id(&self, id: tpv_domain::ids::UserId) -> Result<Option<StoredUser>>;
+    async fn create_user(
+        &self,
+        user: &tpv_domain::people::UserAccount,
+        password_hash: &str,
+    ) -> Result<()>;
+    async fn set_password_hash(
+        &self,
+        id: tpv_domain::ids::UserId,
+        password_hash: &str,
+    ) -> Result<()>;
+    async fn record_login(
+        &self,
+        id: tpv_domain::ids::UserId,
+        failed_attempts: u32,
+        locked_until: Option<time::OffsetDateTime>,
+        last_login_at: Option<time::OffsetDateTime>,
+    ) -> Result<()>;
+    async fn list_users(&self) -> Result<Vec<tpv_domain::people::UserAccount>>;
 }

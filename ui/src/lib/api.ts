@@ -157,6 +157,21 @@ export interface CashSession {
   version: number;
 }
 
+export interface UserAccount {
+  id: string;
+  username: string;
+  display_name: string;
+  role: 'admin' | 'manager' | 'cashier' | 'auditor';
+  store_ids: string[];
+  active: boolean;
+}
+
+export interface SessionUser {
+  session_id: string;
+  user: UserAccount;
+  started_at: string;
+}
+
 export interface AppInfo {
   store_name: string;
   store_id: string;
@@ -169,6 +184,10 @@ export interface AppInfo {
 }
 
 export const api = {
+  login: (username: string, password: string) =>
+    invoke<SessionUser>('login', { username, password }),
+  logout: () => invoke<void>('logout'),
+  currentUser: () => invoke<SessionUser | null>('current_user'),
   bootstrap: () => invoke<AppInfo>('bootstrap'),
   searchProducts: (query: string) => invoke<ProductSearchResult[]>('search_products', { query }),
   startSale: () => invoke<SaleView>('start_sale'),
