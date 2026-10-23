@@ -5,13 +5,14 @@ use tpv_domain::audit::AuditEvent;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::{Family, Product};
 use tpv_domain::document::DocumentType;
-use tpv_domain::ids::{CashSessionId, CustomerId, InvoiceId, RegisterId, SaleId, StoreId};
+use tpv_domain::ids::{CashSessionId, CustomerId, InvoiceId, RegisterId, SaleId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::sale::Sale;
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
+use tpv_domain::timeclock::TimeEntry;
 
 use crate::error::Result;
 use crate::import::{ProductImportPreview, ProductImportRow};
@@ -114,6 +115,22 @@ pub trait CashRepository: Send + Sync {
 pub trait AuditRepository: Send + Sync {
     async fn append(&self, audit: &AuditEvent) -> Result<()>;
     async fn list_recent(&self, store_id: Option<StoreId>, limit: u32) -> Result<Vec<AuditEvent>>;
+}
+
+#[async_trait]
+pub trait TimeClockRepository: Send + Sync {
+    /// Persists a time entry and its audit trail in the same transaction.
+    async fn save(&self, entry: &TimeEntry, audit: &AuditEvent) -> Result<()>;
+
+    async fn find_open(&self, user_id: UserId, store_id: StoreId) -> Result<Option<TimeEntry>>;
+
+    /// Lists entries newest first. `user_id = None` is reserved for managers.
+    async fn list_recent(
+        &self,
+        store_id: StoreId,
+        user_id: Option<UserId>,
+        limit: u32,
+    ) -> Result<Vec<TimeEntry>>;
 }
 
 #[async_trait]

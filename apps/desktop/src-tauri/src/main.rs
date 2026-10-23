@@ -16,9 +16,9 @@ use tpv_application::{
     ProductImportReport, ProductImportRepository, ProductImportService, ProductService,
     QuarantinedEvent, RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest,
     SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
-    SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService, UpdateUserRequest,
-    UpsertCustomerRequest, UpsertFamilyRequest, UpsertProductRequest, UpsertTaxRequest,
-    UserRepository,
+    SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService, TimeClockRepository,
+    TimeClockService, TimeClockStatus, UpdateUserRequest, UpsertCustomerRequest,
+    UpsertFamilyRequest, UpsertProductRequest, UpsertTaxRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -62,6 +62,7 @@ struct AppState {
     families: FamilyService,
     taxes: TaxService,
     imports: ProductImportService,
+    time_clock: TimeClockService,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -857,6 +858,52 @@ async fn save_tax(state: State<'_, AppState>, request: UpsertTaxRequest) -> Resu
 }
 
 #[tauri::command]
+async fn time_clock_status(state: State<'_, AppState>) -> Result<TimeClockStatus, String> {
+    let session = require_session(state.inner())?;
+    load_time_clock_status(state.inner(), &session).await
+}
+
+#[tauri::command]
+async fn time_clock_in(state: State<'_, AppState>) -> Result<TimeClockStatus, String> {
+    let session = require_session(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .time_clock
+        .clock_in(session.user.id, state.demo.store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    load_time_clock_status(&state, &session).await
+}
+
+#[tauri::command]
+async fn time_clock_out(state: State<'_, AppState>) -> Result<TimeClockStatus, String> {
+    let session = require_session(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .time_clock
+        .clock_out(session.user.id, state.demo.store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    load_time_clock_status(&state, &session).await
+}
+
+async fn load_time_clock_status(
+    state: &AppState,
+    session: &SessionUser,
+) -> Result<TimeClockStatus, String> {
+    state
+        .time_clock
+        .status(
+            state.demo.store_id,
+            session.user.id,
+            session.user.role.can_manage_master_data(),
+            50,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn preview_product_import(
     state: State<'_, AppState>,
     source_system: String,
@@ -1122,6 +1169,7 @@ async fn build_app_state(
     let backup_repo: Arc<dyn BackupRepository> = store.clone();
     let master_data_repo: Arc<dyn MasterDataRepository> = store.clone();
     let import_repo: Arc<dyn ProductImportRepository> = store.clone();
+    let time_clock_repo: Arc<dyn TimeClockRepository> = store.clone();
     let tickets_dir = data_dir.join("tickets");
     let backup_dir = data_dir.join("backups");
     std::fs::create_dir_all(&tickets_dir)?;
@@ -1179,6 +1227,7 @@ async fn build_app_state(
     let families = FamilyService::new(catalog_repo.clone(), master_data.clone());
     let taxes = TaxService::new(catalog_repo.clone(), master_data.clone());
     let imports = ProductImportService::new(import_repo);
+    let time_clock = TimeClockService::new(time_clock_repo, user_repo.clone(), clock.clone());
     let customers = CustomerService::new(catalog_repo, master_data.clone());
     let auth = AuthService::new(
         user_repo.clone(),
@@ -1211,6 +1260,7 @@ async fn build_app_state(
         families,
         taxes,
         imports,
+        time_clock,
         sync_lock: Arc::new(tokio::sync::Mutex::new(())),
     })
 }
@@ -1304,6 +1354,9 @@ fn main() {
             save_family,
             list_taxes,
             save_tax,
+            time_clock_status,
+            time_clock_in,
+            time_clock_out,
             preview_product_import,
             commit_product_import,
             list_customers,
@@ -1401,6 +1454,9 @@ mod e2e_tests {
                 save_family,
                 list_taxes,
                 save_tax,
+                time_clock_status,
+                time_clock_in,
+                time_clock_out,
                 preview_product_import,
                 commit_product_import,
                 list_customers,
@@ -1774,6 +1830,33 @@ mod e2e_tests {
                 .iter()
                 .any(|item| item["sku"] == "IMP-1")
         );
+
+        let time_clock =
+            invoke(&webview, "time_clock_status", json!({})).expect("time clock status");
+        assert!(time_clock["active"].is_null());
+        assert_eq!(
+            time_clock["recent"]
+                .as_array()
+                .expect("recent time entries")
+                .len(),
+            0
+        );
+
+        let clocked_in = invoke(&webview, "time_clock_in", json!({})).expect("clock in");
+        assert_eq!(clocked_in["active"]["user_name"], "Administrador");
+        assert!(clocked_in["active"]["entry"]["clock_out"].is_null());
+        assert!(invoke(&webview, "time_clock_in", json!({})).is_err());
+
+        let clocked_out = invoke(&webview, "time_clock_out", json!({})).expect("clock out");
+        assert!(clocked_out["active"].is_null());
+        assert_eq!(
+            clocked_out["recent"]
+                .as_array()
+                .expect("recent time entries")
+                .len(),
+            1
+        );
+        assert!(!clocked_out["recent"][0]["entry"]["clock_out"].is_null());
 
         let backup = invoke(&webview, "backup_now", json!({})).expect("backup");
         assert!(backup["bytes"].as_u64().unwrap_or(0) > 0);

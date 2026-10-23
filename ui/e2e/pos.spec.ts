@@ -77,6 +77,16 @@ test.describe('TPV desktop UI', () => {
         }
       ];
       let cashSession: any = null;
+      const timeEntries: any[] = [];
+      const timeClockStatus = () => {
+        const active = timeEntries.find((entry) => !entry.clock_out) ?? null;
+        return {
+          active: active ? { entry: active, user_name: 'Administrador' } : null,
+          recent: [...timeEntries]
+            .reverse()
+            .map((entry) => ({ entry, user_name: 'Administrador' }))
+        };
+      };
       let invoiceRecord: any = null;
       const api = {
         async current_user() {
@@ -149,6 +159,29 @@ test.describe('TPV desktop UI', () => {
             created_at: now()
           });
           return cashSession;
+        },
+        async time_clock_status() {
+          return timeClockStatus();
+        },
+        async time_clock_in() {
+          if (timeEntries.some((entry) => !entry.clock_out)) {
+            throw 'Ya existe un fichaje abierto.';
+          }
+          timeEntries.push({
+            id: crypto.randomUUID(),
+            user_id: userId,
+            store_id: storeId,
+            clock_in: now(),
+            clock_out: null,
+            correction_reason: null
+          });
+          return timeClockStatus();
+        },
+        async time_clock_out() {
+          const active = timeEntries.find((entry) => !entry.clock_out);
+          if (!active) throw 'No hay ningún fichaje abierto.';
+          active.clock_out = now();
+          return timeClockStatus();
         },
         async list_sales() {
           return sale && sale.ticket_number ? [saleView()] : [];
@@ -456,6 +489,12 @@ test.describe('TPV desktop UI', () => {
               };
             case 'list_failed_sync_events':
               return api.list_failed_sync_events();
+            case 'time_clock_status':
+              return api.time_clock_status();
+            case 'time_clock_in':
+              return api.time_clock_in();
+            case 'time_clock_out':
+              return api.time_clock_out();
             case 'search_products':
               return api.search_products(String(args.query));
             case 'list_products':
@@ -614,6 +653,19 @@ test.describe('TPV desktop UI', () => {
 
     await page.getByRole('button', { name: 'Sincronizar ahora' }).click();
     await expect(page.getByText(/Sincronizado: 1 aceptados, 1 usuario/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Fichar', exact: true }).click();
+    const timeClockDialog = page.getByRole('dialog', { name: 'Fichaje del personal' });
+    await expect(timeClockDialog).toBeVisible();
+    await expect(timeClockDialog.getByText('No tienes ningún fichaje abierto.')).toBeVisible();
+    await timeClockDialog.getByRole('button', { name: 'Fichar entrada' }).click();
+    await expect(timeClockDialog.getByRole('button', { name: 'Fichar salida' })).toBeVisible();
+    await expect(timeClockDialog.getByText('En curso')).toBeVisible();
+    await timeClockDialog.getByRole('button', { name: 'Fichar salida' }).click();
+    await expect(timeClockDialog.getByRole('button', { name: 'Fichar entrada' })).toBeVisible();
+    await expect(timeClockDialog.locator('.timeclock-row')).toHaveCount(1);
+    await expect(timeClockDialog.locator('.timeclock-row')).toContainText('Administrador');
+    await timeClockDialog.getByRole('button', { name: 'Esc' }).click();
 
     await page.getByRole('button', { name: 'Clientes' }).click();
     const customers = page.getByRole('dialog', { name: 'Clientes' });

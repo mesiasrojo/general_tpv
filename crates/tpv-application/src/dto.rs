@@ -10,6 +10,7 @@ use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
 use tpv_domain::sync::SyncEvent;
+use tpv_domain::timeclock::TimeEntry;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +94,21 @@ pub struct UpsertCustomerRequest {
     pub province: Option<String>,
     #[serde(default = "default_active")]
     pub active: bool,
+}
+
+/// A time entry enriched with the operator display name for the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEntryView {
+    pub entry: TimeEntry,
+    pub user_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeClockStatus {
+    /// Open entry of the user requesting the status, if any.
+    pub active: Option<TimeEntryView>,
+    /// Recent entries for the store. Cashiers only see their own entries.
+    pub recent: Vec<TimeEntryView>,
 }
 
 fn default_active() -> bool {

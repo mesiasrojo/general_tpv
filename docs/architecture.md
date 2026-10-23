@@ -61,6 +61,8 @@ La devolución parcial selecciona líneas y cantidades de la factura original, p
 Base local **SQLCipher** (SQLite + AES-256) con WAL y migraciones embebidas:
 
 - `stores`, `registers`, `users`, `sellers`, `customers`, `products`.
+- `families` y `taxes` como maestros editables del catálogo.
+- `time_entries` para fichaje, con índice único parcial que impide dos entradas abiertas por usuario y tienda.
 - `sales`, `sale_lines`, `payments`.
 - `invoices`, `invoice_lines`.
 - `document_sequences` para numeración atómica.
@@ -221,6 +223,7 @@ Implementado:
 - Login local con Argon2id, bloqueo por intentos, roles y auditoría.
 - RBAC por comando: venta, caja, impresión, sync y gestión de usuarios.
 - Movimientos de caja de gasto, retirada e ingreso con importe, motivo, evento `cash.movement` y auditoría.
+- Fichaje de entrada/salida por usuario y tienda, con auditoría atómica, histórico reciente y visibilidad limitada por rol.
 - Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC`, gasto de caja automático para efectivo y referencia obligatoria del justificante para tarjeta.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo editable desde la UI mediante pestañas de artículos, familias e impuestos. Cada maestro persiste su versión, emite `master_data.upsert` y los formularios de artículo consumen las familias e IVA activos. También se muestran los conflictos detectados.

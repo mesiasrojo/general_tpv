@@ -29,6 +29,7 @@
     type SyncStatus,
     type SyncSummary,
     type Tax,
+    type TimeClockStatus,
     type UserAccount,
     type UserRole
   } from './lib/api';
@@ -131,9 +132,20 @@
   let importError = $state('');
   let importBusy = $state(false);
   let importInput = $state<HTMLInputElement>();
+  let timeClockOpen = $state(false);
+  let timeClock = $state<TimeClockStatus | null>(null);
+  let timeClockBusy = $state(false);
+  let timeClockError = $state('');
+  let timeClockTick = $state(Date.now());
 
   let change = $derived(Math.max(0, receivedCents - amountCents));
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
+  let activeTimeClock = $derived(timeClock?.active ?? null);
+  let timeClockButtonLabel = $derived.by(() => {
+    const active = activeTimeClock;
+    const tick = timeClockTick;
+    return active ? `Fichaje · ${formatDuration(active.entry.clock_in, active.entry.clock_out, tick)}` : 'Fichar';
+  });
   let filteredCatalog = $derived(
     catalogItems.filter((product) => {
       const needle = catalogFilter.trim().toLowerCase();
@@ -209,6 +221,8 @@
             return;
           }
           await refreshSync();
+          timeClockTick = Date.now();
+          await refreshTimeClock();
         } catch {
           await refreshSync();
         }
@@ -262,6 +276,8 @@
     syncStatus = null;
     syncQuarantine = [];
     usersOpen = false;
+    timeClockOpen = false;
+    timeClock = null;
     users = [];
     stores = [];
     resetPasswordDrafts = {};
@@ -293,25 +309,38 @@
       .join(' ');
   }
 
-  function formatDateTime(value: unknown): string {
-    if (!value) return '—';
+  function dateTimeMillis(value: unknown): number {
+    if (!value) return Number.NaN;
     if (Array.isArray(value) && value.length >= 6) {
       const [year, ordinal, hour, minute, second, nanosecond, offsetHours = 0, offsetMinutes = 0] =
         value as [number, number, number, number, number, number, number?, number?];
       const local = Date.UTC(year, 0, 1) + (ordinal - 1) * 86_400_000;
       const offset = (offsetHours * 60 + offsetMinutes) * 60_000;
-      const date = new Date(
+      return new Date(
         local +
           hour * 3_600_000 +
           minute * 60_000 +
           second * 1_000 +
           Math.floor(nanosecond / 1_000_000) -
           offset
-      );
-      return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('es-ES');
+      ).getTime();
     }
-    const date = new Date(String(value));
-    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('es-ES');
+    return new Date(String(value)).getTime();
+  }
+
+  function formatDateTime(value: unknown): string {
+    const millis = dateTimeMillis(value);
+    return Number.isNaN(millis) ? '—' : new Date(millis).toLocaleString('es-ES');
+  }
+
+  function formatDuration(start: unknown, end: unknown, nowMillis: number): string {
+    const startMillis = dateTimeMillis(start);
+    const endMillis = end ? dateTimeMillis(end) : nowMillis;
+    if (Number.isNaN(startMillis) || Number.isNaN(endMillis)) return '—';
+    const totalMinutes = Math.max(0, Math.floor((endMillis - startMillis) / 60_000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`;
   }
 
   function movementLabel(kind: CashMovementKind): string {
@@ -337,6 +366,7 @@
       await refreshCustomers();
       await refreshSales();
       await refreshSync();
+      await refreshTimeClock();
       message = `Caja lista · ${info.store_name}`;
     } catch (error) {
       message = `No se pudo conectar con el núcleo TPV: ${String(error)}`;
@@ -778,6 +808,51 @@
     importReport = null;
     importError = '';
     if (importInput) importInput.value = '';
+  }
+
+  async function refreshTimeClock() {
+    try {
+      timeClock = await api.timeClockStatus();
+    } catch {
+      // Background refresh must not interrupt the current sale.
+    }
+  }
+
+  async function openTimeClock() {
+    timeClockOpen = true;
+    timeClockError = '';
+    timeClockTick = Date.now();
+    await refreshTimeClock();
+  }
+
+  async function clockIn() {
+    if (timeClockBusy) return;
+    timeClockBusy = true;
+    timeClockError = '';
+    try {
+      timeClock = await api.timeClockIn();
+      timeClockTick = Date.now();
+      message = 'Entrada fichada.';
+    } catch (error) {
+      timeClockError = String(error);
+    } finally {
+      timeClockBusy = false;
+    }
+  }
+
+  async function clockOut() {
+    if (timeClockBusy) return;
+    timeClockBusy = true;
+    timeClockError = '';
+    try {
+      timeClock = await api.timeClockOut();
+      timeClockTick = Date.now();
+      message = 'Salida fichada.';
+    } catch (error) {
+      timeClockError = String(error);
+    } finally {
+      timeClockBusy = false;
+    }
   }
 
   async function createUser() {
@@ -1230,6 +1305,9 @@
       <span class="badge online">OFFLINE-FIRST</span>
       <span class="badge">{session.user.display_name} · {roleLabel(session.user.role)}</span>
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
+      <button class="icon" type="button" onclick={() => void openTimeClock()}>
+        {timeClockButtonLabel}
+      </button>
       {#if session.user.role === 'admin' || session.user.role === 'manager'}
         <button class="icon" type="button" onclick={() => void openCatalog()}>Catálogo</button>
         <button class="icon" type="button" onclick={() => void openCustomers()}>Clientes</button>
@@ -1807,6 +1885,65 @@
             <p class="muted small">No hay usuarios.</p>
           {/each}
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if timeClockOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal timeclock-modal" role="dialog" aria-modal="true" aria-label="Fichaje del personal">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">CONTROL DE PRESENCIA</p>
+            <h2>Fichaje</h2>
+          </div>
+          <button class="icon" type="button" onclick={() => (timeClockOpen = false)}>Esc</button>
+        </div>
+
+        {#if timeClockError}
+          <p class="error" role="alert">{timeClockError}</p>
+        {/if}
+
+        <section class="timeclock-current">
+          <p class="eyebrow">ESTADO ACTUAL</p>
+          {#if activeTimeClock}
+            <p>
+              <strong>{activeTimeClock.user_name}</strong> desde
+              {formatDateTime(activeTimeClock.entry.clock_in)}
+            </p>
+            <p class="timeclock-elapsed">
+              {formatDuration(activeTimeClock.entry.clock_in, activeTimeClock.entry.clock_out, timeClockTick)}
+            </p>
+            <button class="primary" type="button" disabled={timeClockBusy} onclick={() => void clockOut()}>
+              {timeClockBusy ? 'Fichando…' : 'Fichar salida'}
+            </button>
+          {:else}
+            <p class="muted">No tienes ningún fichaje abierto.</p>
+            <button class="primary" type="button" disabled={timeClockBusy} onclick={() => void clockIn()}>
+              {timeClockBusy ? 'Fichando…' : 'Fichar entrada'}
+            </button>
+          {/if}
+        </section>
+
+        <section class="timeclock-history">
+          <p class="eyebrow">ÚLTIMOS FICHAJES</p>
+          {#if timeClock && timeClock.recent.length > 0}
+            <div class="timeclock-list">
+              {#each timeClock.recent as view (view.entry.id)}
+                <div class="timeclock-row">
+                  <strong>{view.user_name}</strong>
+                  <span>{formatDateTime(view.entry.clock_in)}</span>
+                  <span>{view.entry.clock_out ? formatDateTime(view.entry.clock_out) : 'En curso'}</span>
+                  <span class="mono">
+                    {formatDuration(view.entry.clock_in, view.entry.clock_out, timeClockTick)}
+                  </span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="muted small">Todavía no hay fichajes registrados.</p>
+          {/if}
+        </section>
       </div>
     </div>
   {/if}
@@ -2777,6 +2914,55 @@
     overflow: auto;
   }
 
+  .timeclock-modal {
+    width: min(720px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .timeclock-current {
+    display: grid;
+    gap: 8px;
+    justify-items: start;
+    padding: 16px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .timeclock-current p {
+    margin: 0;
+  }
+
+  .timeclock-elapsed {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+
+  .timeclock-history {
+    margin-top: 18px;
+  }
+
+  .timeclock-list {
+    display: grid;
+    gap: 4px;
+  }
+
+  .timeclock-row {
+    display: grid;
+    grid-template-columns: 1fr 1.4fr 1.4fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.9rem;
+  }
+
+  .timeclock-row:last-child {
+    border-bottom: 0;
+  }
+
   .refund-modal {
     width: min(720px, 100%);
     max-height: 90vh;
@@ -3230,6 +3416,11 @@
 
     .import-grid {
       grid-template-columns: 1fr;
+    }
+
+    .timeclock-row {
+      grid-template-columns: 1fr;
+      gap: 4px;
     }
 
     .customer-picker,

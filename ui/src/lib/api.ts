@@ -335,6 +335,25 @@ export interface SessionUser {
   started_at: string;
 }
 
+export interface TimeEntry {
+  id: string;
+  user_id: string;
+  store_id: string;
+  clock_in: string;
+  clock_out: string | null;
+  correction_reason: string | null;
+}
+
+export interface TimeEntryView {
+  entry: TimeEntry;
+  user_name: string;
+}
+
+export interface TimeClockStatus {
+  active: TimeEntryView | null;
+  recent: TimeEntryView[];
+}
+
 export interface BackupSummary {
   path: string;
   bytes: number;
@@ -462,6 +481,9 @@ export const api = {
     amountCents: number,
     reason: string
   ) => invoke<CashSession>('cash_movement', { sessionId, kind, amountCents, reason }),
+  timeClockStatus: () => invoke<TimeClockStatus>('time_clock_status'),
+  timeClockIn: () => invoke<TimeClockStatus>('time_clock_in'),
+  timeClockOut: () => invoke<TimeClockStatus>('time_clock_out'),
   printTicket: (saleId: string, reprint = false) =>
     invoke<PrintSummary>('print_ticket', { saleId, reprint }),
   printPending: () => invoke<unknown[]>('print_pending'),

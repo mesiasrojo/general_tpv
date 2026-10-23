@@ -27,6 +27,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Edición de maestros en el TPV | Implementado (artículos, familias e impuestos con versión maestra y outbox) |
 | Importación CSV de artículos | Implementado (validación, previsualización, commit atómico e idempotencia) |
 | Clientes en el TPV | Implementado (alta/edición, NIF, selector de venta y sync maestro) |
+| Control de presencia | Implementado (fichaje de entrada/salida, auditoría e histórico por rol) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
 | Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
@@ -221,6 +222,8 @@ Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linu
 Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Incluye pestañas de **Artículos**, **Familias** e **Impuestos**. En artículos permite buscar, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado; las familias y los impuestos se gestionan como maestros independientes y alimentan los selectores del formulario de artículo. Cada guardado persiste el maestro local, incrementa su versión y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados y permite importar el catálogo heredado desde CSV.
 
 El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
+
+El botón **Fichar** de la barra superior abre el control de presencia. Cada usuario puede fichar una entrada y una salida; solo puede existir un fichaje abierto por usuario y tienda. Cada operación se guarda en `time_entries` con su evento de auditoría. Los cajeros ven únicamente sus fichajes recientes, mientras que responsables y administradores ven el histórico de toda la tienda con nombre, horas de entrada/salida y duración.
 
 La apariencia del TPV y del backoffice se define en `themes.css`. El tema por defecto es `light_theme`, con fondo blanco y tonos azulados; el tema oscuro anterior se conserva como `dark_theme`. El botón **Claro/Oscuro** permite cambiar el tema y la selección se recuerda en `localStorage`.
 

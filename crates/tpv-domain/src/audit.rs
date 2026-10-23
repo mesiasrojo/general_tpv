@@ -26,6 +26,8 @@ pub enum AuditAction {
     CashReopened,
     CashMovement,
     Reprint,
+    TimeClockIn,
+    TimeClockOut,
     MasterDataChanged,
     SyncFailed,
     SettingsChanged,

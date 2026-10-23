@@ -18,6 +18,7 @@ mod sales;
 mod seed;
 mod store;
 mod sync_outbox;
+mod time_clock;
 mod users;
 
 pub use db_key::DatabaseKey;

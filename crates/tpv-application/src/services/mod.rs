@@ -12,6 +12,7 @@ pub mod products;
 pub mod sale;
 pub mod sync;
 pub mod taxes;
+pub mod time_clock;
 
 pub use auth::AuthService;
 pub use backup::BackupService;
@@ -27,3 +28,4 @@ pub use products::ProductService;
 pub use sale::SaleService;
 pub use sync::SyncService;
 pub use taxes::TaxService;
+pub use time_clock::TimeClockService;
