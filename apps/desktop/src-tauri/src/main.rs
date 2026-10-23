@@ -481,7 +481,7 @@ fn main() {
             let tickets_dir = data_dir.join("tickets");
             std::fs::create_dir_all(&tickets_dir)?;
             let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
-            let sync = store.sync_context().await?;
+            let sync = tauri::async_runtime::block_on(store.sync_context())?;
             let catalog = CatalogService::new(catalog_repo.clone());
             let sales = SaleService::new(
                 sale_repo.clone(),
