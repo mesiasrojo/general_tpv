@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 use tpv_application::{CatalogRepository, Result as AppResult};
-use tpv_domain::catalog::Product;
-use tpv_domain::ids::{CustomerId, ProductId, SellerId, StoreId};
+use tpv_domain::catalog::{Family, Product};
+use tpv_domain::ids::{CustomerId, FamilyId, ProductId, SellerId, StoreId, TaxId};
 use tpv_domain::people::{Address, Customer, Seller, Sex, Store};
+use tpv_domain::tax::Tax;
 use tpv_domain::{Sku, TaxRate};
 use uuid::Uuid;
 
@@ -203,6 +204,26 @@ fn row_to_store(row: &SqliteRow) -> StorageResult<Store> {
             postal_code: row.try_get("postal_code")?,
             province: row.try_get("province")?,
         },
+        active: row.try_get::<i64, _>("active")? != 0,
+    })
+}
+
+fn row_to_family(row: &SqliteRow) -> StorageResult<Family> {
+    Ok(Family {
+        id: FamilyId::from_uuid(parse_uuid(&row.try_get::<String, _>("id")?)?),
+        code: row.try_get("code")?,
+        name: row.try_get("name")?,
+        active: row.try_get::<i64, _>("active")? != 0,
+    })
+}
+
+fn row_to_tax(row: &SqliteRow) -> StorageResult<Tax> {
+    Ok(Tax {
+        id: TaxId::from_uuid(parse_uuid(&row.try_get::<String, _>("id")?)?),
+        code: row.try_get("code")?,
+        name: row.try_get("name")?,
+        percent_bp: u32::try_from(row.try_get::<i64, _>("percent_bp")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
         active: row.try_get::<i64, _>("active")? != 0,
     })
 }
@@ -402,6 +423,74 @@ impl SqliteStore {
         Ok(())
     }
 
+    async fn all_families(&self) -> StorageResult<Vec<Family>> {
+        let rows = sqlx::query("SELECT * FROM families ORDER BY active DESC, name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(row_to_family).collect()
+    }
+
+    async fn get_family_by_code(&self, code: &str) -> StorageResult<Option<Family>> {
+        let row = sqlx::query("SELECT * FROM families WHERE code = ?")
+            .bind(code)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_family).transpose()
+    }
+
+    pub(crate) async fn persist_family(&self, family: &Family) -> StorageResult<()> {
+        sqlx::query(
+            "INSERT INTO families (id, code, name, active)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                code = excluded.code,
+                name = excluded.name,
+                active = excluded.active",
+        )
+        .bind(family.id.to_string())
+        .bind(&family.code)
+        .bind(&family.name)
+        .bind(i64::from(family.active))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn all_taxes(&self) -> StorageResult<Vec<Tax>> {
+        let rows = sqlx::query("SELECT * FROM taxes ORDER BY active DESC, name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(row_to_tax).collect()
+    }
+
+    async fn get_tax_by_code(&self, code: &str) -> StorageResult<Option<Tax>> {
+        let row = sqlx::query("SELECT * FROM taxes WHERE code = ?")
+            .bind(code)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_tax).transpose()
+    }
+
+    pub(crate) async fn persist_tax(&self, tax: &Tax) -> StorageResult<()> {
+        sqlx::query(
+            "INSERT INTO taxes (id, code, name, percent_bp, active)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                code = excluded.code,
+                name = excluded.name,
+                percent_bp = excluded.percent_bp,
+                active = excluded.active",
+        )
+        .bind(tax.id.to_string())
+        .bind(&tax.code)
+        .bind(&tax.name)
+        .bind(i64::from(tax.percent_bp))
+        .bind(i64::from(tax.active))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn all_sellers(&self) -> StorageResult<Vec<Seller>> {
         let rows = sqlx::query("SELECT * FROM sellers WHERE active = 1 ORDER BY name")
             .fetch_all(&self.pool)
@@ -456,6 +545,32 @@ impl CatalogRepository for SqliteStore {
 
     async fn save_product(&self, product: &Product) -> AppResult<()> {
         self.persist_product(product).await?;
+        Ok(())
+    }
+
+    async fn list_families(&self) -> AppResult<Vec<Family>> {
+        Ok(self.all_families().await?)
+    }
+
+    async fn find_family_by_code(&self, code: &str) -> AppResult<Option<Family>> {
+        Ok(self.get_family_by_code(code).await?)
+    }
+
+    async fn save_family(&self, family: &Family) -> AppResult<()> {
+        self.persist_family(family).await?;
+        Ok(())
+    }
+
+    async fn list_taxes(&self) -> AppResult<Vec<Tax>> {
+        Ok(self.all_taxes().await?)
+    }
+
+    async fn find_tax_by_code(&self, code: &str) -> AppResult<Option<Tax>> {
+        Ok(self.get_tax_by_code(code).await?)
+    }
+
+    async fn save_tax(&self, tax: &Tax) -> AppResult<()> {
+        self.persist_tax(tax).await?;
         Ok(())
     }
 

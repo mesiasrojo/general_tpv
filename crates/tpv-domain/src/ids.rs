@@ -55,6 +55,8 @@ uuid_id!(UserId);
 uuid_id!(SellerId);
 uuid_id!(CustomerId);
 uuid_id!(ProductId);
+uuid_id!(FamilyId);
+uuid_id!(TaxId);
 uuid_id!(SaleId);
 uuid_id!(SaleLineId);
 uuid_id!(PaymentId);

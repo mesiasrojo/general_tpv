@@ -2,13 +2,14 @@ use sqlx::{Row, Sqlite, Transaction};
 use tpv_application::{
     ApplicationError, MasterDataRepository, PublishMasterDataRequest, Result as AppResult,
 };
-use tpv_domain::catalog::Product;
+use tpv_domain::catalog::{Family, Product};
 use tpv_domain::ids::{StoreId, TenantId};
 use tpv_domain::master_data::{
     MasterDataApplyResult, MasterDataChange, MasterDataConflict, MasterDataKind, resolve_change,
 };
 use tpv_domain::people::Customer;
 use tpv_domain::sync::SyncEvent;
+use tpv_domain::tax::Tax;
 use uuid::Uuid;
 
 use crate::error::StorageResult;
@@ -156,7 +157,25 @@ impl MasterDataRepository for SqliteStore {
                             self.persist_customer(&customer).await?;
                         }
                     }
-                    _ => {}
+                    MasterDataKind::Family => {
+                        if let Ok(mut family) =
+                            serde_json::from_value::<Family>(change.payload.clone())
+                        {
+                            if change.deleted {
+                                family.active = false;
+                            }
+                            self.persist_family(&family).await?;
+                        }
+                    }
+                    MasterDataKind::Tax => {
+                        if let Ok(mut tax) = serde_json::from_value::<Tax>(change.payload.clone()) {
+                            if change.deleted {
+                                tax.active = false;
+                            }
+                            self.persist_tax(&tax).await?;
+                        }
+                    }
+                    MasterDataKind::Seller | MasterDataKind::Store => {}
                 }
             }
             Ok(MasterDataApplyResult {
@@ -238,7 +257,24 @@ impl MasterDataRepository for SqliteStore {
                         self.persist_customer(&customer).await?;
                     }
                 }
-                _ => {}
+                MasterDataKind::Family => {
+                    if let Ok(mut family) = serde_json::from_value::<Family>(change.payload.clone())
+                    {
+                        if deleted {
+                            family.active = false;
+                        }
+                        self.persist_family(&family).await?;
+                    }
+                }
+                MasterDataKind::Tax => {
+                    if let Ok(mut tax) = serde_json::from_value::<Tax>(change.payload.clone()) {
+                        if deleted {
+                            tax.active = false;
+                        }
+                        self.persist_tax(&tax).await?;
+                    }
+                }
+                MasterDataKind::Seller | MasterDataKind::Store => {}
             }
             Ok(event)
         }

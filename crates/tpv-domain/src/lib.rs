@@ -23,4 +23,4 @@ pub mod timeclock;
 pub use error::{DomainError, Result};
 pub use ids::*;
 pub use money::{Money, Quantity};
-pub use tax::{TaxBreakdown, TaxRate};
+pub use tax::{Tax, TaxBreakdown, TaxRate};

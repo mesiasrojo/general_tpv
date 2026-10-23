@@ -3,7 +3,7 @@ use time::OffsetDateTime;
 use tpv_domain::Sku;
 use tpv_domain::audit::AuditEvent;
 use tpv_domain::cash::{CashCount, CashSession};
-use tpv_domain::catalog::Product;
+use tpv_domain::catalog::{Family, Product};
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{CashSessionId, CustomerId, InvoiceId, RegisterId, SaleId, StoreId};
 use tpv_domain::invoice::Invoice;
@@ -11,6 +11,7 @@ use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDat
 use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::sale::Sale;
 use tpv_domain::sync::SyncEvent;
+use tpv_domain::tax::Tax;
 
 use crate::error::Result;
 use crate::import::{ProductImportPreview, ProductImportRow};
@@ -35,6 +36,14 @@ pub trait CatalogRepository: Send + Sync {
     async fn search_products(&self, query: &str, limit: u32) -> Result<Vec<Product>>;
     async fn list_products(&self) -> Result<Vec<Product>>;
     async fn save_product(&self, product: &Product) -> Result<()>;
+
+    async fn list_families(&self) -> Result<Vec<Family>>;
+    async fn find_family_by_code(&self, code: &str) -> Result<Option<Family>>;
+    async fn save_family(&self, family: &Family) -> Result<()>;
+
+    async fn list_taxes(&self) -> Result<Vec<Tax>>;
+    async fn find_tax_by_code(&self, code: &str) -> Result<Option<Tax>>;
+    async fn save_tax(&self, tax: &Tax) -> Result<()>;
 
     async fn find_customer(&self, id: CustomerId) -> Result<Option<Customer>>;
     async fn search_customers(&self, query: &str, limit: u32) -> Result<Vec<Customer>>;

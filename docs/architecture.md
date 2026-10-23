@@ -223,7 +223,7 @@ Implementado:
 - Movimientos de caja de gasto, retirada e ingreso con importe, motivo, evento `cash.movement` y auditoría.
 - Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC`, gasto de caja automático para efectivo y referencia obligatoria del justificante para tarjeta.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
-- Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
+- Catálogo editable desde la UI mediante pestañas de artículos, familias e impuestos. Cada maestro persiste su versión, emite `master_data.upsert` y los formularios de artículo consumen las familias e IVA activos. También se muestran los conflictos detectados.
 - Importación CSV de artículos con previsualización, informe de errores, commit transaccional e idempotencia por lote y por identificador de origen.
 - Clientes editables desde la UI, selector de cliente en la venta, validación de NIF y sincronización maestra.
 - Temas compartidos `light_theme` (por defecto, blanco y azul) y `dark_theme`, con selector persistido en `localStorage`.

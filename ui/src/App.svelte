@@ -10,6 +10,7 @@
     type CashMovementKind,
     type CashSession,
     type Customer,
+    type Family,
     type Invoice,
     type LineKind,
     type MasterDataConflict,
@@ -21,10 +22,13 @@
     type QuarantinedEvent,
     type SaleView,
     type SaveCustomerRequest,
+    type SaveFamilyRequest,
+    type SaveTaxRequest,
     type SessionUser,
     type Store,
     type SyncStatus,
     type SyncSummary,
+    type Tax,
     type UserAccount,
     type UserRole
   } from './lib/api';
@@ -98,6 +102,18 @@
   let catalogError = $state('');
   let catalogBusy = $state(false);
   let catalogFilter = $state('');
+  let catalogSection = $state<'products' | 'families' | 'taxes'>('products');
+  let families = $state<Family[]>([]);
+  let taxes = $state<Tax[]>([]);
+  let editingFamilyId = $state<string | null>(null);
+  let familyCode = $state('');
+  let familyName = $state('');
+  let familyActive = $state(true);
+  let editingTaxId = $state<string | null>(null);
+  let taxCode = $state('');
+  let taxName = $state('');
+  let taxRatePercent = $state('21');
+  let taxActive = $state(true);
   let editingProductId = $state<string | null>(null);
   let productSku = $state('');
   let productBarcode = $state('');
@@ -128,6 +144,34 @@
       );
     })
   );
+
+  let selectableFamilies = $derived.by(() => {
+    const options = families.filter(
+      (family) => family.active || family.code === productFamily
+    );
+    if (productFamily && !families.some((family) => family.code === productFamily)) {
+      options.unshift({
+        id: `legacy-family-${productFamily}`,
+        code: productFamily,
+        name: 'Código sin maestro',
+        active: false
+      });
+    }
+    return options;
+  });
+  let selectableTaxes = $derived.by(() => {
+    const options = taxes.filter((tax) => tax.active || tax.code === productTaxCode);
+    if (productTaxCode && !taxes.some((tax) => tax.code === productTaxCode)) {
+      options.unshift({
+        id: `legacy-tax-${productTaxCode}`,
+        code: productTaxCode,
+        name: 'Código fiscal sin maestro',
+        percent_bp: productTaxPercentBp,
+        active: false
+      });
+    }
+    return options;
+  });
 
   let refundPreview = $derived.by(() => {
     if (!refundInvoice) return 0;
@@ -471,12 +515,16 @@
     catalogBusy = true;
     catalogError = '';
     try {
-      const [items, conflicts] = await Promise.all([
+      const [items, conflicts, familyItems, taxItems] = await Promise.all([
         api.listProducts(),
-        api.listMasterDataConflicts()
+        api.listMasterDataConflicts(),
+        api.listFamilies(),
+        api.listTaxes()
       ]);
       catalogItems = items;
       catalogConflicts = conflicts;
+      families = familyItems;
+      taxes = taxItems;
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -540,6 +588,111 @@
         : [...catalogItems, saved];
       message = `Producto guardado: ${saved.sku} · ${saved.name}`;
       resetProductForm();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
+    }
+  }
+
+
+  function resetFamilyForm() {
+    editingFamilyId = null;
+    familyCode = '';
+    familyName = '';
+    familyActive = true;
+    catalogError = '';
+  }
+
+  function editFamily(family: Family) {
+    editingFamilyId = family.id;
+    familyCode = family.code;
+    familyName = family.name;
+    familyActive = family.active;
+    catalogError = '';
+  }
+
+  async function saveFamily() {
+    if (catalogBusy) return;
+    catalogError = '';
+    if (!familyCode.trim() || !familyName.trim()) {
+      catalogError = 'Código y nombre de familia son obligatorios.';
+      return;
+    }
+    const request: SaveFamilyRequest = {
+      family_id: editingFamilyId,
+      code: familyCode.trim(),
+      name: familyName.trim(),
+      active: familyActive
+    };
+    catalogBusy = true;
+    try {
+      const saved = await api.saveFamily(request);
+      families = families.some((family) => family.id === saved.id)
+        ? families.map((family) => (family.id === saved.id ? saved : family))
+        : [...families, saved];
+      message = `Familia guardada: ${saved.code} · ${saved.name}`;
+      resetFamilyForm();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
+    }
+  }
+
+  function resetTaxForm() {
+    editingTaxId = null;
+    taxCode = '';
+    taxName = '';
+    taxRatePercent = '21';
+    taxActive = true;
+    catalogError = '';
+  }
+
+  function editTax(tax: Tax) {
+    editingTaxId = tax.id;
+    taxCode = tax.code;
+    taxName = tax.name;
+    taxRatePercent = (tax.percent_bp / 100).toFixed(2).replace(/\.00$/, '');
+    taxActive = tax.active;
+    catalogError = '';
+  }
+
+  function applyProductTax(code: string) {
+    productTaxCode = code;
+    const tax = taxes.find((item) => item.code === code);
+    if (tax) {
+      productTaxPercentBp = tax.percent_bp;
+    }
+  }
+
+  async function saveTax() {
+    if (catalogBusy) return;
+    catalogError = '';
+    if (!taxCode.trim() || !taxName.trim()) {
+      catalogError = 'Código y nombre de impuesto son obligatorios.';
+      return;
+    }
+    const percent = Number.parseFloat(taxRatePercent.replace(',', '.'));
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+      catalogError = 'El IVA debe estar entre 0 y 100.';
+      return;
+    }
+    const request: SaveTaxRequest = {
+      tax_id: editingTaxId,
+      code: taxCode.trim(),
+      name: taxName.trim(),
+      percent_bp: Math.round(percent * 100),
+      active: taxActive
+    };
+    catalogBusy = true;
+    try {
+      const saved = await api.saveTax(request);
+      taxes = taxes.some((tax) => tax.id === saved.id)
+        ? taxes.map((tax) => (tax.id === saved.id ? saved : tax))
+        : [...taxes, saved];
+      message = `Impuesto guardado: ${saved.code} · ${saved.percent_bp / 100}%`;
+      resetTaxForm();
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -1673,6 +1826,37 @@
           <p class="error" role="alert">{catalogError}</p>
         {/if}
 
+        <div class="catalog-tabs" role="tablist" aria-label="Secciones del catálogo">
+          <button
+            type="button"
+            role="tab"
+            class:active={catalogSection === 'products'}
+            aria-selected={catalogSection === 'products'}
+            onclick={() => (catalogSection = 'products')}
+          >
+            Artículos
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class:active={catalogSection === 'families'}
+            aria-selected={catalogSection === 'families'}
+            onclick={() => (catalogSection = 'families')}
+          >
+            Familias
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class:active={catalogSection === 'taxes'}
+            aria-selected={catalogSection === 'taxes'}
+            onclick={() => (catalogSection = 'taxes')}
+          >
+            Impuestos
+          </button>
+        </div>
+
+        {#if catalogSection === 'products'}
         <form
           class="product-form"
           onsubmit={(event) => {
@@ -1694,7 +1878,14 @@
           </label>
           <label class="field">
             <span>Familia</span>
-            <input bind:value={productFamily} />
+            <select bind:value={productFamily}>
+              <option value="">Sin familia</option>
+              {#each selectableFamilies as family (family.id)}
+                <option value={family.code}>
+                  {family.name} ({family.code}){family.active ? '' : ' · inactiva'}
+                </option>
+              {/each}
+            </select>
           </label>
           <label class="field">
             <span>Precio</span>
@@ -1702,10 +1893,20 @@
           </label>
           <label class="field">
             <span>Código fiscal</span>
-            <input bind:value={productTaxCode} />
+            <select
+              value={productTaxCode}
+              onchange={(event) => applyProductTax(event.currentTarget.value)}
+            >
+              <option value="">Selecciona IVA</option>
+              {#each selectableTaxes as tax (tax.id)}
+                <option value={tax.code}>
+                  {tax.name} ({tax.percent_bp / 100}%){tax.active ? '' : ' · inactivo'}
+                </option>
+              {/each}
+            </select>
           </label>
           <label class="field">
-            <span>% IVA</span>
+            <span>IVA (puntos básicos)</span>
             <input bind:value={productTaxPercentBp} type="number" min="0" max="10000" step="1" />
           </label>
           <div class="field">
@@ -1867,6 +2068,129 @@
             </div>
           {/if}
         </div>
+        {/if}
+
+        {#if catalogSection === 'families'}
+          <form
+            class="product-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void saveFamily();
+            }}
+          >
+            <label class="field">
+              <span>Código</span>
+              <input bind:value={familyCode} autocomplete="off" placeholder="BEBIDAS" />
+            </label>
+            <label class="field">
+              <span>Nombre</span>
+              <input bind:value={familyName} />
+            </label>
+            <div class="field">
+              <span>Estado</span>
+              <label class="inline">
+                <input type="checkbox" bind:checked={familyActive} />
+                Activa
+              </label>
+            </div>
+            <div class="product-actions">
+              <button class="primary" type="submit" disabled={catalogBusy}>
+                {catalogBusy ? 'Guardando…' : 'Guardar familia'}
+              </button>
+              <button class="secondary" type="button" onclick={resetFamilyForm}>
+                Nueva familia
+              </button>
+            </div>
+          </form>
+
+          <div class="catalog-toolbar">
+            <span class="muted small">{families.length} familia(s)</span>
+          </div>
+
+          <div class="product-list">
+            {#each families as family (family.id)}
+              <div class="product-row">
+                <div>
+                  <strong>{family.name}</strong>
+                  <span class="muted small mono">{family.code}</span>
+                </div>
+                <div class="product-row-actions">
+                  <span class="badge" class:inactive={!family.active}>
+                    {family.active ? 'ACTIVA' : 'INACTIVA'}
+                  </span>
+                  <button class="secondary" type="button" onclick={() => editFamily(family)}>
+                    Editar
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <p class="muted small">No hay familias.</p>
+            {/each}
+          </div>
+        {/if}
+
+        {#if catalogSection === 'taxes'}
+          <form
+            class="product-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void saveTax();
+            }}
+          >
+            <label class="field">
+              <span>Código</span>
+              <input bind:value={taxCode} autocomplete="off" placeholder="IVA21" />
+            </label>
+            <label class="field">
+              <span>Nombre</span>
+              <input bind:value={taxName} />
+            </label>
+            <label class="field">
+              <span>% IVA</span>
+              <input bind:value={taxRatePercent} inputmode="decimal" />
+            </label>
+            <div class="field">
+              <span>Estado</span>
+              <label class="inline">
+                <input type="checkbox" bind:checked={taxActive} />
+                Activo
+              </label>
+            </div>
+            <div class="product-actions">
+              <button class="primary" type="submit" disabled={catalogBusy}>
+                {catalogBusy ? 'Guardando…' : 'Guardar impuesto'}
+              </button>
+              <button class="secondary" type="button" onclick={resetTaxForm}>
+                Nuevo impuesto
+              </button>
+            </div>
+          </form>
+
+          <div class="catalog-toolbar">
+            <span class="muted small">{taxes.length} impuesto(s)</span>
+          </div>
+
+          <div class="product-list">
+            {#each taxes as tax (tax.id)}
+              <div class="product-row">
+                <div>
+                  <strong>{tax.name}</strong>
+                  <span class="muted small mono">{tax.code} · {tax.percent_bp / 100}% IVA</span>
+                </div>
+                <div class="product-row-actions">
+                  <span class="badge" class:inactive={!tax.active}>
+                    {tax.active ? 'ACTIVO' : 'INACTIVO'}
+                  </span>
+                  <button class="secondary" type="button" onclick={() => editTax(tax)}>
+                    Editar
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <p class="muted small">No hay impuestos.</p>
+            {/each}
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -2572,6 +2896,28 @@
     width: min(900px, 100%);
     max-height: 90vh;
     overflow: auto;
+  }
+
+  .catalog-tabs {
+    display: flex;
+    gap: 4px;
+    margin: 2px 0 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .catalog-tabs button {
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 8px 12px;
+    color: var(--muted);
+  }
+
+  .catalog-tabs button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
   }
 
   .customer-picker {

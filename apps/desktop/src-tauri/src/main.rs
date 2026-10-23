@@ -10,18 +10,19 @@ use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
     CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
-    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, CustomerService, InvoiceLineSelection,
-    InvoiceRepository, InvoiceService, MasterDataRepository, MasterDataService, OpenCashRequest,
-    PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
-    ProductImportService, ProductService, QuarantinedEvent, RectifyInvoiceLinesRequest,
-    RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
-    SequenceRepository, SessionUser, StartSaleRequest, SyncContext, SyncOutboxRepository,
-    SyncService, SyncStatus, UpdateUserRequest, UpsertCustomerRequest, UpsertProductRequest,
+    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, CustomerService, FamilyService,
+    InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataRepository,
+    MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
+    ProductImportReport, ProductImportRepository, ProductImportService, ProductService,
+    QuarantinedEvent, RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest,
+    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
+    SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService, UpdateUserRequest,
+    UpsertCustomerRequest, UpsertFamilyRequest, UpsertProductRequest, UpsertTaxRequest,
     UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
-use tpv_domain::catalog::Product;
+use tpv_domain::catalog::{Family, Product};
 use tpv_domain::ids::{
     CashSessionId, CustomerId, InvoiceId, RegisterId, SellerId, StoreId, UserId,
 };
@@ -29,6 +30,7 @@ use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Customer, Role, UserAccount, UserProvision};
 use tpv_domain::sale::PaymentMethod;
+use tpv_domain::tax::Tax;
 use tpv_print::{
     EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
 };
@@ -57,6 +59,8 @@ struct AppState {
     users: Arc<dyn UserRepository>,
     master_data: MasterDataService,
     products: ProductService,
+    families: FamilyService,
+    taxes: TaxService,
     imports: ProductImportService,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -806,6 +810,53 @@ async fn save_product(
 }
 
 #[tauri::command]
+async fn list_families(state: State<'_, AppState>) -> Result<Vec<Family>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .families
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_family(
+    state: State<'_, AppState>,
+    request: UpsertFamilyRequest,
+) -> Result<Family, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .families
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_taxes(state: State<'_, AppState>) -> Result<Vec<Tax>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .taxes
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_tax(state: State<'_, AppState>, request: UpsertTaxRequest) -> Result<Tax, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .taxes
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn preview_product_import(
     state: State<'_, AppState>,
     source_system: String,
@@ -1125,6 +1176,8 @@ async fn build_app_state(
     let backup_service = BackupService::new(backup_repo);
     let master_data = MasterDataService::new(master_data_repo, clock.clone());
     let products = ProductService::new(catalog_repo.clone(), master_data.clone());
+    let families = FamilyService::new(catalog_repo.clone(), master_data.clone());
+    let taxes = TaxService::new(catalog_repo.clone(), master_data.clone());
     let imports = ProductImportService::new(import_repo);
     let customers = CustomerService::new(catalog_repo, master_data.clone());
     let auth = AuthService::new(
@@ -1155,6 +1208,8 @@ async fn build_app_state(
         users: user_repo,
         master_data,
         products,
+        families,
+        taxes,
         imports,
         sync_lock: Arc::new(tokio::sync::Mutex::new(())),
     })
@@ -1245,6 +1300,10 @@ fn main() {
             list_stores,
             list_products,
             save_product,
+            list_families,
+            save_family,
+            list_taxes,
+            save_tax,
             preview_product_import,
             commit_product_import,
             list_customers,
@@ -1338,6 +1397,10 @@ mod e2e_tests {
                 list_stores,
                 list_products,
                 save_product,
+                list_families,
+                save_family,
+                list_taxes,
+                save_tax,
                 preview_product_import,
                 commit_product_import,
                 list_customers,
@@ -1559,6 +1622,50 @@ mod e2e_tests {
             invoke(&webview, "list_master_data_conflicts", json!({})).expect("conflicts");
         assert_eq!(conflicts.as_array().expect("conflicts array").len(), 0);
 
+        let defaults = invoke(&webview, "list_taxes", json!({})).expect("default taxes");
+        assert!(
+            defaults
+                .as_array()
+                .expect("taxes array")
+                .iter()
+                .any(|item| item["code"] == "IVA21")
+        );
+
+        let family = invoke(
+            &webview,
+            "save_family",
+            json!({"request": {"code": "UI", "name": "Pruebas UI", "active": true}}),
+        )
+        .expect("save family");
+        assert_eq!(family["code"], "UI");
+        assert_eq!(family["active"], true);
+
+        let tax = invoke(
+            &webview,
+            "save_tax",
+            json!({"request": {"code": "UI5", "name": "Especial 5%", "percent_bp": 500, "active": true}}),
+        )
+        .expect("save tax");
+        assert_eq!(tax["code"], "UI5");
+        assert_eq!(tax["percent_bp"], 500);
+
+        let families = invoke(&webview, "list_families", json!({})).expect("list families");
+        assert!(
+            families
+                .as_array()
+                .expect("families array")
+                .iter()
+                .any(|item| item["code"] == "UI")
+        );
+        let taxes = invoke(&webview, "list_taxes", json!({})).expect("list taxes");
+        assert!(
+            taxes
+                .as_array()
+                .expect("taxes array")
+                .iter()
+                .any(|item| item["code"] == "UI5")
+        );
+
         let product = invoke(
             &webview,
             "save_product",
@@ -1569,8 +1676,8 @@ mod e2e_tests {
                     "name": "Producto UI",
                     "family_code": "UI",
                     "unit_price": "9.95",
-                    "tax_code": "IVA21",
-                    "tax_percent_bp": 2100,
+                    "tax_code": "UI5",
+                    "tax_percent_bp": 500,
                     "active": true
                 }
             }),
@@ -1601,8 +1708,8 @@ mod e2e_tests {
                     "name": "Producto UI actualizado",
                     "family_code": "UI",
                     "unit_price": "10.95",
-                    "tax_code": "IVA21",
-                    "tax_percent_bp": 2100,
+                    "tax_code": "UI5",
+                    "tax_percent_bp": 500,
                     "active": true
                 }
             }),

@@ -1,7 +1,8 @@
 use rust_decimal::Decimal;
-use tpv_domain::catalog::Product;
-use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
+use tpv_domain::catalog::{Family, Product};
+use tpv_domain::ids::{CustomerId, FamilyId, RegisterId, SellerId, StoreId, TaxId, UserId};
 use tpv_domain::people::{Address, Customer, Seller, Store};
+use tpv_domain::tax::Tax;
 use tpv_domain::{Sku, TaxRate};
 use uuid::Uuid;
 
@@ -27,6 +28,7 @@ impl SqliteStore {
         let customer_id = self.ensure_customer().await?;
         let user_id = self.ensure_user(store_id).await?;
         self.ensure_products().await?;
+        self.ensure_families_and_taxes().await?;
         Ok(DemoData {
             store_id,
             register_id,
@@ -148,6 +150,36 @@ impl SqliteStore {
             .execute(self.pool())
             .await?;
         Ok(id)
+    }
+
+    async fn ensure_families_and_taxes(&self) -> StorageResult<()> {
+        if sqlx::query_scalar::<_, String>("SELECT id FROM families WHERE code = 'GENERAL'")
+            .fetch_optional(self.pool())
+            .await?
+            .is_none()
+        {
+            let family = Family::new(FamilyId::new(), "GENERAL", "General")?;
+            self.persist_family(&family).await?;
+        }
+
+        let taxes = [
+            ("IVA21", "IVA general 21%", 2100),
+            ("IVA10", "IVA reducido 10%", 1000),
+            ("IVA4", "IVA superreducido 4%", 400),
+            ("EXEMPT", "Exento de IVA", 0),
+        ];
+        for (code, name, percent_bp) in taxes {
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT id FROM taxes WHERE code = ?")
+                    .bind(code)
+                    .fetch_optional(self.pool())
+                    .await?;
+            if existing.is_none() {
+                let tax = Tax::new(TaxId::new(), code, name, percent_bp)?;
+                self.persist_tax(&tax).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn ensure_products(&self) -> StorageResult<()> {

@@ -24,7 +24,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
-| Edición de maestros en el TPV | Implementado (catálogo de productos, versión maestra y outbox) |
+| Edición de maestros en el TPV | Implementado (artículos, familias e impuestos con versión maestra y outbox) |
 | Importación CSV de artículos | Implementado (validación, previsualización, commit atómico e idempotencia) |
 | Clientes en el TPV | Implementado (alta/edición, NIF, selector de venta y sync maestro) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
@@ -218,7 +218,7 @@ npm run dev
 
 Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` y el resto de paquetes indicados en la sección de arranque). El crate `apps/desktop` está excluido del workspace principal, pero se compila y prueba desde `apps/desktop/src-tauri`.
 
-Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados y permite importar el catálogo heredado desde CSV.
+Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Incluye pestañas de **Artículos**, **Familias** e **Impuestos**. En artículos permite buscar, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado; las familias y los impuestos se gestionan como maestros independientes y alimentan los selectores del formulario de artículo. Cada guardado persiste el maestro local, incrementa su versión y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados y permite importar el catálogo heredado desde CSV.
 
 El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
 

@@ -2,18 +2,19 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DomainError, Result};
-use crate::ids::{ProductId, Sku};
+use crate::ids::{FamilyId, ProductId, Sku};
 use crate::tax::TaxRate;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Family {
+    pub id: FamilyId,
     pub code: String,
     pub name: String,
     pub active: bool,
 }
 
 impl Family {
-    pub fn new(code: impl Into<String>, name: impl Into<String>) -> Result<Self> {
+    pub fn new(id: FamilyId, code: impl Into<String>, name: impl Into<String>) -> Result<Self> {
         let code = code.into().trim().to_uppercase();
         let name = name.into().trim().to_string();
         if code.is_empty() || name.is_empty() {
@@ -21,7 +22,18 @@ impl Family {
                 "family code and name are required".into(),
             ));
         }
+        if code.len() > 32 {
+            return Err(DomainError::Validation(
+                "family code supports at most 32 characters".into(),
+            ));
+        }
+        if name.len() > 120 {
+            return Err(DomainError::Validation(
+                "family name supports at most 120 characters".into(),
+            ));
+        }
         Ok(Self {
+            id,
             code,
             name,
             active: true,
@@ -106,6 +118,15 @@ mod tests {
             TaxRate::standard(),
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn family_normalizes_code_and_requires_name() {
+        let family = Family::new(FamilyId::new(), "  bebidas  ", "  Bebidas  ").unwrap();
+        assert_eq!(family.code, "BEBIDAS");
+        assert_eq!(family.name, "Bebidas");
+        assert!(family.active);
+        assert!(Family::new(FamilyId::new(), "BEBIDAS", "   ").is_err());
     }
 
     #[test]

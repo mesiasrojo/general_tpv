@@ -2,6 +2,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DomainError, Result};
+use crate::ids::TaxId;
 use crate::money::Money;
 
 /// Spanish VAT rate expressed in basis points (2100 = 21 %).
@@ -72,6 +73,57 @@ impl TaxRate {
     }
 }
 
+/// Editable VAT master record used by the catalogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tax {
+    pub id: TaxId,
+    pub code: String,
+    pub name: String,
+    pub percent_bp: u32,
+    pub active: bool,
+}
+
+impl Tax {
+    pub fn new(
+        id: TaxId,
+        code: impl Into<String>,
+        name: impl Into<String>,
+        percent_bp: u32,
+    ) -> Result<Self> {
+        let code = code.into().trim().to_uppercase();
+        let name = name.into().trim().to_string();
+        if name.is_empty() {
+            return Err(DomainError::Validation("tax name is required".into()));
+        }
+        if code.len() > 16 {
+            return Err(DomainError::Validation(
+                "tax code supports at most 16 characters".into(),
+            ));
+        }
+        if name.len() > 120 {
+            return Err(DomainError::Validation(
+                "tax name supports at most 120 characters".into(),
+            ));
+        }
+        TaxRate::new(code.clone(), percent_bp)?;
+        Ok(Self {
+            id,
+            code,
+            name,
+            percent_bp,
+            active: true,
+        })
+    }
+
+    #[must_use]
+    pub fn rate(&self) -> TaxRate {
+        TaxRate {
+            code: self.code.clone(),
+            percent_bp: self.percent_bp,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxBreakdown {
     pub code: String,
@@ -116,6 +168,17 @@ mod tests {
             rate.tax_from_gross(Money::from_cents(1000)).unwrap(),
             Money::ZERO
         );
+    }
+
+    #[test]
+    fn tax_master_validates_identity_and_exposes_its_rate() {
+        let tax = Tax::new(TaxId::new(), "  iva21  ", "IVA general", 2100).unwrap();
+        assert_eq!(tax.code, "IVA21");
+        assert_eq!(tax.name, "IVA general");
+        assert_eq!(tax.rate(), TaxRate::new("IVA21", 2100).unwrap());
+        assert!(tax.active);
+        assert!(Tax::new(TaxId::new(), "IVA21", "   ", 2100).is_err());
+        assert!(Tax::new(TaxId::new(), "IVA21", "IVA", 10_001).is_err());
     }
 
     #[test]

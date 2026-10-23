@@ -10,6 +10,8 @@ use crate::ids::{DeviceId, StoreId, TenantId};
 #[serde(rename_all = "snake_case")]
 pub enum MasterDataKind {
     Product,
+    Family,
+    Tax,
     Customer,
     Seller,
     Store,
@@ -20,6 +22,8 @@ impl MasterDataKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Product => "product",
+            Self::Family => "family",
+            Self::Tax => "tax",
             Self::Customer => "customer",
             Self::Seller => "seller",
             Self::Store => "store",
@@ -29,6 +33,8 @@ impl MasterDataKind {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "product" => Ok(Self::Product),
+            "family" => Ok(Self::Family),
+            "tax" => Ok(Self::Tax),
             "customer" => Ok(Self::Customer),
             "seller" => Ok(Self::Seller),
             "store" => Ok(Self::Store),

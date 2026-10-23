@@ -3,7 +3,8 @@ use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::cash::{CashCount, CashMovementKind};
 use tpv_domain::ids::{
-    CustomerId, ProductId, RegisterId, SaleId, SaleLineId, SellerId, StoreId, UserId,
+    CustomerId, FamilyId, ProductId, RegisterId, SaleId, SaleLineId, SellerId, StoreId, TaxId,
+    UserId,
 };
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::people::Role;
@@ -41,6 +42,27 @@ pub struct UpsertProductRequest {
     pub unit_price: String,
     pub tax_code: String,
     pub tax_percent_bp: u32,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertFamilyRequest {
+    #[serde(default)]
+    pub family_id: Option<FamilyId>,
+    pub code: String,
+    pub name: String,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertTaxRequest {
+    #[serde(default)]
+    pub tax_id: Option<TaxId>,
+    pub code: String,
+    pub name: String,
+    pub percent_bp: u32,
     #[serde(default = "default_active")]
     pub active: bool,
 }

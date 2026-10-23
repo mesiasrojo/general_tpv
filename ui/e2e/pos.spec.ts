@@ -59,6 +59,23 @@ test.describe('TPV desktop UI', () => {
       });
 
       const catalogItems: Array<Record<string, unknown>> = [];
+      const familyItems: Array<Record<string, unknown>> = [
+        {
+          id: '00000000-0000-7000-8000-000000000010',
+          code: 'GENERAL',
+          name: 'General',
+          active: true
+        }
+      ];
+      const taxItems: Array<Record<string, unknown>> = [
+        {
+          id: '00000000-0000-7000-8000-000000000011',
+          code: 'IVA21',
+          name: 'IVA general 21%',
+          percent_bp: 2100,
+          active: true
+        }
+      ];
       let cashSession: any = null;
       let invoiceRecord: any = null;
       const api = {
@@ -443,6 +460,10 @@ test.describe('TPV desktop UI', () => {
               return api.search_products(String(args.query));
             case 'list_products':
               return catalogItems;
+            case 'list_families':
+              return familyItems;
+            case 'list_taxes':
+              return taxItems;
             case 'list_master_data_conflicts':
               return [];
             case 'save_product': {
@@ -465,6 +486,39 @@ test.describe('TPV desktop UI', () => {
                 catalogItems[index] = saved;
               } else {
                 catalogItems.push(saved);
+              }
+              return saved;
+            }
+            case 'save_family': {
+              const request = args.request as Record<string, unknown>;
+              const saved = {
+                id: request.family_id ?? crypto.randomUUID(),
+                code: String(request.code).toUpperCase(),
+                name: request.name,
+                active: request.active
+              };
+              const index = familyItems.findIndex((item) => item.id === saved.id);
+              if (index >= 0) {
+                familyItems[index] = saved;
+              } else {
+                familyItems.push(saved);
+              }
+              return saved;
+            }
+            case 'save_tax': {
+              const request = args.request as Record<string, unknown>;
+              const saved = {
+                id: request.tax_id ?? crypto.randomUUID(),
+                code: String(request.code).toUpperCase(),
+                name: request.name,
+                percent_bp: request.percent_bp,
+                active: request.active
+              };
+              const index = taxItems.findIndex((item) => item.id === saved.id);
+              if (index >= 0) {
+                taxItems[index] = saved;
+              } else {
+                taxItems.push(saved);
               }
               return saved;
             }
@@ -585,12 +639,30 @@ test.describe('TPV desktop UI', () => {
     await page.getByRole('button', { name: 'Catálogo' }).click();
     await expect(page.getByRole('dialog', { name: 'Catálogo' })).toBeVisible();
     await expect(page.getByText('Sin conflictos de maestros.')).toBeVisible();
+
+    await page.getByRole('tab', { name: 'Familias' }).click();
+    await page.getByLabel('Código').fill('E2E');
+    await page.getByLabel('Nombre').fill('Familia E2E');
+    await page.getByRole('button', { name: 'Guardar familia' }).click();
+    await expect(page.locator('.product-row', { hasText: 'Familia E2E' })).toBeVisible();
+
+    await page.getByRole('tab', { name: 'Impuestos' }).click();
+    await page.getByLabel('Código').fill('E2E5');
+    await page.getByLabel('Nombre').fill('Especial E2E');
+    await page.getByLabel('% IVA').fill('5');
+    await page.getByRole('button', { name: 'Guardar impuesto' }).click();
+    await expect(page.locator('.product-row', { hasText: 'Especial E2E' })).toContainText('5% IVA');
+
+    await page.getByRole('tab', { name: 'Artículos' }).click();
     await page.getByLabel('SKU').fill('UI-E2E-1');
     await page.getByLabel('Nombre').fill('Producto E2E');
+    await page.getByLabel('Familia').selectOption('E2E');
+    await page.getByLabel('Código fiscal').selectOption('E2E5');
     await page.getByLabel('Precio').fill('7.50');
     await page.getByRole('button', { name: 'Guardar producto' }).click();
     const productRow = page.locator('.product-row', { hasText: 'Producto E2E' });
     await expect(productRow).toBeVisible();
+    await expect(productRow).toContainText('5% IVA');
     await productRow.getByRole('button', { name: 'Editar' }).click();
     await page.getByLabel('Nombre').fill('Producto E2E editado');
     await page.getByRole('button', { name: 'Guardar producto' }).click();

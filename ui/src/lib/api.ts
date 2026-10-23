@@ -51,6 +51,36 @@ export interface SaveProductRequest {
   active: boolean;
 }
 
+export interface Family {
+  id: string;
+  code: string;
+  name: string;
+  active: boolean;
+}
+
+export interface SaveFamilyRequest {
+  family_id?: string | null;
+  code: string;
+  name: string;
+  active: boolean;
+}
+
+export interface Tax {
+  id: string;
+  code: string;
+  name: string;
+  percent_bp: number;
+  active: boolean;
+}
+
+export interface SaveTaxRequest {
+  tax_id?: string | null;
+  code: string;
+  name: string;
+  percent_bp: number;
+  active: boolean;
+}
+
 export interface ProductImportError {
   line: number;
   source_id: string | null;
@@ -362,6 +392,10 @@ export const api = {
   searchProducts: (query: string) => invoke<ProductSearchResult[]>('search_products', { query }),
   listProducts: () => invoke<Product[]>('list_products'),
   saveProduct: (request: SaveProductRequest) => invoke<Product>('save_product', { request }),
+  listFamilies: () => invoke<Family[]>('list_families'),
+  saveFamily: (request: SaveFamilyRequest) => invoke<Family>('save_family', { request }),
+  listTaxes: () => invoke<Tax[]>('list_taxes'),
+  saveTax: (request: SaveTaxRequest) => invoke<Tax>('save_tax', { request }),
   previewProductImport: (sourceSystem: string, batchId: string | null, csv: string) =>
     invoke<ProductImportReport>('preview_product_import', { sourceSystem, batchId, csv }),
   commitProductImport: (sourceSystem: string, batchId: string | null, csv: string) =>
