@@ -23,7 +23,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
-| Validación con hardware real | Pendiente de hardware-in-the-loop |
+| Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
+| Certificación con hardware físico | Pendiente de ejecución en tienda piloto |
 
 ## Arranque rápido
 
@@ -120,7 +121,34 @@ cargo run -p tpv-cli -- data/tpv.db \
   --printer dir:data/tickets --printer-profile generic-58
 ```
 
-Especificaciones disponibles: `file:...`, `dir:...`, `network:host:puerto`, `serial:...`, `usb:...` y `null`. Perfiles incluidos: `generic-58`, `generic-80`, `epson-tm-t20` y `bixolon-srp-350`. En Linux, el acceso USB directo requiere reglas udev adecuadas; en Windows puede requerir WinUSB. La validación con impresoras físicas queda pendiente de hardware-in-the-loop.
+Especificaciones disponibles: `file:...`, `dir:...`, `network:host:puerto`, `serial:...`, `usb:...` y `null`. Perfiles incluidos: `generic-58`, `generic-80`, `epson-tm-t20` y `bixolon-srp-350`. En Linux, el acceso USB directo requiere reglas udev adecuadas; en Windows puede requerir WinUSB.
+
+### Hardware-in-the-loop y carga
+
+Los tests HIL están ignorados por defecto y lanzan un ticket de prueba completo:
+
+```bash
+# Impresora de red
+TPV_HIL_NETWORK_ADDR=192.168.1.50:9100 \
+  cargo test -p tpv-print --test hil -- --ignored --nocapture
+
+# Impresora serie
+TPV_HIL_SERIAL_PORT=/dev/ttyUSB0 TPV_HIL_SERIAL_BAUD=9600 \
+  cargo test -p tpv-print --test hil -- --ignored --nocapture
+
+# Impresora USB
+TPV_HIL_USB_VID=0x04b8 TPV_HIL_USB_PID=0x0e15 \
+  cargo test -p tpv-print --test hil -- --ignored --nocapture
+```
+
+Con `TPV_HIL_REQUIRED=1`, la falta de configuración se trata como fallo en vez de omitirse. La prueba de carga mide ventas confirmadas y procesamiento de la cola de impresión:
+
+```bash
+TPV_LOAD_SALES=500 TPV_LOAD_PRINT_JOBS=500 \
+  cargo test -p tpv-storage-sqlite --test load -- --ignored --nocapture
+```
+
+Umbrales configurables con `TPV_LOAD_MIN_SALES_PER_SEC` y `TPV_LOAD_MIN_PRINTS_PER_SEC`. En el equipo de desarrollo, en modo debug, se midieron aproximadamente 100 ventas/s y 1.800 impresiones/s.
 
 ### 3. UI del TPV
 
@@ -182,6 +210,10 @@ docs/architecture.md          Resumen de arquitectura implementada
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# Opcionales: requieren hardware/configuración específica
+cargo test -p tpv-print --test hil -- --ignored --nocapture
+cargo test -p tpv-storage-sqlite --test load -- --ignored --nocapture
 
 cd apps/desktop/src-tauri && cargo test
 cd ui && npm run check && npm run build && npm run test:e2e
