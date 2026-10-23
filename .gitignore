@@ -14,3 +14,7 @@ node_modules
 /ui/.svelte-kit
 /backoffice/build
 /backoffice/.svelte-kit
+/ui/test-results
+/backoffice/test-results
+/ui/playwright-report
+/backoffice/playwright-report
