@@ -13,8 +13,10 @@
     type Product,
     type ProductSearchResult,
     type PrintSummary,
+    type QuarantinedEvent,
     type SaleView,
-    type SessionUser
+    type SessionUser,
+    type SyncStatus
   } from './lib/api';
 
   let session = $state<SessionUser | null>(null);
@@ -37,6 +39,9 @@
   let cash = $state<CashSession | null>(null);
   let countedCash = $state('0.00');
   let lastSales = $state<SaleView[]>([]);
+  let syncStatus = $state<SyncStatus | null>(null);
+  let syncQuarantine = $state<QuarantinedEvent[]>([]);
+  let syncBusy = $state(false);
 
   let change = $derived(Math.max(0, receivedCents - amountCents));
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
@@ -87,6 +92,8 @@
     printSummary = null;
     results = [];
     lastSales = [];
+    syncStatus = null;
+    syncQuarantine = [];
     message = 'Sesión cerrada.';
   }
 
@@ -110,6 +117,7 @@
       info = await api.bootstrap();
       cash = info.open_cash;
       await refreshSales();
+      await refreshSync();
       message = `Caja lista · ${info.store_name}`;
     } catch (error) {
       message = `No se pudo conectar con el núcleo TPV: ${String(error)}`;
@@ -121,6 +129,44 @@
       lastSales = await api.listSales();
     } catch {
       lastSales = [];
+    }
+  }
+
+  async function refreshSync() {
+    try {
+      syncStatus = await api.syncStatus();
+      syncQuarantine = await api.listFailedSyncEvents(5);
+    } catch {
+      syncStatus = null;
+      syncQuarantine = [];
+    }
+  }
+
+  async function retrySyncEvent(eventId: string) {
+    if (syncBusy) return;
+    syncBusy = true;
+    try {
+      const requeued = await api.retrySyncEvents([eventId]);
+      message = `${requeued} evento(s) devueltos a la cola de sincronización.`;
+      await refreshSync();
+    } catch (error) {
+      message = String(error);
+    } finally {
+      syncBusy = false;
+    }
+  }
+
+  async function retryAllSync() {
+    if (syncBusy) return;
+    syncBusy = true;
+    try {
+      const requeued = await api.retryAllSyncEvents();
+      message = `${requeued} evento(s) devueltos a la cola de sincronización.`;
+      await refreshSync();
+    } catch (error) {
+      message = String(error);
+    } finally {
+      syncBusy = false;
     }
   }
 
@@ -207,6 +253,7 @@
       printSummary = await api.printTicket(sale.sale.id, false);
       message = `Ticket ${sale.sale.ticket_number ?? ''} confirmado e impreso.`;
       await refreshSales();
+      await refreshSync();
     } catch (error) {
       message = String(error);
     } finally {
@@ -266,6 +313,7 @@
       message = `Cierre realizado. Diferencia: ${formatMoney(record.differences.cash)}`;
       cash = null;
       await refreshSales();
+      await refreshSync();
     } catch (error) {
       message = String(error);
     } finally {
@@ -534,6 +582,65 @@
           <button class="primary full" type="button" disabled={busy} onclick={() => void openCash()}>
             Abrir caja · fondo 100,00 €
           </button>
+        {/if}
+      </section>
+
+      <section class="panel sync-card" class:warning={!!syncStatus?.failed}>
+        <div class="panel-heading compact">
+          <div>
+            <p class="eyebrow">SINCRONIZACIÓN</p>
+            <h2>Cola local</h2>
+          </div>
+          <span class="badge" class:warn={!!syncStatus?.failed}>
+            {syncStatus?.failed ? 'CUARENTENA' : 'AL DÍA'}
+          </span>
+        </div>
+        {#if syncStatus}
+          <div class="sync-counts">
+            <div><strong>{syncStatus.pending}</strong><span>pendientes</span></div>
+            <div><strong>{syncStatus.sent}</strong><span>enviados</span></div>
+            <div><strong>{syncStatus.failed}</strong><span>fallidos</span></div>
+          </div>
+          {#if syncStatus.oldest_pending_at}
+            <p class="muted small">
+              Pendiente desde {new Date(syncStatus.oldest_pending_at).toLocaleString('es-ES')}
+            </p>
+          {/if}
+          {#if syncStatus.last_error}
+            <p class="muted small">Último error: {syncStatus.last_error}</p>
+          {/if}
+          {#if syncQuarantine.length > 0}
+            <div class="quarantine-list">
+              {#each syncQuarantine as entry (entry.event.event_id)}
+                <div class="quarantine-item">
+                  <span class="mono">{entry.event.event_type}</span>
+                  <span class="muted small">
+                    {entry.attempts} intento(s) · {entry.last_error ?? 'sin detalle'}
+                  </span>
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={syncBusy}
+                    onclick={() => void retrySyncEvent(entry.event.event_id)}
+                  >
+                    Reintentar
+                  </button>
+                </div>
+              {/each}
+            </div>
+            <button
+              class="secondary full"
+              type="button"
+              disabled={syncBusy}
+              onclick={() => void retryAllSync()}
+            >
+              Reintentar todos ({syncStatus.failed})
+            </button>
+          {:else}
+            <p class="muted small">Sin eventos en cuarentena.</p>
+          {/if}
+        {:else}
+          <p class="muted small">Estado de sincronización no disponible.</p>
         {/if}
       </section>
 
@@ -894,6 +1001,62 @@
 
   .invoice-card {
     border-color: rgb(112 224 161 / 45%);
+  }
+
+  .sync-card.warning {
+    border-color: rgb(255 176 92 / 55%);
+  }
+
+  .badge.warn {
+    background: rgb(255 176 92 / 18%);
+    color: #ffb05c;
+  }
+
+  .sync-counts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .sync-counts div {
+    display: grid;
+    gap: 2px;
+    padding: 8px 10px;
+    text-align: center;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .sync-counts strong {
+    font-size: 1.2rem;
+  }
+
+  .sync-counts span {
+    color: var(--muted);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .quarantine-list {
+    display: grid;
+    gap: 6px;
+    margin: 10px 0;
+  }
+
+  .quarantine-item {
+    display: grid;
+    gap: 4px;
+    padding: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .quarantine-item button {
+    padding: 7px 10px;
   }
 
   .field {

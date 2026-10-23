@@ -3,6 +3,7 @@ use tpv_domain::Money;
 use tpv_domain::cash::CashCount;
 use tpv_domain::ids::{CustomerId, RegisterId, SaleId, SellerId, StoreId, UserId};
 use tpv_domain::sale::PaymentMethod;
+use tpv_domain::sync::SyncEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncContext {
@@ -270,4 +271,23 @@ pub struct SessionUser {
     pub session_id: uuid::Uuid,
     pub user: tpv_domain::people::UserAccount,
     pub started_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub pending: u32,
+    pub sent: u32,
+    pub failed: u32,
+    pub oldest_pending_at: Option<time::OffsetDateTime>,
+    pub last_sent_at: Option<time::OffsetDateTime>,
+    pub last_failed_at: Option<time::OffsetDateTime>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantinedEvent {
+    pub event: SyncEvent,
+    pub attempts: u32,
+    pub failed_at: time::OffsetDateTime,
+    pub last_error: Option<String>,
 }

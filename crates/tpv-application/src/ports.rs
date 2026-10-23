@@ -109,6 +109,12 @@ pub trait AuditRepository: Send + Sync {
 pub trait SyncOutboxRepository: Send + Sync {
     async fn pending_events(&self, limit: u32) -> Result<Vec<SyncEvent>>;
     async fn mark_events_sent(&self, event_ids: &[uuid::Uuid]) -> Result<()>;
+    async fn mark_events_failed(&self, event_ids: &[uuid::Uuid], error: &str) -> Result<()>;
+    async fn sync_status(&self) -> Result<crate::dto::SyncStatus>;
+    async fn list_failed(&self, limit: u32) -> Result<Vec<crate::dto::QuarantinedEvent>>;
+    /// Moves quarantined events back to the pending queue. Returns how many
+    /// events were actually requeued.
+    async fn requeue_failed(&self, event_ids: &[uuid::Uuid]) -> Result<u64>;
 }
 
 pub trait TicketRenderer: Send + Sync {

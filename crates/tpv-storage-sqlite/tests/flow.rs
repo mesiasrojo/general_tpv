@@ -5,7 +5,7 @@ use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
     PrintQueueRepository, PrintService, SaleRepository, SaleService, SequenceRepository,
-    StartSaleRequest, SyncContext, SyncOutboxRepository, UserRepository,
+    StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
@@ -85,6 +85,15 @@ async fn services() -> Services {
         print_service,
         auth,
     }
+}
+
+#[tokio::test]
+async fn local_identity_is_created_once_and_stays_stable() {
+    let services = services().await;
+    let first = services.store.sync_context().await.unwrap();
+    let second = services.store.sync_context().await.unwrap();
+    assert_eq!(first.device_id.as_uuid(), second.device_id.as_uuid());
+    assert_eq!(first.tenant_id.as_uuid(), second.tenant_id.as_uuid());
 }
 
 #[tokio::test]
@@ -408,6 +417,91 @@ async fn outbox_can_be_read_and_marked_as_sent() {
         .collect::<Vec<_>>();
     services.store.mark_events_sent(&ids).await.unwrap();
     assert!(services.store.pending_events(100).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn quarantines_failed_events_and_can_requeue_them() {
+    let services = services().await;
+    let mut sale = services
+        .sales
+        .start_sale(StartSaleRequest {
+            store_id: services.demo.store_id,
+            register_id: services.demo.register_id,
+            seller_id: services.demo.seller_id,
+            customer_id: None,
+        })
+        .await
+        .unwrap();
+    sale = services
+        .sales
+        .add_line(AddLineRequest {
+            sale_id: sale.id,
+            sku: "3".into(),
+            quantity: "1".into(),
+            kind: "sale".into(),
+            discount_bp: None,
+        })
+        .await
+        .unwrap();
+    let totals = sale.totals().unwrap();
+    sale = services
+        .sales
+        .apply_payment(ApplyPaymentRequest {
+            sale_id: sale.id,
+            method: PaymentMethod::Cash,
+            amount_cents: totals.gross.cents(),
+            received_cents: totals.gross.cents(),
+            reference: None,
+        })
+        .await
+        .unwrap();
+    services
+        .sales
+        .confirm_sale(ConfirmSaleRequest { sale_id: sale.id })
+        .await
+        .unwrap();
+
+    let sync = SyncService::new(services.store.clone());
+    let initial = sync.status().await.unwrap();
+    assert_eq!(initial.pending, 1);
+    assert_eq!(initial.failed, 0);
+    assert_eq!(initial.sent, 0);
+
+    let pending = services.store.pending_events(100).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let event_id = pending[0].event_id;
+    services
+        .store
+        .mark_events_failed(&[event_id], "hash inválido")
+        .await
+        .unwrap();
+
+    assert!(services.store.pending_events(100).await.unwrap().is_empty());
+    let failed_status = sync.status().await.unwrap();
+    assert_eq!(failed_status.pending, 0);
+    assert_eq!(failed_status.failed, 1);
+    assert_eq!(failed_status.last_error.as_deref(), Some("hash inválido"));
+    assert!(failed_status.last_failed_at.is_some());
+
+    let quarantine = sync.quarantine(10).await.unwrap();
+    assert_eq!(quarantine.len(), 1);
+    assert_eq!(quarantine[0].event.event_id, event_id);
+    assert_eq!(quarantine[0].attempts, 1);
+    assert_eq!(quarantine[0].last_error.as_deref(), Some("hash inválido"));
+
+    assert_eq!(sync.retry_failed(&[event_id]).await.unwrap(), 1);
+    let requeued = sync.status().await.unwrap();
+    assert_eq!(requeued.pending, 1);
+    assert_eq!(requeued.failed, 0);
+    assert!(requeued.last_error.is_none());
+    assert!(sync.quarantine(10).await.unwrap().is_empty());
+
+    services.store.mark_events_sent(&[event_id]).await.unwrap();
+    let sent = sync.status().await.unwrap();
+    assert_eq!(sent.pending, 0);
+    assert_eq!(sent.failed, 0);
+    assert_eq!(sent.sent, 1);
+    assert!(sent.last_sent_at.is_some());
 }
 
 #[tokio::test]

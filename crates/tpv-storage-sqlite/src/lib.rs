@@ -6,6 +6,7 @@ mod audit;
 mod cash;
 mod error;
 mod helpers;
+mod identity;
 mod persistence;
 mod prints;
 mod sales;

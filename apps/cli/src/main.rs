@@ -5,12 +5,11 @@ use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
     InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository,
-    SaleService, SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository,
-    UserRepository,
+    SaleService, SequenceRepository, StartSaleRequest, SyncOutboxRepository, SyncService,
+    SyncStatus, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
-use tpv_domain::ids::{DeviceId, TenantId};
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
@@ -27,21 +26,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let in_memory = args.iter().any(|arg| arg == "--memory");
-    let sync_url = args
-        .windows(2)
-        .find(|window| window[0] == "--sync-url")
-        .map(|window| window[1].clone());
-    let path = args
-        .iter()
-        .skip(1)
-        .enumerate()
-        .find(|(index, arg)| {
-            !arg.starts_with("--")
-                && args.get(index.saturating_sub(1)).map(String::as_str) != Some("--sync-url")
-        })
-        .map(|(_, arg)| arg.clone())
-        .unwrap_or_else(|| "data/tpv.db".to_string());
+    let mut in_memory = false;
+    let mut retry_failed = false;
+    let mut sync_url = None;
+    let mut path = None;
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--memory" => in_memory = true,
+            "--retry-failed" => retry_failed = true,
+            "--sync-url" => sync_url = iter.next().cloned(),
+            other if other.starts_with("--") => {}
+            other => {
+                if path.is_none() {
+                    path = Some(other.to_string());
+                }
+            }
+        }
+    }
+    let path = path.unwrap_or_else(|| "data/tpv.db".to_string());
 
     if !in_memory {
         if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -67,10 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_repo: Arc<dyn UserRepository> = store.clone();
     let audit_repo: Arc<dyn AuditRepository> = store.clone();
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
-    let sync = SyncContext {
-        tenant_id: TenantId::new(),
-        device_id: DeviceId::new(),
-    };
+    let sync = store.sync_context().await?;
 
     let auth = AuthService::new(
         user_repo,
@@ -110,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(EscPosRenderer::default()),
         clock,
     );
+    let sync_service = SyncService::new(sync_repo.clone());
 
     println!(
         "Base de datos: {}",
@@ -259,6 +260,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let mut sync_status = sync_service.status().await?;
+    print_sync_status(&sync_status);
+
+    if retry_failed {
+        let requeued = sync_service.retry_all_failed(100).await?;
+        println!("Sync: {requeued} evento(s) devueltos a la cola desde cuarentena.");
+        sync_status = sync_service.status().await?;
+    }
+
     if let Some(url) = sync_url {
         let client = SyncClient::new(url, std::env::var("TPV_CENTRAL_TOKEN").ok());
         let worker = SyncWorker::new(client.clone(), RetryPolicy::default());
@@ -275,10 +285,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let pulled = client.pull(0, Some(demo.store_id.as_uuid())).await?;
         println!("Pull: {} eventos en la central.", pulled.events.len());
+        sync_status = sync_service.status().await?;
+        print_sync_status(&sync_status);
+    }
+
+    let quarantine = sync_service.quarantine(5).await?;
+    if !quarantine.is_empty() {
+        println!(
+            "\nCuarentena de sincronización ({} evento(s), mostrando {}):",
+            sync_status.failed,
+            quarantine.len()
+        );
+        for entry in &quarantine {
+            println!(
+                "  {} · {} · {} intento(s) · {} · {}",
+                entry.event.event_type,
+                entry.failed_at.format(&Rfc3339).unwrap_or_default(),
+                entry.attempts,
+                entry.event.event_id,
+                entry.last_error.as_deref().unwrap_or("-")
+            );
+        }
+        println!("Usa --retry-failed para devolverlos a la cola.");
     }
 
     println!("\nDemo completada.");
     Ok(())
+}
+
+fn print_sync_status(status: &SyncStatus) {
+    println!(
+        "\nSync local: {} pendiente(s) · {} enviado(s) · {} en cuarentena",
+        status.pending, status.sent, status.failed
+    );
+    if let Some(oldest) = status.oldest_pending_at {
+        println!(
+            "  Más antiguo pendiente: {}",
+            oldest.format(&Rfc3339).unwrap_or_default()
+        );
+    }
+    if let Some(last) = status.last_sent_at {
+        println!(
+            "  Último envío correcto: {}",
+            last.format(&Rfc3339).unwrap_or_default()
+        );
+    }
+    if let Some(error) = &status.last_error {
+        println!("  Último error: {error}");
+    }
 }
 
 fn print_ticket(

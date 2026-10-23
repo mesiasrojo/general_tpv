@@ -12,7 +12,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Persistencia SQLite + migraciones + seed | Implementado |
 | Casos de uso y puertos de aplicación | Implementado |
 | Servidor central Axum + PostgreSQL | Implementado (con fallback en memoria para desarrollo) |
-| Cliente HTTP + worker de sync con backoff | Implementado |
+| Cliente HTTP + worker de sync con backoff | Implementado (backoff, cuarentena y reintento manual) |
 | CLI de demostración end-to-end | Implementado |
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
 | Impresión ESC/POS + cola persistente | Implementado (renderer, fichero, directorio y red TCP) |
@@ -49,7 +49,13 @@ Terminal B:
 cargo run -p tpv-cli -- --memory --sync-url http://127.0.0.1:8080
 ```
 
-El CLI empuja los eventos del outbox con reintentos y hace un pull de verificación. El servidor expone:
+El CLI empuja los eventos del outbox con reintentos, muestra el estado local de la cola y hace un pull de verificación. Si algún evento queda en cuarentena, `--retry-failed` lo devuelve a la cola antes de sincronizar:
+
+```bash
+cargo run -p tpv-cli -- --memory --sync-url http://127.0.0.1:8080 --retry-failed
+```
+
+El servidor expone:
 
 - `GET /health`
 - `POST /api/v1/sync/push`

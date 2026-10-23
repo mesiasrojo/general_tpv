@@ -9,14 +9,14 @@ use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, CashRepository, CashService,
     CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
-    InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository,
-    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
-    UserRepository,
+    InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, QuarantinedEvent,
+    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
+    SyncOutboxRepository, SyncService, SyncStatus, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
-use tpv_domain::ids::{CustomerId, DeviceId, RegisterId, SellerId, StoreId, TenantId, UserId};
+use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{DirectoryPrinter, EscPosRenderer};
@@ -29,6 +29,7 @@ struct AppState {
     invoices: InvoiceService,
     cash: CashService,
     print: PrintService,
+    sync: SyncService,
     print_dir: PathBuf,
     auth: AuthService,
     session: Arc<RwLock<Option<SessionUser>>>,
@@ -402,6 +403,56 @@ async fn list_sales(state: State<'_, AppState>) -> Result<Vec<SaleView>, String>
         .collect()
 }
 
+#[tauri::command]
+async fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .sync
+        .status()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_failed_sync_events(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<QuarantinedEvent>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .sync
+        .quarantine(limit.unwrap_or(20))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn retry_sync_events(
+    state: State<'_, AppState>,
+    event_ids: Vec<uuid::Uuid>,
+) -> Result<u64, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .sync
+        .retry_failed(&event_ids)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn retry_all_sync_events(state: State<'_, AppState>) -> Result<u64, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .sync
+        .retry_all_failed(100)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -424,15 +475,13 @@ fn main() {
             let cash_repo: Arc<dyn CashRepository> = store.clone();
             let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
             let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
+            let sync_repo: Arc<dyn SyncOutboxRepository> = store.clone();
             let user_repo: Arc<dyn UserRepository> = store.clone();
             let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
             let tickets_dir = data_dir.join("tickets");
             std::fs::create_dir_all(&tickets_dir)?;
             let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
-            let sync = SyncContext {
-                tenant_id: TenantId::new(),
-                device_id: DeviceId::new(),
-            };
+            let sync = store.sync_context().await?;
             let catalog = CatalogService::new(catalog_repo.clone());
             let sales = SaleService::new(
                 sale_repo.clone(),
@@ -458,6 +507,7 @@ fn main() {
                 Arc::new(EscPosRenderer::default()),
                 clock.clone(),
             );
+            let sync_service = SyncService::new(sync_repo);
             let auth =
                 AuthService::new(user_repo, Arc::new(Argon2PasswordHasher), audit_repo, clock);
             tauri::async_runtime::block_on(auth.bootstrap_password("admin", "admin123"))?;
@@ -467,6 +517,7 @@ fn main() {
                 invoices,
                 cash,
                 print,
+                sync: sync_service,
                 print_dir: tickets_dir,
                 auth,
                 session: Arc::new(RwLock::new(None)),
@@ -491,7 +542,11 @@ fn main() {
             print_ticket,
             print_pending,
             list_print_jobs,
-            list_sales
+            list_sales,
+            sync_status,
+            list_failed_sync_events,
+            retry_sync_events,
+            retry_all_sync_events
         ])
         .run(tauri::generate_context!())
         .expect("error while running General TPV");

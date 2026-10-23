@@ -183,6 +183,28 @@ export interface AppInfo {
   open_cash: CashSession | null;
 }
 
+export interface SyncStatus {
+  pending: number;
+  sent: number;
+  failed: number;
+  oldest_pending_at: string | null;
+  last_sent_at: string | null;
+  last_failed_at: string | null;
+  last_error: string | null;
+}
+
+export interface QuarantinedEvent {
+  event: {
+    event_id: string;
+    event_type: string;
+    aggregate_type: string;
+    occurred_at: string;
+  };
+  attempts: number;
+  failed_at: string;
+  last_error: string | null;
+}
+
 export const api = {
   login: (username: string, password: string) =>
     invoke<SessionUser>('login', { username, password }),
@@ -225,7 +247,13 @@ export const api = {
     invoke<PrintSummary>('print_ticket', { saleId, reprint }),
   printPending: () => invoke<unknown[]>('print_pending'),
   listPrintJobs: () => invoke<PrintJob[]>('list_print_jobs'),
-  listSales: () => invoke<SaleView[]>('list_sales')
+  listSales: () => invoke<SaleView[]>('list_sales'),
+  syncStatus: () => invoke<SyncStatus>('sync_status'),
+  listFailedSyncEvents: (limit = 20) =>
+    invoke<QuarantinedEvent[]>('list_failed_sync_events', { limit }),
+  retrySyncEvents: (eventIds: string[]) =>
+    invoke<number>('retry_sync_events', { eventIds }),
+  retryAllSyncEvents: () => invoke<number>('retry_all_sync_events')
 };
 
 export function formatMoney(cents: MoneyCents): string {

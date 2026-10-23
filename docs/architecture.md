@@ -62,6 +62,7 @@ Base local SQLite con WAL y migraciones embebidas:
 - `document_sequences` para numeración atómica.
 - `cash_sessions` con movimientos, cierres y reaperturas en JSON.
 - `sync_outbox` con el sobre completo del evento.
+- `local_identity` con el tenant y dispositivo estables del terminal.
 - `audit_log` append-only.
 
 SQLite guarda enums como texto, UUID como TEXT, fechas RFC3339 y dinero como INTEGER de céntimos.
@@ -111,7 +112,15 @@ SyncWorker::push_pending
   ├─ SyncOutboxRepository::pending_events
   ├─ SyncClient::push
   │    └─ reintentos con backoff exponencial (máx. 5 intentos)
-  └─ mark_events_sent (accepted + duplicates)
+  ├─ mark_events_sent (accepted + duplicates)
+  └─ mark_events_failed
+       ├─ rechazos por evento devueltos por la central
+       └─ errores no reintentables o reintentos agotados
+
+SyncService (tpv-application)
+  ├─ status → pendientes / enviados / en cuarentena
+  ├─ quarantine → eventos fallidos con intentos y último error
+  └─ retry_failed / retry_all_failed → vuelven a la cola
 
 Central
   ├─ MemoryStore (desarrollo/tests)
@@ -134,6 +143,9 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - `event_id` UUIDv7 y deduplicación idempotente.
 - El hash del sobre es integridad técnica, **no** una cadena fiscal.
 - La central usa PostgreSQL cuando existe `DATABASE_URL`; sin ella cae a un ledger en memoria para desarrollo y tests.
+- El tenant y el dispositivo se crean una vez y se guardan en `local_identity`, de modo que los eventos pendientes siguen siendo válidos tras reiniciar el terminal.
+- Un evento rechazado o agotado se marca en `sync_outbox` con `failed_at`, `attempts` y `last_error`; deja de bloquear la cola y aparece en la consola de cuarentena.
+- La UI del TPV y el CLI muestran el estado local y permiten reintentar la cuarentena sin reiniciar el terminal.
 
 ## 6. Central y backoffice
 
@@ -152,6 +164,7 @@ Implementado:
 - Transacciones atómicas para venta + outbox + auditoría.
 - Token bearer opcional en la central.
 - CORS y trazas HTTP.
+- Reintentos con backoff, cuarentena persistente y reintento manual.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
@@ -159,7 +172,7 @@ Pendiente para producción:
 - RBAC granular por comando y gestión de usuarios desde backoffice.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
 - Enrolamiento y revocación de dispositivos en la central.
-- Reintentos con backoff, cuarentena y resolución de conflictos de maestros.
+- Resolución automática de conflictos de maestros.
 - Firma de actualizaciones, SBOM y pipeline de release.
 - Pruebas hardware-in-the-loop y de carga.
 
@@ -169,9 +182,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Estado de sync visible en UI y consola de cuarentena.
-2. SQLCipher y backups cifrados.
-3. RBAC granular y gestión de usuarios.
-4. Enrolamiento/revocación de dispositivos.
+1. SQLCipher y backups cifrados.
+2. RBAC granular y gestión de usuarios.
+3. Enrolamiento/revocación de dispositivos.
+4. Resolución de conflictos de maestros.
 5. Adaptadores USB/serie y hardware-in-the-loop.
 6. Pruebas E2E Tauri.
