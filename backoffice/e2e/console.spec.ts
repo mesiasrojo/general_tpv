@@ -146,6 +146,14 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
 
   await page.goto('/');
 
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
+  await page.getByRole('button', { name: 'Oscuro' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_them');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_them');
+  await page.getByRole('button', { name: 'Claro' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
+
   await expect(page.getByRole('heading', { name: 'Usuarios centrales' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Dispositivos registrados' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Conflictos detectados' })).toBeVisible();

@@ -502,6 +502,14 @@ test.describe('TPV desktop UI', () => {
     page.on('dialog', (dialog) => void dialog.accept('Devolución E2E'));
     await page.goto('/');
 
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
+    await page.getByRole('button', { name: 'Oscuro' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_them');
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_them');
+    await page.getByRole('button', { name: 'Claro' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
+
     await expect(page.getByRole('heading', { name: 'Identifícate' })).toBeVisible();
     await page.getByLabel('Usuario').fill('admin');
     await page.getByLabel('Contraseña').fill('admin123');

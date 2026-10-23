@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { applyTheme, nextTheme, storedTheme, type Theme } from './lib/theme';
   import {
     api,
     formatMoney,
@@ -27,6 +28,7 @@
     type UserRole
   } from './lib/api';
 
+  let theme = $state<Theme>('light_theme');
   let session = $state<SessionUser | null>(null);
   let loginUsername = $state('admin');
   let loginPassword = $state('admin123');
@@ -134,7 +136,14 @@
     return cents;
   });
 
+  function toggleTheme() {
+    theme = nextTheme(theme);
+    applyTheme(theme);
+  }
+
   onMount(() => {
+    theme = storedTheme();
+    applyTheme(theme);
     void restoreSession();
     const timer = window.setInterval(() => {
       if (!session) return;
@@ -942,6 +951,9 @@
 {#if !session}
   <main class="shell login-shell">
     <section class="panel login-card">
+      <button class="icon theme-button" type="button" onclick={toggleTheme}>
+        {theme === 'light_theme' ? 'Oscuro' : 'Claro'}
+      </button>
       <p class="eyebrow">GENERAL TPV · ACCESO</p>
       <h1>Identifícate</h1>
       <p class="muted">Cada venta y movimiento de caja queda a nombre del operador.</p>
@@ -991,6 +1003,9 @@
       {#if session.user.role === 'admin'}
         <button class="icon" type="button" onclick={() => void openUsers()}>Usuarios</button>
       {/if}
+      <button class="icon" type="button" onclick={toggleTheme}>
+        {theme === 'light_theme' ? 'Oscuro' : 'Claro'}
+      </button>
       <button class="icon" type="button" onclick={() => void logout()}>Salir</button>
     </div>
   </header>
@@ -1888,7 +1903,7 @@
     border: 1px solid var(--line);
     border-radius: 18px;
     padding: 18px;
-    box-shadow: 0 18px 50px rgb(0 0 0 / 18%);
+    box-shadow: var(--shadow);
   }
 
   .panel-heading {
@@ -2053,13 +2068,13 @@
   button.primary {
     background: var(--accent);
     border-color: transparent;
-    color: #0b1114;
+    color: var(--on-accent);
   }
 
   button.success {
     background: var(--success);
     border-color: transparent;
-    color: #07120c;
+    color: var(--on-success);
   }
 
   button.secondary,
@@ -2114,16 +2129,16 @@
   }
 
   .invoice-card {
-    border-color: rgb(112 224 161 / 45%);
+    border-color: var(--success-border);
   }
 
   .sync-card.warning {
-    border-color: rgb(255 176 92 / 55%);
+    border-color: var(--warning-border);
   }
 
   .badge.warn {
-    background: rgb(255 176 92 / 18%);
-    color: #ffb05c;
+    background: var(--warning-soft);
+    color: var(--warning);
   }
 
   .movement-form {
@@ -2150,7 +2165,7 @@
   }
 
   .movement-row strong.deposit {
-    color: #70e0a1;
+    color: var(--success);
   }
 
   .sync-counts {
@@ -2216,7 +2231,7 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgb(3 8 10 / 72%);
+    background: var(--modal-backdrop);
     display: grid;
     place-items: center;
     padding: 24px;
@@ -2229,7 +2244,7 @@
     border: 1px solid var(--line);
     border-radius: 18px;
     padding: 22px;
-    box-shadow: 0 30px 80px rgb(0 0 0 / 45%);
+    box-shadow: var(--modal-shadow);
   }
 
   .users-modal {
@@ -2454,8 +2469,8 @@
   }
 
   .badge.inactive {
-    background: #4b2c2c;
-    color: #ffd8d8;
+    background: var(--danger-soft);
+    color: var(--danger-text);
   }
 
   .conflict-summary {
@@ -2495,7 +2510,7 @@
 
   .methods button.active {
     background: var(--accent);
-    color: #0b1114;
+    color: var(--on-accent);
     border-color: transparent;
   }
 
@@ -2514,6 +2529,13 @@
 
   .login-card {
     width: min(420px, 100%);
+    position: relative;
+  }
+
+  .theme-button {
+    position: absolute;
+    top: 14px;
+    right: 14px;
   }
 
   .login-card h1 {

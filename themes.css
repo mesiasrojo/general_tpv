@@ -1,0 +1,81 @@
+/*
+ * General TPV appearance themes.
+ * The application default is light_theme. The previous dark appearance is
+ * preserved verbatim as dark_them.
+ */
+:root,
+[data-theme="light_theme"] {
+  color-scheme: light;
+  --bg: #f6f9ff;
+  --bg-2: #eef4ff;
+  --panel: #ffffff;
+  --panel-2: #f1f6ff;
+  --line: #c9d9ef;
+  --text: #10233f;
+  --muted: #4f6b8e;
+  --muted-2: #7b91ad;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --on-accent: #ffffff;
+  --success: #15803d;
+  --on-success: #ffffff;
+  --success-soft: #eaf7ef;
+  --success-border: #a9d9b8;
+  --warning: #b45309;
+  --warning-soft: #fff4e5;
+  --warning-border: #f0c48a;
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --danger-border: #f2b8b8;
+  --danger-text: #991b1b;
+  --badge-bg: #f2f7ff;
+  --focus-ring: 0 0 0 3px rgb(37 99 235 / 16%);
+  --selection: rgb(37 99 235 / 18%);
+  --glow-1: #dbeafe;
+  --glow-2: #e0f2fe;
+  --shadow: 0 18px 50px rgb(30 64 175 / 8%);
+  --modal-shadow: 0 30px 80px rgb(30 64 175 / 18%);
+  --modal-backdrop: rgb(15 35 70 / 45%);
+  --secondary-bg: #e8f0ff;
+  --secondary-text: #15365f;
+  --button-danger-bg: #dc2626;
+  --button-danger-text: #ffffff;
+}
+
+[data-theme="dark_them"] {
+  color-scheme: dark;
+  --bg: #081114;
+  --bg-2: #0d191d;
+  --panel: #111f24;
+  --panel-2: #172a30;
+  --line: #284047;
+  --text: #edf7f5;
+  --muted: #9fb8b5;
+  --muted-2: #6f8c89;
+  --accent: #78e0b0;
+  --accent-strong: #5cc996;
+  --on-accent: #0b1114;
+  --success: #9bf0bd;
+  --on-success: #07120c;
+  --success-soft: rgb(120 224 176 / 8%);
+  --success-border: rgb(120 224 176 / 35%);
+  --warning: #ffb05c;
+  --warning-soft: rgb(255 176 92 / 18%);
+  --warning-border: rgb(255 176 92 / 55%);
+  --danger: #ff8b8b;
+  --danger-soft: #2a1515;
+  --danger-border: #7a3f3f;
+  --danger-text: #ffd8d8;
+  --badge-bg: rgb(255 255 255 / 3%);
+  --focus-ring: 0 0 0 3px rgb(120 224 176 / 18%);
+  --selection: rgb(120 224 176 / 30%);
+  --glow-1: #163138;
+  --glow-2: #0f2b26;
+  --shadow: 0 18px 50px rgb(0 0 0 / 18%);
+  --modal-shadow: 0 30px 80px rgb(0 0 0 / 45%);
+  --modal-backdrop: rgb(3 8 10 / 72%);
+  --secondary-bg: #20343a;
+  --secondary-text: #edf7f5;
+  --button-danger-bg: #7a3f3f;
+  --button-danger-text: #ffecec;
+}

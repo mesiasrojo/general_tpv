@@ -1,16 +1,4 @@
 :root {
-  color-scheme: dark;
-  --bg: #081114;
-  --bg-2: #0d191d;
-  --panel: #111f24;
-  --panel-2: #172a30;
-  --line: #284047;
-  --text: #edf7f5;
-  --muted: #9fb8b5;
-  --muted-2: #6f8c89;
-  --accent: #78e0b0;
-  --success: #9bf0bd;
-  --danger: #ff8b8b;
   font-family: "Segoe UI", "Inter", system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
@@ -25,13 +13,14 @@ body {
   margin: 0;
   min-height: 100%;
   background:
-    radial-gradient(1200px 600px at 15% -10%, #163138 0%, transparent 55%),
-    radial-gradient(900px 500px at 110% 10%, #0f2b26 0%, transparent 50%),
+    radial-gradient(1200px 600px at 15% -10%, var(--glow-1) 0%, transparent 55%),
+    radial-gradient(900px 500px at 110% 10%, var(--glow-2) 0%, transparent 50%),
     var(--bg);
 }
 
 body {
   min-height: 100vh;
+  color: var(--text);
 }
 
 button,
@@ -57,7 +46,7 @@ select:focus,
 textarea:focus,
 button:focus-visible {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(120 224 176 / 18%);
+  box-shadow: var(--focus-ring);
 }
 
 h1,
@@ -82,24 +71,24 @@ p {
   border-radius: 999px;
   padding: 5px 10px;
   color: var(--muted);
-  background: rgb(255 255 255 / 3%);
+  background: var(--badge-bg);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.06em;
 }
 
 .badge.online {
-  color: var(--accent);
-  border-color: rgb(120 224 176 / 35%);
-  background: rgb(120 224 176 / 8%);
+  color: var(--success);
+  border-color: var(--success-border);
+  background: var(--success-soft);
 }
 
 .message {
   margin-bottom: 14px;
   padding: 10px 14px;
   border-radius: 10px;
-  border: 1px solid rgb(120 224 176 / 25%);
-  background: rgb(120 224 176 / 8%);
+  border: 1px solid var(--success-border);
+  background: var(--success-soft);
   color: var(--text);
   font-size: 0.9rem;
 }
@@ -121,5 +110,5 @@ button.icon {
 }
 
 ::selection {
-  background: rgb(120 224 176 / 30%);
+  background: var(--selection);
 }

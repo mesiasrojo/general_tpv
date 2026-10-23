@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import '../../../themes.css';
+  import { applyTheme, nextTheme, storedTheme, type Theme } from '$lib/theme';
 
   interface SyncEvent {
     event_id: string;
@@ -79,6 +81,7 @@
   let events = $state<StoredEvent[]>([]);
   let devices = $state<DeviceRecord[]>([]);
   let conflicts = $state<MasterDataConflict[]>([]);
+  let theme = $state<Theme>('light_theme');
   let centralUsers = $state<CentralUser[]>([]);
   let error = $state('');
   let actionError = $state('');
@@ -103,6 +106,8 @@
   let activeUsers = $derived(centralUsers.filter((user) => user.active).length);
 
   onMount(() => {
+    theme = storedTheme();
+    applyTheme(theme);
     void load();
   });
 
@@ -294,6 +299,11 @@
     }
   }
 
+  function toggleTheme() {
+    theme = nextTheme(theme);
+    applyTheme(theme);
+  }
+
   function formatDate(value: unknown): string {
     if (!value) return '—';
     if (Array.isArray(value) && value.length >= 6) {
@@ -361,6 +371,9 @@
     </div>
     <div class="actions">
       <span class="status" class:ok={!error}>{error ? 'SIN CONEXIÓN' : 'CONECTADO'}</span>
+      <button class="secondary" type="button" onclick={toggleTheme}>
+        {theme === 'light_theme' ? 'Oscuro' : 'Claro'}
+      </button>
       <button type="button" onclick={() => void load()} disabled={loading}>
         {loading ? 'Actualizando…' : 'Actualizar'}
       </button>
@@ -703,8 +716,11 @@
 <style>
   :global(body) {
     margin: 0;
-    background: #081114;
-    color: #edf7f5;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, var(--glow-1) 0%, transparent 55%),
+      radial-gradient(900px 500px at 110% 10%, var(--glow-2) 0%, transparent 50%),
+      var(--bg);
+    color: var(--text);
     font-family: "Segoe UI", system-ui, sans-serif;
   }
 
@@ -734,7 +750,7 @@
 
   .eyebrow {
     margin: 0;
-    color: #78e0b0;
+    color: var(--accent);
     font-size: 0.7rem;
     font-weight: 800;
     letter-spacing: 0.16em;
@@ -742,7 +758,7 @@
   }
 
   .muted {
-    color: #9fb8b5;
+    color: var(--muted);
   }
 
   .small {
@@ -756,8 +772,8 @@
   }
 
   .status {
-    border: 1px solid #6e4040;
-    color: #ffb0b0;
+    border: 1px solid var(--danger-border);
+    color: var(--danger);
     border-radius: 999px;
     padding: 6px 10px;
     font-size: 0.72rem;
@@ -765,13 +781,13 @@
   }
 
   .status.ok {
-    border-color: #2b6650;
-    color: #9bf0bd;
+    border-color: var(--success-border);
+    color: var(--success);
   }
 
   button {
-    background: #78e0b0;
-    color: #07120c;
+    background: var(--accent);
+    color: var(--on-accent);
     border: 0;
     border-radius: 10px;
     padding: 10px 14px;
@@ -786,15 +802,15 @@
   }
 
   button.danger {
-    background: #7a3f3f;
-    color: #ffecec;
+    background: var(--button-danger-bg);
+    color: var(--button-danger-text);
     padding: 7px 10px;
     font-size: 0.8rem;
   }
 
   button.secondary {
-    background: #20343a;
-    color: #edf7f5;
+    background: var(--secondary-bg);
+    color: var(--text);
     padding: 7px 10px;
     font-size: 0.8rem;
   }
@@ -813,7 +829,7 @@
   }
 
   .field span {
-    color: #9fb8b5;
+    color: var(--muted);
     font-size: 0.72rem;
     font-weight: 700;
     letter-spacing: 0.06em;
@@ -822,10 +838,10 @@
 
   .field input,
   .field select {
-    background: #0b171b;
-    border: 1px solid #284047;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
     border-radius: 9px;
-    color: #edf7f5;
+    color: var(--text);
     padding: 9px 10px;
     font: inherit;
   }
@@ -836,9 +852,9 @@
   }
 
   .error {
-    border: 1px solid #7a3f3f;
-    background: #2a1515;
-    color: #ffb0b0;
+    border: 1px solid var(--danger-border);
+    background: var(--danger-soft);
+    color: var(--danger);
     padding: 12px 14px;
     border-radius: 10px;
   }
@@ -851,8 +867,8 @@
   }
 
   .cards article {
-    background: #111f24;
-    border: 1px solid #284047;
+    background: var(--panel);
+    border: 1px solid var(--line);
     border-radius: 16px;
     padding: 16px;
     display: grid;
@@ -869,13 +885,13 @@
   }
 
   .cards span {
-    color: #9fb8b5;
+    color: var(--muted);
     font-size: 0.8rem;
   }
 
   .panel {
-    background: #111f24;
-    border: 1px solid #284047;
+    background: var(--panel);
+    border: 1px solid var(--line);
     border-radius: 18px;
     padding: 18px;
     margin-top: 18px;
@@ -903,12 +919,12 @@
   td {
     text-align: left;
     padding: 10px 8px;
-    border-bottom: 1px solid #284047;
+    border-bottom: 1px solid var(--line);
     white-space: nowrap;
   }
 
   th {
-    color: #9fb8b5;
+    color: var(--muted);
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -929,22 +945,22 @@
   }
 
   .pill {
-    border: 1px solid #2b6650;
-    background: #10251e;
-    color: #9bf0bd;
+    border: 1px solid var(--success-border);
+    background: var(--success-soft);
+    color: var(--success);
     border-radius: 999px;
     padding: 3px 8px;
     font-size: 0.75rem;
   }
 
   .pill.revoked {
-    border-color: #6e4040;
-    background: #2a1515;
-    color: #ffb0b0;
+    border-color: var(--danger-border);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   .empty {
-    color: #9fb8b5;
+    color: var(--muted);
     text-align: center;
     padding: 28px;
   }
