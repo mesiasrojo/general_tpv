@@ -74,8 +74,41 @@
     updated_at: string;
   }
 
+  interface AuthUser {
+    id: string | null;
+    tenant_id: string | null;
+    username: string;
+    display_name: string;
+    role: UserRole;
+  }
+
+  interface AuthStatus {
+    has_users: boolean;
+    suggested_tenant_id: string | null;
+  }
+
+  interface AuthSession {
+    token: string;
+    expires_at: string;
+    user: AuthUser;
+  }
+
   const base = (import.meta.env.VITE_CENTRAL_URL ?? 'http://localhost:8080').replace(/\/+$/, '');
-  const token = import.meta.env.VITE_CENTRAL_TOKEN ?? '';
+  const configuredToken = import.meta.env.VITE_CENTRAL_TOKEN ?? '';
+  const sessionKey = 'general-tpv-backoffice-session';
+
+  let authToken = $state('');
+  let authUser = $state<AuthUser | null>(null);
+  let authStatus = $state<AuthStatus | null>(null);
+  let authChecking = $state(true);
+  let authBusy = $state(false);
+  let authError = $state('');
+  let loginUsername = $state('');
+  let loginPassword = $state('');
+  let bootstrapTenantId = $state('');
+  let bootstrapUsername = $state('');
+  let bootstrapDisplayName = $state('Administrador');
+  let bootstrapPassword = $state('');
 
   let health = $state<Health | null>(null);
   let events = $state<StoredEvent[]>([]);
@@ -104,20 +137,138 @@
   let lastSale = $derived(sales.at(-1) ?? null);
   let activeDevices = $derived(devices.filter((device) => device.status === 'active').length);
   let activeUsers = $derived(centralUsers.filter((user) => user.active).length);
+  let canWrite = $derived(authUser?.role === 'admin');
 
   onMount(() => {
     theme = storedTheme();
     applyTheme(theme);
-    void load();
+    void initializeAuth();
   });
 
+  function authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (authToken) headers.Authorization = `Bearer ${authToken}`;
+    return headers;
+  }
+
+  function applySession(session: AuthSession) {
+    authToken = session.token;
+    authUser = session.user;
+    sessionStorage.setItem(sessionKey, session.token);
+    authStatus = { has_users: true, suggested_tenant_id: null };
+    authError = '';
+  }
+
+  function clearSession(message = '') {
+    authToken = '';
+    authUser = null;
+    sessionStorage.removeItem(sessionKey);
+    authStatus = { has_users: true, suggested_tenant_id: null };
+    authChecking = false;
+    authError = message;
+  }
+
+  async function initializeAuth() {
+    authChecking = true;
+    authError = '';
+    const stored = sessionStorage.getItem(sessionKey) ?? '';
+    authToken = stored || configuredToken;
+    if (authToken) {
+      try {
+        const response = await fetch(`${base}/api/v1/auth/me`, { headers: authHeaders() });
+        if (response.ok) {
+          authUser = (await response.json()) as AuthUser;
+          authChecking = false;
+          await load();
+          return;
+        }
+      } catch {
+        // Fall through to the login or bootstrap screen.
+      }
+      authToken = '';
+      sessionStorage.removeItem(sessionKey);
+    }
+    try {
+      const response = await fetch(`${base}/api/v1/auth/status`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      authStatus = (await response.json()) as AuthStatus;
+      if (authStatus.suggested_tenant_id && !bootstrapTenantId) {
+        bootstrapTenantId = authStatus.suggested_tenant_id;
+      }
+    } catch (cause) {
+      authError = `No se pudo consultar la central: ${String(cause)}`;
+    } finally {
+      authChecking = false;
+    }
+  }
+
+  async function login() {
+    authBusy = true;
+    authError = '';
+    try {
+      const response = await fetch(`${base}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword })
+      });
+      if (!response.ok) throw new Error(await responseMessage(response));
+      const session = (await response.json()) as AuthSession;
+      applySession(session);
+      loginPassword = '';
+      await load();
+    } catch (cause) {
+      authError = `No se pudo iniciar sesión: ${String(cause)}`;
+    } finally {
+      authBusy = false;
+    }
+  }
+
+  async function bootstrap() {
+    authBusy = true;
+    authError = '';
+    try {
+      const response = await fetch(`${base}/api/v1/auth/bootstrap`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          tenant_id: bootstrapTenantId.trim() || null,
+          username: bootstrapUsername,
+          display_name: bootstrapDisplayName,
+          password: bootstrapPassword
+        })
+      });
+      if (!response.ok) throw new Error(await responseMessage(response));
+      const session = (await response.json()) as AuthSession;
+      applySession(session);
+      bootstrapPassword = '';
+      await load();
+    } catch (cause) {
+      authError = `No se pudo crear el administrador: ${String(cause)}`;
+    } finally {
+      authBusy = false;
+    }
+  }
+
+  async function logout() {
+    try {
+      await fetch(`${base}/api/v1/auth/logout`, {
+        method: 'POST',
+        headers: authHeaders()
+      });
+    } catch {
+      // Local logout must still work when the central is unavailable.
+    }
+    clearSession();
+    loginPassword = '';
+  }
+
   async function load() {
+    if (!authUser) return;
     loading = true;
     error = '';
     actionError = '';
     usersError = '';
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const headers = authHeaders();
     try {
       const [
         healthResponse,
@@ -133,6 +284,10 @@
         fetch(`${base}/api/v1/users`, { headers })
       ]);
       if (!healthResponse.ok) throw new Error(`health HTTP ${healthResponse.status}`);
+      if ([eventsResponse, devicesResponse, conflictsResponse, usersResponse].some((response) => response.status === 401)) {
+        clearSession('La sesión ha caducado. Vuelve a iniciar sesión.');
+        return;
+      }
       if (!eventsResponse.ok) throw new Error(`events HTTP ${eventsResponse.status}`);
       if (!devicesResponse.ok) throw new Error(`devices HTTP ${devicesResponse.status}`);
       if (!conflictsResponse.ok) throw new Error(`conflicts HTTP ${conflictsResponse.status}`);
@@ -165,8 +320,7 @@
     }
     busyDeviceId = device.device_id;
     actionError = '';
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const headers = authHeaders();
     try {
       const response = await fetch(`${base}/api/v1/devices/${device.device_id}/revoke`, {
         method: 'POST',
@@ -216,8 +370,7 @@
       return;
     }
     userCreating = true;
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const headers = { ...authHeaders(), 'content-type': 'application/json' };
     try {
       const response = await fetch(`${base}/api/v1/users`, {
         method: 'POST',
@@ -248,8 +401,7 @@
     if (busyUserId) return;
     busyUserId = user.id;
     usersError = '';
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const headers = { ...authHeaders(), 'content-type': 'application/json' };
     try {
       const response = await fetch(`${base}/api/v1/users/${user.id}`, {
         method: 'PUT',
@@ -281,8 +433,7 @@
     }
     busyUserId = user.id;
     usersError = '';
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const headers = { ...authHeaders(), 'content-type': 'application/json' };
     try {
       const response = await fetch(`${base}/api/v1/users/${user.id}/password`, {
         method: 'POST',
@@ -362,7 +513,79 @@
   <title>General TPV · Central</title>
 </svelte:head>
 
-<main class="shell">
+{#if authChecking}
+  <main class="login-shell">
+    <section class="panel login-card">
+      <p class="muted">Comprobando sesión…</p>
+    </section>
+  </main>
+{:else if !authUser}
+  <main class="login-shell">
+    <section class="panel login-card">
+      <button class="icon theme-button" type="button" onclick={toggleTheme}>
+        {theme === 'light_theme' ? 'Oscuro' : 'Claro'}
+      </button>
+      <p class="eyebrow">GENERAL TPV · BACKOFFICE</p>
+      <h1>{authStatus && !authStatus.has_users ? 'Configuración inicial' : 'Acceso al backoffice'}</h1>
+      {#if authStatus && !authStatus.has_users}
+        <p class="muted">
+          Todavía no hay usuarios centrales. Crea el administrador inicial; después podrás
+          gestionar usuarios y terminales.
+        </p>
+        <form
+          onsubmit={(event) => {
+            event.preventDefault();
+            void bootstrap();
+          }}
+        >
+          <label class="field">
+            <span>Tenant</span>
+            <input bind:value={bootstrapTenantId} placeholder="UUID del tenant (opcional)" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Usuario</span>
+            <input bind:value={bootstrapUsername} autocomplete="username" />
+          </label>
+          <label class="field">
+            <span>Nombre visible</span>
+            <input bind:value={bootstrapDisplayName} />
+          </label>
+          <label class="field">
+            <span>Contraseña</span>
+            <input bind:value={bootstrapPassword} type="password" autocomplete="new-password" />
+          </label>
+          <button class="primary full" type="submit" disabled={authBusy}>
+            {authBusy ? 'Creando…' : 'Crear administrador'}
+          </button>
+        </form>
+      {:else}
+        <p class="muted">Acceso reservado a administradores, responsables y auditores.</p>
+        <form
+          onsubmit={(event) => {
+            event.preventDefault();
+            void login();
+          }}
+        >
+          <label class="field">
+            <span>Usuario</span>
+            <input bind:value={loginUsername} autocomplete="username" />
+          </label>
+          <label class="field">
+            <span>Contraseña</span>
+            <input bind:value={loginPassword} type="password" autocomplete="current-password" />
+          </label>
+          <button class="primary full" type="submit" disabled={authBusy}>
+            {authBusy ? 'Comprobando…' : 'Entrar'}
+          </button>
+        </form>
+      {/if}
+      {#if authError}
+        <p class="error" role="alert">{authError}</p>
+      {/if}
+    </section>
+  </main>
+{:else}
+  <main class="shell">
   <header class="topbar">
     <div>
       <p class="eyebrow">GENERAL TPV · CENTRAL</p>
@@ -370,6 +593,7 @@
       <p class="muted">Eventos recibidos desde las cajas. Solo lectura, sin reescribir ventas.</p>
     </div>
     <div class="actions">
+      <span class="muted small">{authUser?.display_name} · {authUser?.role}</span>
       <span class="status" class:ok={!error}>{error ? 'SIN CONEXIÓN' : 'CONECTADO'}</span>
       <button class="secondary" type="button" onclick={toggleTheme}>
         {theme === 'light_theme' ? 'Oscuro' : 'Claro'}
@@ -377,6 +601,7 @@
       <button type="button" onclick={() => void load()} disabled={loading}>
         {loading ? 'Actualizando…' : 'Actualizar'}
       </button>
+      <button class="secondary" type="button" onclick={() => void logout()}>Salir</button>
     </div>
   </header>
 
@@ -438,6 +663,11 @@
       <p class="error" role="alert">{usersError}</p>
     {/if}
 
+    {#if !canWrite}
+      <p class="muted small">Modo solo lectura: se requiere rol de administrador para crear o modificar usuarios.</p>
+    {/if}
+
+    {#if canWrite}
     <form
       class="user-form"
       onsubmit={(event) => {
@@ -480,6 +710,7 @@
         </button>
       </div>
     </form>
+    {/if}
 
     <div class="table-wrap">
       <table>
@@ -510,22 +741,26 @@
               </td>
               <td class="mono">{user.version}</td>
               <td class="row-actions">
-                <button
-                  class="secondary"
-                  type="button"
-                  disabled={busyUserId === user.id}
-                  onclick={() => void toggleCentralUser(user)}
-                >
-                  {user.active ? 'Desactivar' : 'Activar'}
-                </button>
-                <button
-                  class="secondary"
-                  type="button"
-                  disabled={busyUserId === user.id}
-                  onclick={() => void resetCentralUserPassword(user)}
-                >
-                  Restablecer
-                </button>
+                {#if canWrite}
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={busyUserId === user.id}
+                    onclick={() => void toggleCentralUser(user)}
+                  >
+                    {user.active ? 'Desactivar' : 'Activar'}
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={busyUserId === user.id}
+                    onclick={() => void resetCentralUserPassword(user)}
+                  >
+                    Restablecer
+                  </button>
+                {:else}
+                  <span class="muted">—</span>
+                {/if}
               </td>
             </tr>
           {:else}
@@ -573,14 +808,18 @@
               <td>{formatDate(device.enrolled_at)}</td>
               <td>{formatDate(device.last_seen_at)}</td>
               <td>
-                <button
-                  class="danger"
-                  type="button"
-                  disabled={device.status === 'revoked' || busyDeviceId === device.device_id}
-                  onclick={() => void revokeDevice(device)}
-                >
-                  {busyDeviceId === device.device_id ? 'Revocando…' : 'Revocar'}
-                </button>
+                {#if canWrite}
+                  <button
+                    class="danger"
+                    type="button"
+                    disabled={device.status === 'revoked' || busyDeviceId === device.device_id}
+                    onclick={() => void revokeDevice(device)}
+                  >
+                    {busyDeviceId === device.device_id ? 'Revocando…' : 'Revocar'}
+                  </button>
+                {:else}
+                  <span class="muted">—</span>
+                {/if}
               </td>
             </tr>
           {:else}
@@ -712,6 +951,7 @@
     </div>
   </section>
 </main>
+{/if}
 
 <style>
   :global(*),
@@ -734,6 +974,41 @@
     max-width: 1240px;
     margin: 0 auto;
     padding: 32px 24px 64px;
+  }
+
+  .login-shell {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+
+  .login-card {
+    width: min(440px, 100%);
+    position: relative;
+  }
+
+  .login-card h1 {
+    margin: 4px 0 8px;
+  }
+
+  .login-card form {
+    margin-top: 16px;
+  }
+
+  .login-card .field {
+    margin: 12px 0;
+  }
+
+  .theme-button {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+  }
+
+  .full {
+    width: 100%;
+    margin-top: 8px;
   }
 
   .topbar {

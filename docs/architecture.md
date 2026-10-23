@@ -196,16 +196,19 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 
 ## 6. Central y backoffice
 
-- `tpv-server` expone salud, push, pull, eventos, ventas, dispositivos y usuarios centrales.
-- `POST /api/v1/devices/enroll` emite un token por dispositivo; `GET /api/v1/devices` y `POST /api/v1/devices/{id}/revoke` requieren el token de administración.
-- `GET/POST /api/v1/users`, `PUT /api/v1/users/{id}` y `POST /api/v1/users/{id}/password` gestionan cuentas centrales; las contraseñas se guardan como Argon2id y nunca se devuelven por la API.
+- `tpv-server` expone salud, autenticación, push, pull, eventos, ventas, dispositivos y usuarios centrales.
+- `POST /api/v1/auth/bootstrap` crea el primer administrador solo cuando no existen usuarios; `POST /api/v1/auth/login` valida Argon2id y emite una sesión opaca de 12 horas; `GET /api/v1/auth/me` y `POST /api/v1/auth/logout` completan el ciclo.
+- Las sesiones se guardan como hash SHA-256 en `central_sessions`; desactivar un usuario o restablecer su contraseña invalida sus sesiones.
+- `POST /api/v1/devices/enroll` emite un token por dispositivo; `GET /api/v1/devices` y `POST /api/v1/devices/{id}/revoke` aceptan token de administración estático o sesión de administrador.
+- `GET/POST /api/v1/users`, `PUT /api/v1/users/{id}` y `POST /api/v1/users/{id}/password` gestionan cuentas centrales; las escrituras requieren rol `admin`, las lecturas admiten `manager` y `auditor`. Las contraseñas se guardan como Argon2id y nunca se devuelven por la API.
 - Cada alta, cambio o reset de usuario emite `user.provisioned` firmado para cada tienda.
 - `GET /api/v1/master-data/conflicts` lista los conflictos de maestros auditados.
 - Sirve el backoffice estático si existe `backoffice/build` o `TPV_BACKOFFICE_DIR`.
 - El backoffice muestra salud, cursor, ventas, facturas, usuarios centrales, últimos eventos, dispositivos registrados y conflictos de datos maestros.
 - Desde la consola de usuarios se pueden crear cuentas, activarlas o desactivarlas y restablecer contraseñas; desde la de dispositivos se revoca un terminal.
 - La consola no reescribe ventas ni documentos.
-- Las llamadas de gestión usan el token de administración configurado en la central.
+- El backoffice exige inicio de sesión; `manager` y `auditor` ven la consola en modo solo lectura y `cashier` no puede acceder.
+- `TPV_CENTRAL_TOKEN` sigue disponible para automatización y enrolamiento; `TPV_REQUIRE_BACKOFFICE_AUTH=1` cierra la API al modo local.
 
 ## 7. Seguridad y límites actuales
 
@@ -223,8 +226,8 @@ Implementado:
 - Protección del último administrador activo y de la propia cuenta.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.
-- Token bearer opcional en la central.
-- CORS y trazas HTTP.
+- Token bearer opcional en la central y sesiones de backoffice con expiración, hash de token y RBAC.
+- Bootstrap del primer administrador, invalidación de sesiones y CORS/trazas HTTP.
 - Reintentos con backoff, cuarentena persistente y reintento manual.
 - SQLCipher con clave local de 256 bits y migración automática desde texto plano.
 - Backups cifrados consistentes desde CLI y UI, con la misma clave del terminal.

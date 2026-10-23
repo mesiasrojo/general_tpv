@@ -18,6 +18,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (eventos, usuarios, dispositivos y conflictos) |
+| Autenticación y RBAC del backoffice | Implementado (bootstrap, sesiones y roles admin/manager/auditor) |
 | Temas de apariencia | Implementado (`light_theme` por defecto y `dark_theme` conservado) |
 | Usuarios centrales y aprovisionamiento | Implementado (API, backoffice, pull del CLI y sync automática Tauri) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
@@ -53,10 +54,12 @@ Terminal A (PostgreSQL con Docker):
 docker compose up -d postgres
 DATABASE_URL=postgres://tpv:tpv@127.0.0.1:55432/tpv \
 TPV_CENTRAL_ADDR=127.0.0.1:8080 \
+TPV_CENTRAL_TOKEN=cambia-este-secreto \
+TPV_REQUIRE_BACKOFFICE_AUTH=1 \
 cargo run -p tpv-server
 ```
 
-Sin `DATABASE_URL`, la central usa un ledger en memoria para desarrollo.
+Sin `DATABASE_URL`, la central usa un ledger en memoria para desarrollo. Sin `TPV_CENTRAL_TOKEN`, la API queda abierta en modo local; para producción configura un token y `TPV_REQUIRE_BACKOFFICE_AUTH=1`.
 
 Terminal B:
 
@@ -118,6 +121,11 @@ cargo run -p tpv-cli -- data/tpv.db --import-key data/tpv-key.export
 El servidor expone:
 
 - `GET /health`
+- `GET /api/v1/auth/status`
+- `POST /api/v1/auth/bootstrap`
+- `POST /api/v1/auth/login`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/auth/logout`
 - `POST /api/v1/sync/push`
 - `GET /api/v1/sync/pull?cursor=0`
 - `GET /api/v1/events`
@@ -206,9 +214,13 @@ npm install
 npm run dev
 ```
 
-Por defecto apunta a `http://localhost:8080`. Se puede cambiar con `VITE_CENTRAL_URL` y `VITE_CENTRAL_TOKEN`.
+Por defecto apunta a `http://localhost:8080`. Se puede cambiar con `VITE_CENTRAL_URL`. `VITE_CENTRAL_TOKEN` sigue disponible para automatización, pero el uso normal es iniciar sesión con una cuenta central.
 
-El backoffice muestra salud, eventos, ventas, facturas, usuarios centrales, dispositivos registrados y conflictos de datos maestros. Permite crear usuarios, activarlos o desactivarlos, restablecer contraseñas y revocar terminales con confirmación. Cada cambio de usuario genera eventos `user.provisioned` por tienda; los terminales los aplican en su siguiente sincronización.
+En una central nueva, el backoffice muestra el formulario de **configuración inicial** para crear el primer administrador. Después se accede con usuario y contraseña; la sesión dura 12 horas y se guarda en `sessionStorage`.
+
+Los roles `admin` pueden crear/modificar usuarios y revocar terminales. Los roles `manager` y `auditor` acceden en modo de solo lectura. Los cajeros no tienen acceso al backoffice.
+
+El backoffice muestra salud, eventos, ventas, facturas, usuarios centrales, dispositivos registrados y conflictos de datos maestros. Cada cambio de usuario genera eventos `user.provisioned` por tienda; los terminales los aplican en su siguiente sincronización.
 
 Para servir el backoffice desde la central:
 

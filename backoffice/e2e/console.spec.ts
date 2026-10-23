@@ -136,6 +136,38 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
     };
     await route.fulfill({ json: activeDevice });
   });
+  await page.route('**/api/v1/auth/status', (route) =>
+    route.fulfill({ json: { has_users: true, suggested_tenant_id: null } })
+  );
+  await page.route('**/api/v1/auth/me', (route) =>
+    route.fulfill({
+      json: {
+        id: '00000000-0000-7000-8000-000000000001',
+        tenant_id: '00000000-0000-7000-8000-000000000001',
+        username: 'central.admin',
+        display_name: 'Administrador Central',
+        role: 'admin'
+      }
+    })
+  );
+  await page.route('**/api/v1/auth/login', async (route) => {
+    const body = route.request().postDataJSON() as { username?: string };
+    const manager = body.username === 'manager';
+    await route.fulfill({
+      json: {
+        token: manager ? 'manager-session-token' : 'test-session-token',
+        expires_at: '2026-10-24T00:00:00Z',
+        user: {
+          id: '00000000-0000-7000-8000-000000000001',
+          tenant_id: '00000000-0000-7000-8000-000000000001',
+          username: manager ? 'manager' : 'central.admin',
+          display_name: manager ? 'Responsable Central' : 'Administrador Central',
+          role: manager ? 'manager' : 'admin'
+        }
+      }
+    });
+  });
+  await page.route('**/api/v1/auth/logout', (route) => route.fulfill({ status: 204 }));
   page.on('dialog', (dialog) => {
     if (dialog.type() === 'prompt') {
       void dialog.accept('nuevaClave123');
@@ -154,6 +186,11 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark_theme');
   await page.getByRole('button', { name: 'Claro' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
+
+  await expect(page.getByRole('heading', { name: 'Acceso al backoffice' })).toBeVisible();
+  await page.getByLabel('Usuario').fill('central.admin');
+  await page.getByLabel('Contraseña').fill('central123');
+  await page.getByRole('button', { name: 'Entrar' }).click();
 
   await expect(page.getByRole('heading', { name: 'Usuarios centrales' })).toBeVisible();
   const userFormOverflow = await page.evaluate(() => {
@@ -210,4 +247,13 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
 
   await expect(deviceRow.getByText('Revocado')).toBeVisible();
   await expect(deviceRow.getByRole('button', { name: 'Revocar' })).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Salir' }).click();
+  await expect(page.getByRole('heading', { name: 'Acceso al backoffice' })).toBeVisible();
+  await page.getByLabel('Usuario').fill('manager');
+  await page.getByLabel('Contraseña').fill('manager123');
+  await page.getByRole('button', { name: 'Entrar' }).click();
+  await expect(page.getByText(/Modo solo lectura/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Crear usuario' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Revocar' })).toHaveCount(0);
 });

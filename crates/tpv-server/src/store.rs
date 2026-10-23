@@ -110,6 +110,28 @@ pub struct UpdateCentralUser {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewCentralSession {
+    pub token_hash: String,
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub expires_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct CentralSessionRecord {
+    pub token_hash: String,
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub expires_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct EnrollDevice {
     pub device_id: Uuid,
     pub tenant_id: Uuid,
@@ -181,6 +203,17 @@ pub trait CentralStore: Send + Sync {
         id: Uuid,
         password_hash: &str,
     ) -> Result<Option<CentralUserRecord>, StoreError>;
+    async fn find_central_users_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Vec<CentralUserRecord>, StoreError>;
+    async fn create_central_session(&self, session: NewCentralSession) -> Result<(), StoreError>;
+    async fn central_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<CentralSessionRecord>, StoreError>;
+    async fn delete_central_session(&self, token_hash: &str) -> Result<(), StoreError>;
+    async fn delete_central_user_sessions(&self, user_id: Uuid) -> Result<(), StoreError>;
 }
 
 #[derive(Default)]
@@ -190,6 +223,7 @@ struct MemoryLedger {
     master_data: Vec<MemoryMasterData>,
     master_conflicts: Vec<MasterDataConflict>,
     users: Vec<CentralUserRecord>,
+    sessions: Vec<CentralSessionRecord>,
     next_seq: u64,
 }
 
@@ -519,6 +553,66 @@ impl CentralStore for MemoryStore {
         user.version = user.version.saturating_add(1);
         user.updated_at = time::OffsetDateTime::now_utc();
         Ok(Some(user.clone()))
+    }
+
+    async fn find_central_users_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Vec<CentralUserRecord>, StoreError> {
+        let ledger = self.inner.read().await;
+        Ok(ledger
+            .users
+            .iter()
+            .filter(|user| user.username == username)
+            .cloned()
+            .collect())
+    }
+
+    async fn create_central_session(&self, session: NewCentralSession) -> Result<(), StoreError> {
+        let mut ledger = self.inner.write().await;
+        ledger.sessions.retain(|existing| {
+            existing.token_hash != session.token_hash
+                && existing.expires_at > time::OffsetDateTime::now_utc()
+        });
+        ledger.sessions.push(CentralSessionRecord {
+            token_hash: session.token_hash,
+            user_id: session.user_id,
+            tenant_id: session.tenant_id,
+            username: session.username,
+            display_name: session.display_name,
+            role: session.role,
+            expires_at: session.expires_at,
+        });
+        Ok(())
+    }
+
+    async fn central_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<CentralSessionRecord>, StoreError> {
+        let ledger = self.inner.read().await;
+        Ok(ledger
+            .sessions
+            .iter()
+            .find(|session| {
+                session.token_hash == token_hash
+                    && session.expires_at > time::OffsetDateTime::now_utc()
+            })
+            .cloned())
+    }
+
+    async fn delete_central_session(&self, token_hash: &str) -> Result<(), StoreError> {
+        let mut ledger = self.inner.write().await;
+        ledger
+            .sessions
+            .retain(|session| session.token_hash != token_hash);
+        Ok(())
+    }
+
+    async fn delete_central_user_sessions(&self, user_id: Uuid) -> Result<(), StoreError> {
+        let mut ledger = self.inner.write().await;
+        ledger.sessions.retain(|session| session.user_id != user_id);
+        Ok(())
     }
 }
 
@@ -1004,6 +1098,82 @@ impl CentralStore for PostgresStore {
         .await?;
         row.as_ref().map(row_to_central_user).transpose()
     }
+
+    async fn find_central_users_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Vec<CentralUserRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, username, display_name, role, store_ids,
+                    active, version, created_at, updated_at, password_hash
+             FROM central_users
+             WHERE username = $1
+             ORDER BY tenant_id",
+        )
+        .bind(username)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_central_user).collect()
+    }
+
+    async fn create_central_session(&self, session: NewCentralSession) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM central_sessions WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO central_sessions
+                (token_hash, user_id, tenant_id, username, display_name, role, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (token_hash) DO UPDATE
+             SET user_id = EXCLUDED.user_id,
+                 tenant_id = EXCLUDED.tenant_id,
+                 username = EXCLUDED.username,
+                 display_name = EXCLUDED.display_name,
+                 role = EXCLUDED.role,
+                 expires_at = EXCLUDED.expires_at",
+        )
+        .bind(&session.token_hash)
+        .bind(session.user_id)
+        .bind(session.tenant_id)
+        .bind(&session.username)
+        .bind(&session.display_name)
+        .bind(role_to_str(session.role))
+        .bind(session.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn central_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<CentralSessionRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT token_hash, user_id, tenant_id, username, display_name, role, expires_at
+             FROM central_sessions
+             WHERE token_hash = $1 AND expires_at > NOW()",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_central_session).transpose()
+    }
+
+    async fn delete_central_session(&self, token_hash: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM central_sessions WHERE token_hash = $1")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_central_user_sessions(&self, user_id: Uuid) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM central_sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 fn role_to_str(role: Role) -> &'static str {
@@ -1042,6 +1212,18 @@ fn row_to_central_user(row: &sqlx::postgres::PgRow) -> Result<CentralUserRecord,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         password_hash: row.try_get("password_hash")?,
+    })
+}
+
+fn row_to_central_session(row: &sqlx::postgres::PgRow) -> Result<CentralSessionRecord, StoreError> {
+    Ok(CentralSessionRecord {
+        token_hash: row.try_get("token_hash")?,
+        user_id: row.try_get("user_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        username: row.try_get("username")?,
+        display_name: row.try_get("display_name")?,
+        role: role_from_str(&row.try_get::<String, _>("role")?)?,
+        expires_at: row.try_get("expires_at")?,
     })
 }
 

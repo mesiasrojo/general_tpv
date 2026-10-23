@@ -29,15 +29,24 @@ use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
 pub use store::{
-    CentralStore, CentralUserRecord, DeviceRecord, DeviceStatus, EnrollDevice, MemoryStore,
-    NewCentralUser, PostgresStore, PushStoreResult, StoreError, StoreHealth, StoredEvent,
-    UpdateCentralUser,
+    CentralSessionRecord, CentralStore, CentralUserRecord, DeviceRecord, DeviceStatus,
+    EnrollDevice, MemoryStore, NewCentralSession, NewCentralUser, PostgresStore, PushStoreResult,
+    StoreError, StoreHealth, StoredEvent, UpdateCentralUser,
 };
 
 #[derive(Clone)]
 pub struct AppState {
     token: Option<String>,
     store: Arc<dyn CentralStore>,
+    require_auth: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AuthorizedPrincipal {
+    username: String,
+    display_name: String,
+    role: Role,
+    tenant_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +116,43 @@ pub struct UpdateCentralUserRequest {
 #[derive(Debug, Deserialize)]
 pub struct ResetCentralUserPasswordRequest {
     pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+    pub tenant_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BootstrapRequest {
+    pub tenant_id: Option<Uuid>,
+    pub username: String,
+    pub display_name: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthStatusResponse {
+    pub has_users: bool,
+    pub suggested_tenant_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthUserResponse {
+    pub id: Option<Uuid>,
+    pub tenant_id: Option<Uuid>,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthSessionResponse {
+    pub token: String,
+    pub expires_at: time::OffsetDateTime,
+    pub user: AuthUserResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,18 +237,71 @@ impl AppState {
 
     #[must_use]
     pub fn with_store(token: Option<String>, store: Arc<dyn CentralStore>) -> Self {
-        Self { token, store }
+        Self::with_auth(token, store, false)
     }
 
-    fn authorize(&self, headers: &HeaderMap) -> Result<(), ApiError> {
-        let Some(expected) = self.token.as_deref() else {
-            return Ok(());
-        };
-        if bearer_token(headers) == Some(expected) {
-            Ok(())
-        } else {
-            Err(ApiError::unauthorized())
+    #[must_use]
+    pub fn with_auth(
+        token: Option<String>,
+        store: Arc<dyn CentralStore>,
+        require_auth: bool,
+    ) -> Self {
+        Self {
+            token,
+            store,
+            require_auth,
         }
+    }
+
+    async fn authorize(&self, headers: &HeaderMap) -> Result<AuthorizedPrincipal, ApiError> {
+        let provided = bearer_token(headers);
+        if let Some(expected) = self.token.as_deref() {
+            if provided == Some(expected) {
+                return Ok(AuthorizedPrincipal {
+                    username: "central-token".into(),
+                    display_name: "Token central".into(),
+                    role: Role::Admin,
+                    tenant_id: None,
+                });
+            }
+            if provided.is_none() {
+                return Err(ApiError::unauthorized());
+            }
+        }
+        if let Some(token) = provided {
+            let session = self
+                .store
+                .central_session_by_token_hash(&hash_secret(token))
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            if let Some(session) = session {
+                return Ok(AuthorizedPrincipal {
+                    username: session.username,
+                    display_name: session.display_name,
+                    role: session.role,
+                    tenant_id: Some(session.tenant_id),
+                });
+            }
+        }
+        if self.require_auth {
+            return Err(ApiError::unauthorized());
+        }
+        Ok(AuthorizedPrincipal {
+            username: "local-dev".into(),
+            display_name: "Modo local".into(),
+            role: Role::Admin,
+            tenant_id: None,
+        })
+    }
+
+    async fn authorize_admin(&self, headers: &HeaderMap) -> Result<AuthorizedPrincipal, ApiError> {
+        let principal = self.authorize(headers).await?;
+        if principal.role != Role::Admin {
+            return Err(ApiError::forbidden(
+                "esta operación requiere rol de administrador",
+            ));
+        }
+        Ok(principal)
     }
 
     /// Accepts the global admin token (unrestricted) or a valid device token
@@ -244,7 +343,176 @@ fn generate_device_token() -> String {
 }
 
 fn hash_device_token(token: &str) -> String {
+    hash_secret(token)
+}
+
+fn hash_secret(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn generate_session_token() -> String {
+    let mut bytes = [0_u8; 32];
+    bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    format!("tpvadm_{}", hex::encode(bytes))
+}
+
+async fn auth_status(State(state): State<AppState>) -> Result<Json<AuthStatusResponse>, ApiError> {
+    let users = state
+        .store
+        .list_central_users()
+        .await
+        .map_err(store_error)?;
+    let devices = state.store.list_devices().await.map_err(store_error)?;
+    Ok(Json(AuthStatusResponse {
+        has_users: !users.is_empty(),
+        suggested_tenant_id: devices.first().map(|device| device.tenant_id),
+    }))
+}
+
+async fn auth_bootstrap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BootstrapRequest>,
+) -> Result<(StatusCode, Json<AuthSessionResponse>), ApiError> {
+    if state.token.is_some() {
+        state.authorize_admin(&headers).await?;
+    }
+    let existing = state
+        .store
+        .list_central_users()
+        .await
+        .map_err(store_error)?;
+    if !existing.is_empty() {
+        return Err(ApiError::conflict(
+            "the central already has users; use the login endpoint",
+        ));
+    }
+    let username = request.username.trim().to_lowercase();
+    let display_name = request.display_name.trim().to_string();
+    if username.is_empty() || display_name.is_empty() {
+        return Err(ApiError::bad_request(
+            "username and display_name are required",
+        ));
+    }
+    validate_password(&request.password)?;
+    let password_hash = hash_password(&request.password)?;
+    let tenant_id = request.tenant_id.unwrap_or_else(Uuid::now_v7);
+    let user = state
+        .store
+        .create_central_user(NewCentralUser {
+            tenant_id,
+            username,
+            display_name,
+            role: Role::Admin,
+            store_ids: Vec::new(),
+            password_hash,
+        })
+        .await
+        .map_err(store_error)?;
+    provision_user(&state, &user).await?;
+    let response = issue_session(&state, &user).await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn auth_login(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Result<Json<AuthSessionResponse>, ApiError> {
+    let username = request.username.trim().to_lowercase();
+    if username.is_empty() || request.password.is_empty() {
+        return Err(ApiError::bad_request("username and password are required"));
+    }
+    let mut candidates = state
+        .store
+        .find_central_users_by_username(&username)
+        .await
+        .map_err(store_error)?;
+    if let Some(tenant_id) = request.tenant_id {
+        candidates.retain(|user| user.tenant_id == tenant_id);
+    }
+    candidates.retain(|user| user.active);
+    let user = match candidates.len() {
+        0 => return Err(ApiError::unauthorized()),
+        1 => candidates.remove(0),
+        _ => {
+            return Err(ApiError::bad_request(
+                "username exists in several tenants; tenant_id is required",
+            ));
+        }
+    };
+    if user.role == Role::Cashier {
+        return Err(ApiError::forbidden(
+            "el rol de cajero no tiene acceso al backoffice",
+        ));
+    }
+    let valid = Argon2PasswordHasher
+        .verify(&request.password, &user.password_hash)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !valid {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(Json(issue_session(&state, &user).await?))
+}
+
+async fn auth_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthUserResponse>, ApiError> {
+    let principal = state.authorize(&headers).await?;
+    Ok(Json(AuthUserResponse {
+        id: None,
+        tenant_id: principal.tenant_id,
+        username: principal.username,
+        display_name: principal.display_name,
+        role: principal.role,
+    }))
+}
+
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    if let Some(token) = bearer_token(&headers) {
+        state
+            .store
+            .delete_central_session(&hash_secret(token))
+            .await
+            .map_err(store_error)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn issue_session(
+    state: &AppState,
+    user: &CentralUserRecord,
+) -> Result<AuthSessionResponse, ApiError> {
+    let token = generate_session_token();
+    let expires_at = time::OffsetDateTime::now_utc() + time::Duration::hours(12);
+    state
+        .store
+        .create_central_session(NewCentralSession {
+            token_hash: hash_secret(&token),
+            user_id: user.id,
+            tenant_id: user.tenant_id,
+            username: user.username.clone(),
+            display_name: user.display_name.clone(),
+            role: user.role,
+            expires_at,
+        })
+        .await
+        .map_err(store_error)?;
+    Ok(AuthSessionResponse {
+        token,
+        expires_at,
+        user: AuthUserResponse {
+            id: Some(user.id),
+            tenant_id: Some(user.tenant_id),
+            username: user.username.clone(),
+            display_name: user.display_name.clone(),
+            role: user.role,
+        },
+    })
 }
 
 pub fn app(state: AppState) -> Router {
@@ -253,6 +521,11 @@ pub fn app(state: AppState) -> Router {
     let index = format!("{backoffice_dir}/index.html");
     Router::new()
         .route("/health", get(health))
+        .route("/api/v1/auth/status", get(auth_status))
+        .route("/api/v1/auth/bootstrap", post(auth_bootstrap))
+        .route("/api/v1/auth/login", post(auth_login))
+        .route("/api/v1/auth/logout", post(auth_logout))
+        .route("/api/v1/auth/me", get(auth_me))
         .route("/api/v1/sync/push", post(push))
         .route("/api/v1/sync/pull", get(pull))
         .route("/api/v1/events", get(list_events))
@@ -446,7 +719,7 @@ async fn enroll_device(
     headers: HeaderMap,
     Json(request): Json<EnrollRequest>,
 ) -> Result<Json<EnrollResponse>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize_admin(&headers).await?;
     let name = request.name.trim();
     if name.is_empty() {
         return Err(ApiError::bad_request("device name is required"));
@@ -470,7 +743,7 @@ async fn list_devices(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<DeviceRecord>>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers).await?;
     let devices = state
         .store
         .list_devices()
@@ -484,7 +757,7 @@ async fn revoke_device(
     headers: HeaderMap,
     Path(device_id): Path<Uuid>,
 ) -> Result<Json<DeviceRecord>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize_admin(&headers).await?;
     let device = state
         .store
         .revoke_device(device_id)
@@ -498,7 +771,7 @@ async fn list_master_data_conflicts(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<MasterDataConflict>>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers).await?;
     let conflicts = state
         .store
         .list_master_data_conflicts(200)
@@ -511,7 +784,7 @@ async fn list_central_users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CentralUserRecord>>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers).await?;
     let users = state
         .store
         .list_central_users()
@@ -525,7 +798,7 @@ async fn create_central_user(
     headers: HeaderMap,
     Json(request): Json<CreateCentralUserRequest>,
 ) -> Result<(StatusCode, Json<CentralUserRecord>), ApiError> {
-    state.authorize(&headers)?;
+    state.authorize_admin(&headers).await?;
     if request.tenant_id.is_nil() {
         return Err(ApiError::bad_request("tenant_id is required"));
     }
@@ -555,7 +828,7 @@ async fn update_central_user(
     Path(user_id): Path<Uuid>,
     Json(request): Json<UpdateCentralUserRequest>,
 ) -> Result<Json<CentralUserRecord>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize_admin(&headers).await?;
     let (_, display_name) =
         normalize_user_fields("unchanged", &request.display_name, &request.store_ids)?;
     let user = state
@@ -573,6 +846,11 @@ async fn update_central_user(
         .await
         .map_err(store_error)?
         .ok_or_else(|| ApiError::not_found("user not found"))?;
+    state
+        .store
+        .delete_central_user_sessions(user.id)
+        .await
+        .map_err(store_error)?;
     provision_user(&state, &user).await?;
     Ok(Json(user))
 }
@@ -583,7 +861,7 @@ async fn reset_central_user_password(
     Path(user_id): Path<Uuid>,
     Json(request): Json<ResetCentralUserPasswordRequest>,
 ) -> Result<Json<CentralUserRecord>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize_admin(&headers).await?;
     validate_password(&request.password)?;
     let password_hash = hash_password(&request.password)?;
     let user = state
@@ -592,6 +870,11 @@ async fn reset_central_user_password(
         .await
         .map_err(store_error)?
         .ok_or_else(|| ApiError::not_found("user not found"))?;
+    state
+        .store
+        .delete_central_user_sessions(user.id)
+        .await
+        .map_err(store_error)?;
     provision_user(&state, &user).await?;
     Ok(Json(user))
 }
@@ -687,7 +970,7 @@ async fn list_events(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredEvent>>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers).await?;
     let events = state
         .store
         .list_events(1000)
@@ -700,7 +983,7 @@ async fn list_sales(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredEvent>>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers).await?;
     let events = state
         .store
         .list_sales(1000)
@@ -1212,6 +1495,126 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    #[tokio::test]
+    async fn bootstrap_login_session_and_rbac() {
+        let state = AppState::with_auth(None, Arc::new(MemoryStore::new()), true);
+        let app = app(state);
+        let tenant_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/api/v1/users", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/auth/bootstrap",
+                None,
+                Some(json!({
+                    "tenant_id": tenant_id,
+                    "username": "owner",
+                    "display_name": "Owner",
+                    "password": "owner123"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bootstrap: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let admin_token = bootstrap["token"].as_str().unwrap().to_string();
+        assert_eq!(bootstrap["user"]["role"], "admin");
+
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/api/v1/auth/me", Some(&admin_token), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/users",
+                Some(&admin_token),
+                Some(json!({
+                    "tenant_id": tenant_id,
+                    "username": "manager",
+                    "display_name": "Manager",
+                    "role": "manager",
+                    "store_ids": [store_id],
+                    "password": "manager123"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/auth/login",
+                None,
+                Some(json!({
+                    "username": "manager",
+                    "password": "manager123"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let login: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let manager_token = login["token"].as_str().unwrap().to_string();
+        assert_eq!(login["user"]["role"], "manager");
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/users",
+                Some(&manager_token),
+                Some(json!({
+                    "tenant_id": tenant_id,
+                    "username": "cashier",
+                    "display_name": "Cashier",
+                    "role": "cashier",
+                    "store_ids": [store_id],
+                    "password": "cashier123"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/auth/logout",
+                Some(&admin_token),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = app
+            .oneshot(request("GET", "/api/v1/users", Some(&admin_token), None))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -16,6 +16,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "0.0.0.0:8080".into())
         .parse()?;
     let token = std::env::var("TPV_CENTRAL_TOKEN").ok();
+    let require_auth = std::env::var("TPV_REQUIRE_BACKOFFICE_AUTH")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !require_auth && token.is_none() {
+        tracing::warn!(
+            "central API abierta en modo local; configura TPV_CENTRAL_TOKEN y TPV_REQUIRE_BACKOFFICE_AUTH=1 en producción"
+        );
+    }
     let store: Arc<dyn CentralStore> = match std::env::var("DATABASE_URL") {
         Ok(database_url) => {
             tracing::info!("using PostgreSQL central store");
@@ -26,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(MemoryStore::new())
         }
     };
-    let state = AppState::with_store(token, store);
+    let state = AppState::with_auth(token, store, require_auth);
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, "central TPV server listening");
     axum::serve(listener, app(state)).await?;
