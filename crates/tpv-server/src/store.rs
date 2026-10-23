@@ -6,6 +6,11 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tpv_domain::ids::{StoreId, TenantId};
+use tpv_domain::master_data::{
+    ConflictOutcome, ConflictReason, MasterDataApplyResult, MasterDataChange, MasterDataConflict,
+    MasterDataKind, resolve_change,
+};
 use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
@@ -81,6 +86,9 @@ pub struct EnrollDevice {
 pub enum StoreError {
     #[error("central database error: {0}")]
     Database(String),
+
+    #[error(transparent)]
+    Domain(#[from] tpv_domain::DomainError),
 }
 
 impl From<sqlx::Error> for StoreError {
@@ -109,12 +117,24 @@ pub trait CentralStore: Send + Sync {
         token_hash: &str,
     ) -> Result<Option<DeviceRecord>, StoreError>;
     async fn mark_device_seen(&self, device_id: Uuid) -> Result<(), StoreError>;
+    async fn apply_master_data_change(
+        &self,
+        tenant_id: Uuid,
+        store_id: Uuid,
+        change: &MasterDataChange,
+    ) -> Result<MasterDataApplyResult, StoreError>;
+    async fn list_master_data_conflicts(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<MasterDataConflict>, StoreError>;
 }
 
 #[derive(Default)]
 struct MemoryLedger {
     events: Vec<StoredEvent>,
     devices: Vec<MemoryDevice>,
+    master_data: Vec<MemoryMasterData>,
+    master_conflicts: Vec<MasterDataConflict>,
     next_seq: u64,
 }
 
@@ -122,6 +142,13 @@ struct MemoryLedger {
 struct MemoryDevice {
     record: DeviceRecord,
     token_hash: String,
+}
+
+#[derive(Clone)]
+struct MemoryMasterData {
+    tenant_id: Uuid,
+    store_id: Uuid,
+    change: MasterDataChange,
 }
 
 #[derive(Default)]
@@ -293,6 +320,76 @@ impl CentralStore for MemoryStore {
         }
         Ok(())
     }
+
+    async fn apply_master_data_change(
+        &self,
+        tenant_id: Uuid,
+        store_id: Uuid,
+        change: &MasterDataChange,
+    ) -> Result<MasterDataApplyResult, StoreError> {
+        let mut ledger = self.inner.write().await;
+        let local = ledger
+            .master_data
+            .iter()
+            .find(|entry| {
+                entry.tenant_id == tenant_id
+                    && entry.store_id == store_id
+                    && entry.change.kind == change.kind
+                    && entry.change.entity_id == change.entity_id
+            })
+            .cloned();
+        let resolution = resolve_change(local.as_ref().map(|entry| &entry.change), change);
+        let now = time::OffsetDateTime::now_utc();
+        let conflict = if let Some(reason) = resolution.conflict {
+            let conflict = MasterDataConflict {
+                id: Uuid::now_v7(),
+                tenant_id: TenantId::from_uuid(tenant_id),
+                store_id: StoreId::from_uuid(store_id),
+                kind: change.kind,
+                entity_id: change.entity_id,
+                local_version: local.as_ref().map_or(0, |entry| entry.change.version),
+                incoming: change.clone(),
+                reason,
+                outcome: resolution.outcome,
+                detected_at: now,
+            };
+            ledger.master_conflicts.push(conflict.clone());
+            Some(conflict)
+        } else {
+            None
+        };
+        if resolution.applied() {
+            if let Some(entry) = ledger.master_data.iter_mut().find(|entry| {
+                entry.tenant_id == tenant_id
+                    && entry.store_id == store_id
+                    && entry.change.kind == change.kind
+                    && entry.change.entity_id == change.entity_id
+            }) {
+                entry.change = change.clone();
+            } else {
+                ledger.master_data.push(MemoryMasterData {
+                    tenant_id,
+                    store_id,
+                    change: change.clone(),
+                });
+            }
+        }
+        Ok(MasterDataApplyResult {
+            applied: resolution.applied(),
+            conflict,
+        })
+    }
+
+    async fn list_master_data_conflicts(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<MasterDataConflict>, StoreError> {
+        let ledger = self.inner.read().await;
+        let mut conflicts = ledger.master_conflicts.clone();
+        conflicts.sort_by_key(|left| std::cmp::Reverse(left.detected_at));
+        conflicts.truncate(limit as usize);
+        Ok(conflicts)
+    }
 }
 
 #[derive(Clone)]
@@ -365,6 +462,26 @@ fn row_to_device(row: &sqlx::postgres::PgRow) -> Result<DeviceRecord, StoreError
         enrolled_at: row.try_get("enrolled_at")?,
         last_seen_at: row.try_get("last_seen_at")?,
         revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
+fn row_to_master_conflict(row: &sqlx::postgres::PgRow) -> Result<MasterDataConflict, StoreError> {
+    let kind = MasterDataKind::parse(&row.try_get::<String, _>("kind")?)?;
+    let incoming_value: serde_json::Value = row.try_get("incoming")?;
+    let incoming = serde_json::from_value(incoming_value)
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    Ok(MasterDataConflict {
+        id: row.try_get("id")?,
+        tenant_id: TenantId::from_uuid(row.try_get("tenant_id")?),
+        store_id: StoreId::from_uuid(row.try_get("store_id")?),
+        kind,
+        entity_id: row.try_get("entity_id")?,
+        local_version: u64::try_from(row.try_get::<i64, _>("local_version")?)
+            .map_err(|_| StoreError::Database("negative master data version".into()))?,
+        incoming,
+        reason: ConflictReason::parse(&row.try_get::<String, _>("reason")?)?,
+        outcome: ConflictOutcome::parse(&row.try_get::<String, _>("outcome")?)?,
+        detected_at: row.try_get("detected_at")?,
     })
 }
 
@@ -530,6 +647,123 @@ impl CentralStore for PostgresStore {
             .await?;
         Ok(())
     }
+
+    async fn apply_master_data_change(
+        &self,
+        tenant_id: Uuid,
+        store_id: Uuid,
+        change: &MasterDataChange,
+    ) -> Result<MasterDataApplyResult, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let lock_key = format!(
+            "{tenant_id}:{store_id}:{}:{}",
+            change.kind.as_str(),
+            change.entity_id
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+            .bind(&lock_key)
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query(
+            "SELECT change FROM central_master_data
+             WHERE tenant_id = $1 AND store_id = $2 AND kind = $3 AND entity_id = $4",
+        )
+        .bind(tenant_id)
+        .bind(store_id)
+        .bind(change.kind.as_str())
+        .bind(change.entity_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let local = row
+            .map(|row| {
+                let value: serde_json::Value = row.try_get("change")?;
+                serde_json::from_value(value)
+                    .map_err(|error| StoreError::Database(error.to_string()))
+            })
+            .transpose()?;
+        let resolution = resolve_change(local.as_ref(), change);
+        let now = time::OffsetDateTime::now_utc();
+        let conflict = if let Some(reason) = resolution.conflict {
+            let conflict = MasterDataConflict {
+                id: Uuid::now_v7(),
+                tenant_id: TenantId::from_uuid(tenant_id),
+                store_id: StoreId::from_uuid(store_id),
+                kind: change.kind,
+                entity_id: change.entity_id,
+                local_version: local.as_ref().map_or(0, |local| local.version),
+                incoming: change.clone(),
+                reason,
+                outcome: resolution.outcome,
+                detected_at: now,
+            };
+            let incoming = serde_json::to_value(change)
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            sqlx::query(
+                "INSERT INTO central_master_conflicts
+                    (id, tenant_id, store_id, kind, entity_id, local_version,
+                     incoming, reason, outcome, detected_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(conflict.id)
+            .bind(tenant_id)
+            .bind(store_id)
+            .bind(change.kind.as_str())
+            .bind(change.entity_id)
+            .bind(i64::try_from(conflict.local_version).unwrap_or(i64::MAX))
+            .bind(incoming)
+            .bind(conflict.reason.as_str())
+            .bind(conflict.outcome.as_str())
+            .bind(conflict.detected_at)
+            .execute(&mut *tx)
+            .await?;
+            Some(conflict)
+        } else {
+            None
+        };
+        if resolution.applied() {
+            let value = serde_json::to_value(change)
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            sqlx::query(
+                "INSERT INTO central_master_data
+                    (tenant_id, store_id, kind, entity_id, version, change, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                 ON CONFLICT (tenant_id, store_id, kind, entity_id) DO UPDATE SET
+                    version = EXCLUDED.version,
+                    change = EXCLUDED.change,
+                    updated_at = NOW()",
+            )
+            .bind(tenant_id)
+            .bind(store_id)
+            .bind(change.kind.as_str())
+            .bind(change.entity_id)
+            .bind(i64::try_from(change.version).unwrap_or(i64::MAX))
+            .bind(value)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(MasterDataApplyResult {
+            applied: resolution.applied(),
+            conflict,
+        })
+    }
+
+    async fn list_master_data_conflicts(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<MasterDataConflict>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, store_id, kind, entity_id, local_version,
+                    incoming, reason, outcome, detected_at
+             FROM central_master_conflicts
+             ORDER BY detected_at DESC
+             LIMIT $1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_master_conflict).collect()
+    }
 }
 
 #[cfg(test)]
@@ -628,5 +862,57 @@ mod tests {
         assert_eq!(reactivated.status, DeviceStatus::Active);
         assert!(reactivated.revoked_at.is_none());
         assert_eq!(reactivated.name, "Caja Postgres 2");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a PostgreSQL database"]
+    async fn postgres_master_data_roundtrip() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let store = PostgresStore::connect(&url).await.unwrap();
+        let tenant_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let entity_id = Uuid::now_v7();
+        let device = tpv_domain::ids::DeviceId::new();
+        let base = time::OffsetDateTime::now_utc();
+        let first = MasterDataChange::new(
+            MasterDataKind::Product,
+            entity_id,
+            1,
+            device,
+            base,
+            serde_json::json!({"name": "Producto A"}),
+            false,
+        )
+        .unwrap();
+        let result = store
+            .apply_master_data_change(tenant_id, store_id, &first)
+            .await
+            .unwrap();
+        assert!(result.applied);
+        assert!(result.conflict.is_none());
+
+        let divergent = MasterDataChange::new(
+            MasterDataKind::Product,
+            entity_id,
+            1,
+            device,
+            base + time::Duration::seconds(1),
+            serde_json::json!({"name": "Producto B"}),
+            false,
+        )
+        .unwrap();
+        let result = store
+            .apply_master_data_change(tenant_id, store_id, &divergent)
+            .await
+            .unwrap();
+        assert!(result.applied);
+        assert!(result.conflict.is_some());
+
+        let conflicts = store.list_master_data_conflicts(10).await.unwrap();
+        assert!(
+            conflicts
+                .iter()
+                .any(|conflict| conflict.entity_id == entity_id)
+        );
     }
 }

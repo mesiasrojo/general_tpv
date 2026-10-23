@@ -1,15 +1,29 @@
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::cash::CashCount;
 use tpv_domain::ids::{CustomerId, RegisterId, SaleId, SellerId, StoreId, UserId};
+use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
 use tpv_domain::sync::SyncEvent;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncContext {
     pub tenant_id: tpv_domain::ids::TenantId,
     pub device_id: tpv_domain::ids::DeviceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishMasterDataRequest {
+    pub context: SyncContext,
+    pub store_id: StoreId,
+    pub kind: MasterDataKind,
+    pub entity_id: Uuid,
+    pub payload: serde_json::Value,
+    pub deleted: bool,
+    pub occurred_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

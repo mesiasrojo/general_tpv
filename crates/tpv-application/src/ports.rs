@@ -7,6 +7,7 @@ use tpv_domain::catalog::Product;
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{CashSessionId, CustomerId, InvoiceId, RegisterId, SaleId, StoreId};
 use tpv_domain::invoice::Invoice;
+use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::sale::Sale;
 use tpv_domain::sync::SyncEvent;
@@ -122,6 +123,21 @@ pub trait BackupRepository: Send + Sync {
     /// Writes a consistent, encrypted copy of the local database and returns
     /// the size of the resulting file.
     async fn backup_to(&self, destination: &std::path::Path) -> Result<u64>;
+}
+
+#[async_trait]
+pub trait MasterDataRepository: Send + Sync {
+    async fn apply_change(
+        &self,
+        tenant_id: tpv_domain::ids::TenantId,
+        store_id: StoreId,
+        change: &MasterDataChange,
+    ) -> Result<MasterDataApplyResult>;
+    async fn publish_change(
+        &self,
+        request: crate::dto::PublishMasterDataRequest,
+    ) -> Result<SyncEvent>;
+    async fn list_conflicts(&self, limit: u32) -> Result<Vec<MasterDataConflict>>;
 }
 
 pub trait TicketRenderer: Send + Sync {

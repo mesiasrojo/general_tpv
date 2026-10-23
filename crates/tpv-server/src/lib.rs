@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
+use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
@@ -221,6 +222,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/sync/pull", get(pull))
         .route("/api/v1/events", get(list_events))
         .route("/api/v1/sales", get(list_sales))
+        .route(
+            "/api/v1/master-data/conflicts",
+            get(list_master_data_conflicts),
+        )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/enroll", post(enroll_device))
         .route("/api/v1/devices/{device_id}/revoke", post(revoke_device))
@@ -279,12 +284,56 @@ async fn push(
     let mut rejected = Vec::new();
     let mut valid = Vec::new();
     for event in request.events {
-        if event.verify_hash() {
-            valid.push(event);
-        } else {
+        if !event.verify_hash() {
             rejected.push(RejectedEvent {
                 event_id: event.event_id,
                 reason: "invalid envelope hash".into(),
+            });
+            continue;
+        }
+        if event.aggregate_type != "master_data" {
+            valid.push(event);
+            continue;
+        }
+        let change: MasterDataChange = match serde_json::from_value(event.payload.clone()) {
+            Ok(change) => change,
+            Err(error) => {
+                rejected.push(RejectedEvent {
+                    event_id: event.event_id,
+                    reason: format!("invalid master data payload: {error}"),
+                });
+                continue;
+            }
+        };
+        let expected_deleted = event.event_type == "master_data.deleted";
+        let valid_event_type =
+            event.event_type == "master_data.upsert" || event.event_type == "master_data.deleted";
+        if !valid_event_type
+            || change.device_id.as_uuid() != event.device_id.as_uuid()
+            || change.entity_id != event.aggregate_id
+            || change.deleted != expected_deleted
+        {
+            rejected.push(RejectedEvent {
+                event_id: event.event_id,
+                reason: "master data envelope does not match its payload".into(),
+            });
+            continue;
+        }
+        let outcome = state
+            .store
+            .apply_master_data_change(event.tenant_id.as_uuid(), event.store_id.as_uuid(), &change)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if outcome.applied || outcome.conflict.is_none() {
+            valid.push(event);
+        } else if let Some(conflict) = outcome.conflict {
+            rejected.push(RejectedEvent {
+                event_id: event.event_id,
+                reason: format!(
+                    "master data conflict ({}), local version {} is authoritative",
+                    conflict.reason.as_str(),
+                    conflict.local_version
+                ),
             });
         }
     }
@@ -401,6 +450,19 @@ async fn revoke_device(
     Ok(Json(device))
 }
 
+async fn list_master_data_conflicts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MasterDataConflict>>, ApiError> {
+    state.authorize(&headers)?;
+    let conflicts = state
+        .store
+        .list_master_data_conflicts(200)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(conflicts))
+}
+
 async fn list_events(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -434,6 +496,7 @@ mod tests {
     use axum::http::Request;
     use serde_json::json;
     use tower::ServiceExt;
+    use tpv_domain::master_data::{ConflictReason, MasterDataKind};
 
     fn event(device_id: tpv_domain::ids::DeviceId, tenant_id: Uuid, store_id: Uuid) -> SyncEvent {
         SyncEvent::new(
@@ -449,6 +512,56 @@ mod tests {
             json!({"total_cents": 140}),
         )
         .unwrap()
+    }
+
+    fn master_event(
+        device_id: Uuid,
+        tenant_id: Uuid,
+        store_id: Uuid,
+        change: &MasterDataChange,
+    ) -> SyncEvent {
+        let sequence = u64::try_from(change.occurred_at.unix_timestamp_nanos()).unwrap_or_default();
+        let event_type = if change.deleted {
+            "master_data.deleted"
+        } else {
+            "master_data.upsert"
+        };
+        SyncEvent::new(
+            tpv_domain::ids::TenantId::from_uuid(tenant_id),
+            tpv_domain::ids::StoreId::from_uuid(store_id),
+            tpv_domain::ids::DeviceId::from_uuid(device_id),
+            sequence,
+            "master_data",
+            change.entity_id,
+            event_type,
+            1,
+            change.occurred_at,
+            serde_json::to_value(change).unwrap(),
+        )
+        .unwrap()
+    }
+
+    async fn push_master(
+        app: &Router,
+        device_id: Uuid,
+        token: &str,
+        event: SyncEvent,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync/push",
+                Some(token),
+                Some(json!({"device_id": device_id, "events": [event]})),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
     }
 
     fn request(
@@ -629,6 +742,113 @@ mod tests {
 
         let enrollment = enroll(&app, device_id, store_id, Some("secret")).await;
         assert_eq!(enrollment.device.device_id, device_id);
+    }
+
+    #[tokio::test]
+    async fn master_data_conflicts_are_detected_and_recorded() {
+        let app = app(AppState::new(None));
+        let device_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let enrollment = enroll(&app, device_id, store_id, None).await;
+        let tenant_id = enrollment.device.tenant_id;
+        let entity_id = Uuid::now_v7();
+        let base = time::OffsetDateTime::now_utc();
+        let device = tpv_domain::ids::DeviceId::from_uuid(device_id);
+
+        let first = MasterDataChange::new(
+            MasterDataKind::Product,
+            entity_id,
+            1,
+            device,
+            base,
+            json!({"name": "Producto A"}),
+            false,
+        )
+        .unwrap();
+        let (status, body) = push_master(
+            &app,
+            device_id,
+            &enrollment.token,
+            master_event(device_id, tenant_id, store_id, &first),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["rejected"].as_array().unwrap().is_empty());
+
+        let divergent = MasterDataChange::new(
+            MasterDataKind::Product,
+            entity_id,
+            1,
+            device,
+            base + time::Duration::seconds(1),
+            json!({"name": "Producto B"}),
+            false,
+        )
+        .unwrap();
+        let (status, _) = push_master(
+            &app,
+            device_id,
+            &enrollment.token,
+            master_event(device_id, tenant_id, store_id, &divergent),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let newer = MasterDataChange::new(
+            MasterDataKind::Product,
+            entity_id,
+            2,
+            device,
+            base + time::Duration::seconds(2),
+            json!({"name": "Producto C"}),
+            false,
+        )
+        .unwrap();
+        let (status, _) = push_master(
+            &app,
+            device_id,
+            &enrollment.token,
+            master_event(device_id, tenant_id, store_id, &newer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stale = MasterDataChange::new(
+            MasterDataKind::Product,
+            entity_id,
+            1,
+            device,
+            base + time::Duration::seconds(3),
+            json!({"name": "Producto D"}),
+            false,
+        )
+        .unwrap();
+        let (status, body) = push_master(
+            &app,
+            device_id,
+            &enrollment.token,
+            master_event(device_id, tenant_id, store_id, &stale),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rejected = body["rejected"].as_array().unwrap();
+        assert!(rejected.is_empty());
+
+        let response = app
+            .oneshot(request("GET", "/api/v1/master-data/conflicts", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let conflicts: Vec<MasterDataConflict> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert!(
+            conflicts
+                .iter()
+                .any(|conflict| conflict.reason == ConflictReason::SameVersionDiverged)
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ pub mod document;
 pub mod error;
 pub mod ids;
 pub mod invoice;
+pub mod master_data;
 pub mod money;
 pub mod people;
 pub mod sale;

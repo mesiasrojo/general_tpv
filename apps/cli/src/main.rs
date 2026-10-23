@@ -5,12 +5,13 @@ use time::format_description::well_known::Rfc3339;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
-    InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository,
-    SaleService, SequenceRepository, StartSaleRequest, SyncOutboxRepository, SyncService,
-    SyncStatus, UserRepository,
+    InvoiceService, MasterDataRepository, MasterDataService, OpenCashRequest, PrintQueueRepository,
+    PrintService, SaleRepository, SaleService, SequenceRepository, StartSaleRequest,
+    SyncOutboxRepository, SyncService, SyncStatus, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
+use tpv_domain::master_data::{MasterDataChange, MasterDataKind};
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
@@ -30,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut in_memory = false;
     let mut retry_failed = false;
     let mut force_enroll = false;
+    let mut master_data_demo = false;
     let mut sync_url = None;
     let mut backup_path = None;
     let mut device_name = "TPV CLI".to_string();
@@ -40,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--memory" => in_memory = true,
             "--retry-failed" => retry_failed = true,
             "--enroll" => force_enroll = true,
+            "--master-data-demo" => master_data_demo = true,
             "--sync-url" => sync_url = iter.next().cloned(),
             "--backup" => backup_path = iter.next().cloned(),
             "--device-name" => {
@@ -90,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
     let user_repo: Arc<dyn UserRepository> = store.clone();
     let audit_repo: Arc<dyn AuditRepository> = store.clone();
+    let master_data_repo: Arc<dyn MasterDataRepository> = store.clone();
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
     let sync = store.sync_context().await?;
 
@@ -115,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync.clone(),
     );
     let catalog_service = CatalogService::new(catalog_repo.clone());
+    let master_data_service = MasterDataService::new(master_data_repo, clock.clone());
     let invoice_service = InvoiceService::new(
         invoice_repo,
         sale_repo.clone(),
@@ -284,6 +289,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if master_data_demo {
+        let product = catalog_service.get_product("1").await?;
+        let payload = serde_json::to_value(&product)?;
+        let event = master_data_service
+            .publish_change(
+                &sync,
+                demo.store_id,
+                MasterDataKind::Product,
+                product.id.as_uuid(),
+                payload,
+                false,
+            )
+            .await?;
+        println!(
+            "\nCambio maestro publicado: producto {} · evento {}",
+            product.sku, event.event_id
+        );
+    }
+
     let mut sync_status = sync_service.status().await?;
     print_sync_status(&sync_status);
 
@@ -340,6 +364,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let pulled = client.pull(0, Some(demo.store_id.as_uuid())).await?;
         println!("Pull: {} eventos en la central.", pulled.events.len());
+        let mut master_applied = 0;
+        let mut master_conflicts = 0;
+        for stored in &pulled.events {
+            if stored.event.aggregate_type != "master_data" {
+                continue;
+            }
+            match serde_json::from_value::<MasterDataChange>(stored.event.payload.clone()) {
+                Ok(change) => {
+                    let result = master_data_service
+                        .apply_change(stored.event.tenant_id, stored.event.store_id, &change)
+                        .await?;
+                    if result.applied {
+                        master_applied += 1;
+                    }
+                    if let Some(conflict) = result.conflict {
+                        master_conflicts += 1;
+                        println!(
+                            "  Conflicto maestro: {} {} · {} · versión local {}",
+                            conflict.kind.as_str(),
+                            conflict.entity_id,
+                            conflict.reason.as_str(),
+                            conflict.local_version
+                        );
+                    }
+                }
+                Err(error) => println!("  Cambio maestro inválido: {error}"),
+            }
+        }
+        if master_applied > 0 || master_conflicts > 0 {
+            println!(
+                "Maestros: {master_applied} aplicados, {master_conflicts} conflicto(s) registrados."
+            );
+        }
         sync_status = sync_service.status().await?;
         print_sync_status(&sync_status);
     }

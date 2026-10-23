@@ -20,7 +20,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
-| USB/serie nativo, clave en keychain y conflictos de maestros | Pendiente de siguiente iteración |
+| Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
+| USB/serie nativo y clave en keychain | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 
@@ -64,6 +65,13 @@ cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 \
   --device-name "Caja 1" --enroll --retry-failed
 ```
 
+Los cambios de datos maestros viajan como eventos versionados (`master_data.upsert` / `master_data.deleted`). La resolución es determinista: gana la versión mayor; las versiones antiguas se descartan; si dos dispositivos publican la misma versión con contenido distinto, gana el `occurred_at` más reciente y el conflicto queda registrado. Puede probarse el flujo con:
+
+```bash
+cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 \
+  --master-data-demo
+```
+
 La base local se cifra con SQLCipher. En modo fichero, la clave se genera una sola vez en `<base>.key` con permisos `0600`; si la base ya existía en texto plano, se migra automáticamente. Para crear un backup cifrado consistente:
 
 ```bash
@@ -76,6 +84,7 @@ El servidor expone:
 - `POST /api/v1/sync/push`
 - `GET /api/v1/sync/pull?cursor=0`
 - `GET /api/v1/events`
+- `GET /api/v1/master-data/conflicts`
 - `GET /api/v1/sales`
 - `POST /api/v1/devices/enroll`
 - `GET /api/v1/devices`

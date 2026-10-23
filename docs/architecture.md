@@ -146,6 +146,13 @@ Enrolamiento
   ├─ token guardado localmente en local_identity (base SQLCipher)
   ├─ push/pull autentican el token del dispositivo
   └─ POST /api/v1/devices/{id}/revoke → siguientes sync devuelven 403
+
+Datos maestros
+  ├─ master_data_state local por tenant/tienda/tipo/entidad
+  ├─ eventos master_data.upsert y master_data.deleted con versión
+  ├─ central_master_data guarda la última versión aceptada
+  ├─ política: versión mayor gana; versión antigua se descarta
+  └─ misma versión divergente → desempate occurred_at/device_id y conflicto auditado
 ```
 
 ```text
@@ -164,6 +171,9 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - El tenant y el dispositivo se crean una vez y se guardan en `local_identity`, de modo que los eventos pendientes siguen siendo válidos tras reiniciar el terminal.
 - El CLI enrola automáticamente el terminal la primera vez y guarda el token en la base cifrada. `--enroll` rota el token y permite recuperar un dispositivo revocado.
 - El token de dispositivo solo puede empujar y leer su propio tenant/tienda. La revocación invalida el token de inmediato.
+- Los maestros se publican con versión monotónica por entidad y viajan en el outbox como `master_data.upsert` / `master_data.deleted`.
+- La central mantiene `central_master_data` por tenant/tienda/tipo/entidad; las versiones antiguas se ignoran y las divergencias con la misma versión se registran en `central_master_conflicts`.
+- La copia local aplica la misma política; `GET /api/v1/master-data/conflicts` expone los conflictos auditados.
 - Un evento rechazado o agotado se marca en `sync_outbox` con `failed_at`, `attempts` y `last_error`; deja de bloquear la cola y aparece en la consola de cuarentena.
 - La UI del TPV y el CLI muestran el estado local y permiten reintentar la cuarentena sin reiniciar el terminal.
 
@@ -171,6 +181,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 
 - `tpv-server` expone salud, push, pull, eventos, ventas y gestión de dispositivos.
 - `POST /api/v1/devices/enroll` emite un token por dispositivo; `GET /api/v1/devices` y `POST /api/v1/devices/{id}/revoke` requieren el token de administración.
+- `GET /api/v1/master-data/conflicts` lista los conflictos de maestros auditados.
 - Sirve el backoffice estático si existe `backoffice/build` o `TPV_BACKOFFICE_DIR`.
 - El backoffice muestra salud, cursor, ventas, facturas y últimos eventos.
 - No reescribe ventas ni documentos.
@@ -193,13 +204,13 @@ Implementado:
 - Backups cifrados consistentes desde CLI y UI, con la misma clave del terminal.
 - Enrolamiento de dispositivos con token aleatorio hasheado en la central.
 - Revocación inmediata y sync push/pull autenticados y limitados a tenant/tienda.
+- Datos maestros versionados con resolución determinista y registro de conflictos.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
 - Mover la clave local del fichero `0600` al keychain del sistema.
 - Gestión de usuarios y dispositivos desde backoffice central.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
-- Resolución automática de conflictos de maestros.
 - Firma de actualizaciones, SBOM y pipeline de release.
 - Pruebas hardware-in-the-loop y de carga.
 
@@ -209,9 +220,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Resolución de conflictos de maestros.
-2. Clave local en keychain del sistema.
-3. Adaptadores USB/serie y hardware-in-the-loop.
-4. Pruebas E2E Tauri.
-5. Gestión de usuarios desde el backoffice central.
-6. Consola de dispositivos en el backoffice.
+1. Clave local en keychain del sistema.
+2. Adaptadores USB/serie y hardware-in-the-loop.
+3. Pruebas E2E Tauri.
+4. Gestión de usuarios desde el backoffice central.
+5. Consola de dispositivos y conflictos de maestros en el backoffice.
+6. Edición de maestros desde la UI del TPV.
