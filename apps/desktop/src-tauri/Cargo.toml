@@ -23,3 +23,6 @@ tpv-domain = { path = "../../../crates/tpv-domain" }
 tpv-print = { path = "../../../crates/tpv-print" }
 tpv-storage-sqlite = { path = "../../../crates/tpv-storage-sqlite" }
 uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

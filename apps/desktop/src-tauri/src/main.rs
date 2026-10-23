@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
@@ -21,7 +21,9 @@ use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::people::{Role, UserAccount};
 use tpv_domain::sale::PaymentMethod;
-use tpv_print::{EscPosRenderer, apply_profile_defaults, build_printer, printer_profile};
+use tpv_print::{
+    EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
+};
 use tpv_storage_sqlite::{DemoData, KeyStore, SqliteStore};
 
 #[derive(Clone)]
@@ -593,6 +595,93 @@ async fn backup_now(state: State<'_, AppState>) -> Result<BackupSummary, String>
     })
 }
 
+struct PrinterSettings {
+    spec: Option<String>,
+    profile: Option<PrinterProfile>,
+}
+
+async fn build_app_state(
+    store: Arc<SqliteStore>,
+    data_dir: &Path,
+    demo: DemoData,
+    printer_settings: PrinterSettings,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    let catalog_repo: Arc<dyn CatalogRepository> = store.clone();
+    let sale_repo: Arc<dyn SaleRepository> = store.clone();
+    let invoice_repo: Arc<dyn InvoiceRepository> = store.clone();
+    let cash_repo: Arc<dyn CashRepository> = store.clone();
+    let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
+    let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
+    let sync_repo: Arc<dyn SyncOutboxRepository> = store.clone();
+    let user_repo: Arc<dyn UserRepository> = store.clone();
+    let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
+    let backup_repo: Arc<dyn BackupRepository> = store.clone();
+    let tickets_dir = data_dir.join("tickets");
+    let backup_dir = data_dir.join("backups");
+    std::fs::create_dir_all(&tickets_dir)?;
+    std::fs::create_dir_all(&backup_dir)?;
+
+    let default_spec = format!("dir:{}", tickets_dir.display());
+    let configured_spec = printer_settings.spec.as_deref().unwrap_or(&default_spec);
+    let printer_spec = if let Some(profile) = printer_settings.profile {
+        apply_profile_defaults(configured_spec, profile)
+    } else {
+        configured_spec.to_string()
+    };
+    let renderer = printer_settings
+        .profile
+        .map_or_else(EscPosRenderer::default, EscPosRenderer::for_profile);
+    let printer = build_printer(&printer_spec)?;
+    let printer_label = printer_spec;
+
+    let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
+    let sync = store.sync_context().await?;
+    let catalog = CatalogService::new(catalog_repo.clone());
+    let sales = SaleService::new(
+        sale_repo.clone(),
+        catalog_repo.clone(),
+        clock.clone(),
+        sequence_repo.clone(),
+        "TPV",
+        sync.clone(),
+    );
+    let invoices = InvoiceService::new(
+        invoice_repo,
+        sale_repo.clone(),
+        catalog_repo.clone(),
+        sequence_repo,
+        clock.clone(),
+        sync.clone(),
+    );
+    let cash = CashService::new(cash_repo, sale_repo.clone(), clock.clone(), sync);
+    let print = PrintService::new(
+        sale_repo,
+        catalog_repo,
+        print_repo,
+        Arc::new(renderer),
+        clock.clone(),
+    );
+    let sync_service = SyncService::new(sync_repo);
+    let backup_service = BackupService::new(backup_repo);
+    let auth = AuthService::new(user_repo, Arc::new(Argon2PasswordHasher), audit_repo, clock);
+    auth.bootstrap_password("admin", "admin123").await?;
+    Ok(AppState {
+        catalog,
+        sales,
+        invoices,
+        cash,
+        print,
+        sync: sync_service,
+        backup: backup_service,
+        printer,
+        printer_label,
+        backup_dir,
+        auth,
+        session: Arc::new(RwLock::new(None)),
+        demo,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -618,21 +707,6 @@ fn main() {
                 let demo = store.seed_demo().await?;
                 Ok::<_, Box<dyn std::error::Error>>((store, demo))
             })?;
-            let store = Arc::new(store);
-            let catalog_repo: Arc<dyn CatalogRepository> = store.clone();
-            let sale_repo: Arc<dyn SaleRepository> = store.clone();
-            let invoice_repo: Arc<dyn InvoiceRepository> = store.clone();
-            let cash_repo: Arc<dyn CashRepository> = store.clone();
-            let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
-            let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
-            let sync_repo: Arc<dyn SyncOutboxRepository> = store.clone();
-            let user_repo: Arc<dyn UserRepository> = store.clone();
-            let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
-            let backup_repo: Arc<dyn BackupRepository> = store.clone();
-            let tickets_dir = data_dir.join("tickets");
-            let backup_dir = data_dir.join("backups");
-            std::fs::create_dir_all(&tickets_dir)?;
-            std::fs::create_dir_all(&backup_dir)?;
             let selected_profile = match std::env::var("TPV_PRINTER_PROFILE")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -645,64 +719,17 @@ fn main() {
                 })?),
                 None => None,
             };
-            let renderer =
-                selected_profile.map_or_else(EscPosRenderer::default, EscPosRenderer::for_profile);
-            let printer_spec = std::env::var("TPV_PRINTER")
-                .unwrap_or_else(|_| format!("dir:{}", tickets_dir.display()));
-            let printer_spec = if let Some(profile) = selected_profile {
-                apply_profile_defaults(&printer_spec, profile)
-            } else {
-                printer_spec
-            };
-            let printer = build_printer(&printer_spec)?;
-            let printer_label = printer_spec;
-            let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
-            let sync = tauri::async_runtime::block_on(store.sync_context())?;
-            let catalog = CatalogService::new(catalog_repo.clone());
-            let sales = SaleService::new(
-                sale_repo.clone(),
-                catalog_repo.clone(),
-                clock.clone(),
-                sequence_repo.clone(),
-                "TPV",
-                sync.clone(),
-            );
-            let invoices = InvoiceService::new(
-                invoice_repo,
-                sale_repo.clone(),
-                catalog_repo.clone(),
-                sequence_repo,
-                clock.clone(),
-                sync.clone(),
-            );
-            let cash = CashService::new(cash_repo, sale_repo.clone(), clock.clone(), sync);
-            let print = PrintService::new(
-                sale_repo,
-                catalog_repo,
-                print_repo,
-                Arc::new(renderer),
-                clock.clone(),
-            );
-            let sync_service = SyncService::new(sync_repo);
-            let backup_service = BackupService::new(backup_repo);
-            let auth =
-                AuthService::new(user_repo, Arc::new(Argon2PasswordHasher), audit_repo, clock);
-            tauri::async_runtime::block_on(auth.bootstrap_password("admin", "admin123"))?;
-            app.manage(AppState {
-                catalog,
-                sales,
-                invoices,
-                cash,
-                print,
-                sync: sync_service,
-                backup: backup_service,
-                printer,
-                printer_label,
-                backup_dir,
-                auth,
-                session: Arc::new(RwLock::new(None)),
+            let printer_spec = std::env::var("TPV_PRINTER").ok();
+            let state = tauri::async_runtime::block_on(build_app_state(
+                Arc::new(store),
+                &data_dir,
                 demo,
-            });
+                PrinterSettings {
+                    spec: printer_spec,
+                    profile: selected_profile,
+                },
+            ))?;
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -736,4 +763,208 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running General TPV");
+}
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{
+        INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets,
+    };
+    use tauri::webview::InvokeRequest;
+    use tauri::{App, WebviewWindow};
+    use tpv_storage_sqlite::DatabaseKey;
+
+    fn build_test_app() -> (App<MockRuntime>, WebviewWindow<MockRuntime>, PathBuf) {
+        let data_dir = std::env::temp_dir().join(format!("tpv-e2e-{}", uuid::Uuid::new_v4()));
+        let state = tauri::async_runtime::block_on(async {
+            let store = SqliteStore::in_memory_with_key(&DatabaseKey::generate())
+                .await
+                .expect("in-memory store");
+            let demo = store.seed_demo().await.expect("demo data");
+            build_app_state(
+                Arc::new(store),
+                &data_dir,
+                demo,
+                PrinterSettings {
+                    spec: Some("null".into()),
+                    profile: None,
+                },
+            )
+            .await
+            .expect("application state")
+        });
+        let app = mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![
+                login,
+                logout,
+                current_user,
+                bootstrap,
+                search_products,
+                start_sale,
+                add_line,
+                apply_payment,
+                confirm_sale,
+                issue_invoice,
+                open_cash,
+                close_cash,
+                cash_status,
+                print_ticket,
+                print_pending,
+                list_print_jobs,
+                list_sales,
+                sync_status,
+                list_failed_sync_events,
+                retry_sync_events,
+                retry_all_sync_events,
+                list_users,
+                create_user,
+                update_user,
+                reset_password,
+                list_stores,
+                backup_now
+            ])
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+        (app, webview, data_dir)
+    }
+
+    fn invoke(
+        webview: &WebviewWindow<MockRuntime>,
+        cmd: &str,
+        args: Value,
+    ) -> Result<Value, Value> {
+        get_ipc_response(
+            webview,
+            InvokeRequest {
+                cmd: cmd.into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().expect("valid URL"),
+                body: InvokeBody::Json(args),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|body| body.deserialize::<Value>().expect("JSON response"))
+    }
+
+    #[test]
+    fn sale_flow_runs_through_the_tauri_command_layer() {
+        let (app, webview, data_dir) = build_test_app();
+
+        assert_eq!(
+            invoke(&webview, "current_user", json!({})).unwrap(),
+            Value::Null
+        );
+        assert!(invoke(&webview, "bootstrap", json!({})).is_err());
+
+        let session = invoke(
+            &webview,
+            "login",
+            json!({ "username": "admin", "password": "admin123" }),
+        )
+        .expect("admin login");
+        assert_eq!(session["user"]["role"], "admin");
+
+        let info = invoke(&webview, "bootstrap", json!({})).expect("bootstrap");
+        assert_eq!(info["store_name"], "100%SHOPPING");
+        let store_id = info["store_id"].as_str().expect("store id").to_string();
+
+        invoke(&webview, "open_cash", json!({})).expect("open cash");
+        let sale = invoke(&webview, "start_sale", json!({})).expect("start sale");
+        let sale_id = sale["sale"]["id"].as_str().expect("sale id").to_string();
+
+        let sale = invoke(
+            &webview,
+            "add_line",
+            json!({
+                "saleId": sale_id,
+                "sku": "3",
+                "quantity": "2",
+                "kind": "sale"
+            }),
+        )
+        .expect("add line");
+        assert_eq!(sale["totals"]["gross"], 240);
+
+        let sale = invoke(
+            &webview,
+            "apply_payment",
+            json!({
+                "saleId": sale_id,
+                "method": "cash",
+                "amountCents": 240,
+                "receivedCents": 500
+            }),
+        )
+        .expect("apply payment");
+        assert_eq!(sale["totals"]["change"], 260);
+
+        let sale =
+            invoke(&webview, "confirm_sale", json!({ "saleId": sale_id })).expect("confirm sale");
+        assert_eq!(sale["sale"]["state"], "paid");
+        assert!(sale["sale"]["ticket_number"].is_number());
+
+        let print = invoke(
+            &webview,
+            "print_ticket",
+            json!({ "saleId": sale_id, "reprint": false }),
+        )
+        .expect("print ticket");
+        assert_eq!(print["success"], true);
+        assert_eq!(print["file"], "null");
+
+        invoke(&webview, "issue_invoice", json!({ "saleId": sale_id })).expect("issue invoice");
+        let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
+        assert_eq!(sales.as_array().expect("sales array").len(), 1);
+
+        let cash = invoke(&webview, "cash_status", json!({})).expect("cash status");
+        assert!(cash.is_object());
+        assert_eq!(cash["state"], "open");
+
+        let backup = invoke(&webview, "backup_now", json!({})).expect("backup");
+        assert!(backup["bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(Path::new(backup["path"].as_str().expect("backup path")).exists());
+
+        let cashier = invoke(
+            &webview,
+            "create_user",
+            json!({
+                "username": "cajero1",
+                "displayName": "Cajero Uno",
+                "role": "cashier",
+                "storeIds": [store_id],
+                "password": "cajero123"
+            }),
+        )
+        .expect("create cashier");
+        assert_eq!(cashier["role"], "cashier");
+
+        invoke(&webview, "logout", json!({})).expect("logout admin");
+        invoke(
+            &webview,
+            "login",
+            json!({ "username": "cajero1", "password": "cajero123" }),
+        )
+        .expect("cashier login");
+        let forbidden =
+            invoke(&webview, "list_users", json!({})).expect_err("cashier cannot list users");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("gestionar usuarios")
+        );
+
+        drop(webview);
+        drop(app);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 }

@@ -22,7 +22,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
-| USB/serie nativo | Pendiente de siguiente iteración |
+| Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
+| Validación con hardware real | Pendiente de hardware-in-the-loop |
 
 ## Arranque rápido
 
@@ -182,9 +183,12 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-cd ui && npm run check && npm run build
+cd apps/desktop/src-tauri && cargo test
+cd ui && npm run check && npm run build && npm run test:e2e
 cd backoffice && npm run check && npm run build
 ```
+
+La prueba de comandos Tauri usa el runtime mock oficial y recorre login, caja, venta, cobro, ticket, factura, backup y RBAC. La prueba de UI usa Playwright con el Chrome instalado en el sistema y un puente IPC simulado; no descarga navegadores adicionales.
 
 ## Documentación
 

@@ -214,13 +214,15 @@ Implementado:
 - Clave SQLCipher en el keychain del sistema con migración desde fichero y fallback headless.
 - Exportación, importación y uso de claves externas para backups y recuperación.
 - Adaptadores serie y USB nativos, con detección de endpoint y perfiles de impresora.
+- Pruebas E2E de la capa de comandos Tauri con runtime mock.
+- Prueba Playwright de la UI con puente IPC simulado y Chrome del sistema.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
 - Gestión de usuarios y dispositivos desde backoffice central.
 - Certificación con impresoras físicas y despliegue de reglas udev/WinUSB.
 - Firma de actualizaciones, SBOM y pipeline de release.
-- Pruebas hardware-in-the-loop y de carga.
+- Pruebas hardware-in-the-loop y de carga sostenida.
 
 ## 8. Verifactu
 
@@ -228,7 +230,7 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Pruebas E2E Tauri y hardware-in-the-loop con impresoras reales.
+1. Hardware-in-the-loop con impresoras reales y pruebas de carga.
 2. Gestión de usuarios desde el backoffice central.
 3. Consola de dispositivos y conflictos de maestros en el backoffice.
 4. Edición de maestros desde la UI del TPV.
