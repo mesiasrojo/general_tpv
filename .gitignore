@@ -8,6 +8,8 @@ node_modules
 /dist
 /ui/dist
 /apps/desktop/target
+/apps/desktop/src-tauri/target
+/apps/desktop/src-tauri/gen
 .DS_Store
 /ui/.svelte-kit
 /backoffice/build
