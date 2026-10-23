@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tpv_domain::Money;
 use tpv_domain::cash::CashCount;
 use tpv_domain::ids::{CustomerId, RegisterId, SaleId, SellerId, StoreId, UserId};
+use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
 use tpv_domain::sync::SyncEvent;
 
@@ -290,4 +291,28 @@ pub struct QuarantinedEvent {
     pub attempts: u32,
     pub failed_at: time::OffsetDateTime,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<StoreId>,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateUserRequest {
+    pub user_id: UserId,
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<StoreId>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub user_id: UserId,
+    pub new_password: String,
 }

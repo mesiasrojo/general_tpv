@@ -157,12 +157,23 @@ export interface CashSession {
   version: number;
 }
 
+export type UserRole = 'admin' | 'manager' | 'cashier' | 'auditor';
+
 export interface UserAccount {
   id: string;
   username: string;
   display_name: string;
-  role: 'admin' | 'manager' | 'cashier' | 'auditor';
+  role: UserRole;
   store_ids: string[];
+  active: boolean;
+}
+
+export interface Store {
+  id: string;
+  code: string;
+  name: string;
+  tax_id: string;
+  phone: string | null;
   active: boolean;
 }
 
@@ -253,7 +264,39 @@ export const api = {
     invoke<QuarantinedEvent[]>('list_failed_sync_events', { limit }),
   retrySyncEvents: (eventIds: string[]) =>
     invoke<number>('retry_sync_events', { eventIds }),
-  retryAllSyncEvents: () => invoke<number>('retry_all_sync_events')
+  retryAllSyncEvents: () => invoke<number>('retry_all_sync_events'),
+  listUsers: () => invoke<UserAccount[]>('list_users'),
+  createUser: (
+    username: string,
+    displayName: string,
+    role: UserRole,
+    storeIds: string[],
+    password: string
+  ) =>
+    invoke<UserAccount>('create_user', {
+      username,
+      displayName,
+      role,
+      storeIds,
+      password
+    }),
+  updateUser: (
+    userId: string,
+    displayName: string,
+    role: UserRole,
+    storeIds: string[],
+    active: boolean
+  ) =>
+    invoke<UserAccount>('update_user', {
+      userId,
+      displayName,
+      role,
+      storeIds,
+      active
+    }),
+  resetPassword: (userId: string, newPassword: string) =>
+    invoke<void>('reset_password', { userId, newPassword }),
+  listStores: () => invoke<Store[]>('list_stores')
 };
 
 export function formatMoney(cents: MoneyCents): string {

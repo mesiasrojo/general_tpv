@@ -20,6 +20,9 @@ pub enum StorageError {
 
     #[error("invalid stored data: {0}")]
     InvalidData(String),
+
+    #[error("not found: {0}")]
+    NotFound(String),
 }
 
 impl From<StorageError> for ApplicationError {

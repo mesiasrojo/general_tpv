@@ -213,6 +213,11 @@ impl Role {
     pub fn can_view_audit(self) -> bool {
         matches!(self, Self::Admin | Self::Manager | Self::Auditor)
     }
+
+    #[must_use]
+    pub fn can_manage_users(self) -> bool {
+        matches!(self, Self::Admin)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,5 +365,9 @@ mod tests {
         assert!(!Role::Cashier.can_reopen_cash());
         assert!(Role::Manager.can_reopen_cash());
         assert!(Role::Auditor.can_view_audit());
+        assert!(Role::Admin.can_manage_users());
+        assert!(!Role::Manager.can_manage_users());
+        assert!(!Role::Cashier.can_manage_users());
+        assert!(!Role::Auditor.can_manage_users());
     }
 }

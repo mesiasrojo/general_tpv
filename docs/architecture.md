@@ -98,12 +98,21 @@ login(username, password)
        ├─ UserRepository::record_login
        └─ AuditRepository::append (login / login_failed)
 
+Gestión de usuarios (solo admin)
+  ├─ AuthService::create_user  → UserCreated
+  ├─ AuthService::update_user  → UserUpdated / UserDeactivated / UserReactivated
+  ├─ AuthService::reset_password → PasswordReset + desbloqueo
+  └─ AuthService::list_users
+
 Comandos Tauri protegidos
-  └─ require_session / require_sell
+  ├─ require_session       → lectura general
+  ├─ require_sell          → venta, caja e impresión
+  ├─ require_manager       → reintentos de sync y datos maestros
+  └─ require_manage_users  → alta, edición y contraseñas de usuarios
        └─ AppState.session (RwLock<Option<SessionUser>>)
 ```
 
-Roles: `admin`, `manager`, `cashier`, `auditor`. Los comandos de venta exigen `can_sell`; las operaciones sensibles están preparadas para exigir permisos específicos. Las contraseñas se almacenan como hashes Argon2id con sal; nunca en texto plano.
+Roles: `admin`, `manager`, `cashier`, `auditor`. Los comandos de venta exigen `can_sell`; la gestión de usuarios exige `can_manage_users` (solo `admin`) y los reintentos de sincronización `can_manage_master_data` (`admin`/`manager`). No se permite desactivar la propia cuenta ni degradar o desactivar al último administrador activo. Las contraseñas se almacenan como hashes Argon2id con sal; nunca en texto plano.
 
 ## 5. Sincronización
 
@@ -160,6 +169,9 @@ Implementado:
 - `#![forbid(unsafe_code)]` en las crates de lógica.
 - Renderer ESC/POS probado con vectores de bytes y cola persistente.
 - Login local con Argon2id, bloqueo por intentos, roles y auditoría.
+- RBAC por comando: venta, caja, impresión, sync y gestión de usuarios.
+- Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
+- Protección del último administrador activo y de la propia cuenta.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.
 - Token bearer opcional en la central.
@@ -169,7 +181,7 @@ Implementado:
 
 Pendiente para producción:
 - SQLCipher y gestión de clave en keychain.
-- RBAC granular por comando y gestión de usuarios desde backoffice.
+- Gestión de usuarios desde backoffice central.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
 - Enrolamiento y revocación de dispositivos en la central.
 - Resolución automática de conflictos de maestros.
@@ -183,8 +195,8 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 ## 9. Siguiente iteración recomendada
 
 1. SQLCipher y backups cifrados.
-2. RBAC granular y gestión de usuarios.
-3. Enrolamiento/revocación de dispositivos.
-4. Resolución de conflictos de maestros.
-5. Adaptadores USB/serie y hardware-in-the-loop.
-6. Pruebas E2E Tauri.
+2. Enrolamiento/revocación de dispositivos.
+3. Resolución de conflictos de maestros.
+4. Adaptadores USB/serie y hardware-in-the-loop.
+5. Pruebas E2E Tauri.
+6. Gestión de usuarios desde el backoffice central.

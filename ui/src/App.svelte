@@ -16,7 +16,10 @@
     type QuarantinedEvent,
     type SaleView,
     type SessionUser,
-    type SyncStatus
+    type Store,
+    type SyncStatus,
+    type UserAccount,
+    type UserRole
   } from './lib/api';
 
   let session = $state<SessionUser | null>(null);
@@ -42,6 +45,17 @@
   let syncStatus = $state<SyncStatus | null>(null);
   let syncQuarantine = $state<QuarantinedEvent[]>([]);
   let syncBusy = $state(false);
+  let usersOpen = $state(false);
+  let users = $state<UserAccount[]>([]);
+  let stores = $state<Store[]>([]);
+  let userBusy = $state(false);
+  let userError = $state('');
+  let newUsername = $state('');
+  let newDisplayName = $state('');
+  let newRole = $state<UserRole>('cashier');
+  let newStoreId = $state('');
+  let newPassword = $state('');
+  let resetPasswordDrafts = $state<Record<string, string>>({});
 
   let change = $derived(Math.max(0, receivedCents - amountCents));
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
@@ -94,6 +108,10 @@
     lastSales = [];
     syncStatus = null;
     syncQuarantine = [];
+    usersOpen = false;
+    users = [];
+    stores = [];
+    resetPasswordDrafts = {};
     message = 'Sesión cerrada.';
   }
 
@@ -167,6 +185,112 @@
       message = String(error);
     } finally {
       syncBusy = false;
+    }
+  }
+
+  async function openUsers() {
+    userError = '';
+    usersOpen = true;
+    await refreshUsers();
+  }
+
+  async function refreshUsers() {
+    try {
+      users = await api.listUsers();
+      stores = await api.listStores();
+      const firstStore = stores[0];
+      if (!newStoreId && firstStore) {
+        newStoreId = firstStore.id;
+      }
+    } catch (error) {
+      userError = String(error);
+    }
+  }
+
+  async function createUser() {
+    if (userBusy) return;
+    userError = '';
+    if (!newUsername.trim() || !newDisplayName.trim() || newPassword.length < 8) {
+      userError = 'Usuario, nombre y contraseña (mínimo 8 caracteres) son obligatorios.';
+      return;
+    }
+    userBusy = true;
+    try {
+      const created = await api.createUser(
+        newUsername.trim(),
+        newDisplayName.trim(),
+        newRole,
+        newStoreId ? [newStoreId] : [],
+        newPassword
+      );
+      users = [...users, created];
+      newUsername = '';
+      newDisplayName = '';
+      newRole = 'cashier';
+      newPassword = '';
+      message = `Usuario ${created.username} creado.`;
+    } catch (error) {
+      userError = String(error);
+    } finally {
+      userBusy = false;
+    }
+  }
+
+  async function saveUser(user: UserAccount) {
+    if (userBusy) return;
+    userBusy = true;
+    userError = '';
+    try {
+      const updated = await api.updateUser(
+        user.id,
+        user.display_name,
+        user.role,
+        user.store_ids,
+        user.active
+      );
+      const index = users.findIndex((item) => item.id === updated.id);
+      if (index >= 0) {
+        users[index] = updated;
+      }
+      message = `Usuario ${updated.username} actualizado.`;
+    } catch (error) {
+      userError = String(error);
+    } finally {
+      userBusy = false;
+    }
+  }
+
+  async function resetUserPassword(user: UserAccount) {
+    const password = resetPasswordDrafts[user.id] ?? '';
+    if (password.length < 8) {
+      userError = 'La nueva contraseña debe tener al menos 8 caracteres.';
+      return;
+    }
+    if (userBusy) return;
+    userBusy = true;
+    userError = '';
+    try {
+      await api.resetPassword(user.id, password);
+      resetPasswordDrafts[user.id] = '';
+      message = `Contraseña de ${user.username} restablecida.`;
+    } catch (error) {
+      userError = String(error);
+    } finally {
+      userBusy = false;
+    }
+  }
+
+  function setResetPassword(userId: string, value: string) {
+    resetPasswordDrafts[userId] = value;
+  }
+
+  function toggleStoreAccess(user: UserAccount, storeId: string, checked: boolean) {
+    if (checked) {
+      if (!user.store_ids.includes(storeId)) {
+        user.store_ids = [...user.store_ids, storeId];
+      }
+    } else {
+      user.store_ids = user.store_ids.filter((id) => id !== storeId);
     }
   }
 
@@ -400,6 +524,9 @@
       <span class="badge online">OFFLINE-FIRST</span>
       <span class="badge">{session.user.display_name} · {roleLabel(session.user.role)}</span>
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
+      {#if session.user.role === 'admin'}
+        <button class="icon" type="button" onclick={() => void openUsers()}>Usuarios</button>
+      {/if}
       <button class="icon" type="button" onclick={() => void logout()}>Salir</button>
     </div>
   </header>
@@ -728,6 +855,139 @@
           >
             Cobrar y cerrar
           </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if usersOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal users-modal" role="dialog" aria-modal="true" aria-label="Gestión de usuarios">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">ADMINISTRACIÓN</p>
+            <h2>Usuarios</h2>
+          </div>
+          <button class="icon" type="button" onclick={() => (usersOpen = false)}>Esc</button>
+        </div>
+
+        {#if userError}
+          <p class="error" role="alert">{userError}</p>
+        {/if}
+
+        <form
+          class="user-create"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void createUser();
+          }}
+        >
+          <label class="field">
+            <span>Usuario</span>
+            <input bind:value={newUsername} autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Nombre visible</span>
+            <input bind:value={newDisplayName} />
+          </label>
+          <label class="field">
+            <span>Rol</span>
+            <select bind:value={newRole}>
+              <option value="admin">Administrador</option>
+              <option value="manager">Responsable</option>
+              <option value="cashier">Cajero</option>
+              <option value="auditor">Auditor</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Tienda</span>
+            <select bind:value={newStoreId}>
+              <option value="">Sin tienda</option>
+              {#each stores as store (store.id)}
+                <option value={store.id}>{store.name}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="field">
+            <span>Contraseña inicial</span>
+            <input bind:value={newPassword} type="password" autocomplete="new-password" />
+          </label>
+          <button class="primary full" type="submit" disabled={userBusy}>
+            Crear usuario
+          </button>
+        </form>
+
+        <div class="user-list">
+          {#each users as user (user.id)}
+            <div class="user-row">
+              <div class="user-heading">
+                <span class="mono">{user.username}</span>
+                <span class="badge">{user.active ? 'ACTIVO' : 'INACTIVO'}</span>
+              </div>
+              <div class="user-fields">
+                <label class="field">
+                  <span>Nombre visible</span>
+                  <input bind:value={user.display_name} />
+                </label>
+                <label class="field">
+                  <span>Rol</span>
+                  <select bind:value={user.role}>
+                    <option value="admin">Administrador</option>
+                    <option value="manager">Responsable</option>
+                    <option value="cashier">Cajero</option>
+                    <option value="auditor">Auditor</option>
+                  </select>
+                </label>
+                <div class="field">
+                  <span>Estado</span>
+                  <label class="inline">
+                    <input type="checkbox" bind:checked={user.active} />
+                    Activo
+                  </label>
+                </div>
+              </div>
+              <div class="user-stores">
+                {#each stores as store (store.id)}
+                  <label class="inline">
+                    <input
+                      type="checkbox"
+                      checked={user.store_ids.includes(store.id)}
+                      onchange={(event) =>
+                        toggleStoreAccess(user, store.id, event.currentTarget.checked)}
+                    />
+                    {store.name}
+                  </label>
+                {/each}
+              </div>
+              <div class="user-actions">
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={userBusy}
+                  onclick={() => void saveUser(user)}
+                >
+                  Guardar
+                </button>
+                <input
+                  class="reset-input"
+                  type="password"
+                  placeholder="Nueva contraseña"
+                  value={resetPasswordDrafts[user.id] ?? ''}
+                  oninput={(event) => setResetPassword(user.id, event.currentTarget.value)}
+                />
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={userBusy}
+                  onclick={() => void resetUserPassword(user)}
+                >
+                  Restablecer
+                </button>
+              </div>
+            </div>
+          {:else}
+            <p class="muted small">No hay usuarios.</p>
+          {/each}
         </div>
       </div>
     </div>
@@ -1089,6 +1349,98 @@
     border-radius: 18px;
     padding: 22px;
     box-shadow: 0 30px 80px rgb(0 0 0 / 45%);
+  }
+
+  .users-modal {
+    width: min(980px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .user-create {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+    gap: 8px;
+    align-items: end;
+    padding-bottom: 14px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .user-create .field {
+    margin: 0;
+  }
+
+  .user-create button {
+    min-height: 40px;
+    margin-top: 0;
+  }
+
+  .user-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .user-row {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .user-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .user-fields {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr auto;
+    gap: 10px;
+    align-items: end;
+  }
+
+  .user-fields .field {
+    margin: 0;
+  }
+
+  .user-stores {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .user-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .user-actions button {
+    padding: 8px 12px;
+  }
+
+  .reset-input {
+    flex: 1;
+    min-width: 180px;
+    padding: 8px 10px;
+  }
+
+  .inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9rem;
+  }
+
+  .inline input {
+    width: auto;
+    padding: 0;
   }
 
   .modal-heading {

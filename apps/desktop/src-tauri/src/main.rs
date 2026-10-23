@@ -8,16 +8,18 @@ use tauri::{Manager, State};
 use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, CashRepository, CashService,
-    CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository,
-    InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService, QuarantinedEvent,
-    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
-    SyncOutboxRepository, SyncService, SyncStatus, UserRepository,
+    CatalogRepository, CatalogService, CloseCashRequest, ConfirmSaleRequest, CreateUserRequest,
+    InvoiceRepository, InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService,
+    QuarantinedEvent, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
+    SequenceRepository, SessionUser, StartSaleRequest, SyncOutboxRepository, SyncService,
+    SyncStatus, UpdateUserRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
 use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
+use tpv_domain::people::{Role, UserAccount};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{DirectoryPrinter, EscPosRenderer};
 use tpv_storage_sqlite::{DemoData, SqliteStore};
@@ -63,6 +65,24 @@ fn require_sell(state: &AppState) -> Result<SessionUser, String> {
         Ok(session)
     } else {
         Err("el usuario no tiene permiso para vender".to_string())
+    }
+}
+
+fn require_manager(state: &AppState) -> Result<SessionUser, String> {
+    let session = require_session(state)?;
+    if session.user.role.can_manage_master_data() {
+        Ok(session)
+    } else {
+        Err("el usuario no tiene permiso de responsable".to_string())
+    }
+}
+
+fn require_manage_users(state: &AppState) -> Result<SessionUser, String> {
+    let session = require_session(state)?;
+    if session.user.role.can_manage_users() {
+        Ok(session)
+    } else {
+        Err("el usuario no tiene permiso para gestionar usuarios".to_string())
     }
 }
 
@@ -246,7 +266,7 @@ async fn issue_invoice(
     state: State<'_, AppState>,
     sale_id: tpv_domain::ids::SaleId,
 ) -> Result<Invoice, String> {
-    require_session(state.inner())?;
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     let year = u16::try_from(OffsetDateTime::now_utc().year()).unwrap_or(2026);
     state
@@ -263,7 +283,7 @@ async fn issue_invoice(
 
 #[tauri::command]
 async fn open_cash(state: State<'_, AppState>) -> Result<CashSession, String> {
-    require_session(state.inner())?;
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     if let Some(session) = state
         .cash
@@ -293,7 +313,7 @@ async fn close_cash(
     counted_card_cents: i64,
     counted_voucher_cents: i64,
 ) -> Result<tpv_domain::cash::CashCloseRecord, String> {
-    require_session(state.inner())?;
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     state
         .cash
@@ -312,7 +332,7 @@ async fn close_cash(
 
 #[tauri::command]
 async fn cash_status(state: State<'_, AppState>) -> Result<Option<CashSession>, String> {
-    require_session(state.inner())?;
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     state
         .cash
@@ -335,7 +355,7 @@ async fn print_ticket(
     sale_id: tpv_domain::ids::SaleId,
     reprint: bool,
 ) -> Result<PrintSummary, String> {
-    require_session(state.inner())?;
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     let job = state
         .print
@@ -364,7 +384,7 @@ async fn print_ticket(
 async fn print_pending(
     state: State<'_, AppState>,
 ) -> Result<Vec<tpv_application::PrintResult>, String> {
-    require_session(state.inner())?;
+    require_sell(state.inner())?;
     let state = state.inner().clone();
     let printer = DirectoryPrinter::new(state.print_dir.clone());
     state
@@ -433,7 +453,7 @@ async fn retry_sync_events(
     state: State<'_, AppState>,
     event_ids: Vec<uuid::Uuid>,
 ) -> Result<u64, String> {
-    require_session(state.inner())?;
+    require_manager(state.inner())?;
     state
         .inner()
         .sync
@@ -444,11 +464,108 @@ async fn retry_sync_events(
 
 #[tauri::command]
 async fn retry_all_sync_events(state: State<'_, AppState>) -> Result<u64, String> {
-    require_session(state.inner())?;
+    require_manager(state.inner())?;
     state
         .inner()
         .sync
         .retry_all_failed(100)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_users(state: State<'_, AppState>) -> Result<Vec<UserAccount>, String> {
+    let session = require_manage_users(state.inner())?;
+    state
+        .inner()
+        .auth
+        .list_users(&session)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn create_user(
+    state: State<'_, AppState>,
+    username: String,
+    display_name: String,
+    role: Role,
+    store_ids: Vec<StoreId>,
+    password: String,
+) -> Result<UserAccount, String> {
+    let session = require_manage_users(state.inner())?;
+    state
+        .inner()
+        .auth
+        .create_user(
+            &session,
+            CreateUserRequest {
+                username,
+                display_name,
+                role,
+                store_ids,
+                password,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn update_user(
+    state: State<'_, AppState>,
+    user_id: UserId,
+    display_name: String,
+    role: Role,
+    store_ids: Vec<StoreId>,
+    active: bool,
+) -> Result<UserAccount, String> {
+    let session = require_manage_users(state.inner())?;
+    state
+        .inner()
+        .auth
+        .update_user(
+            &session,
+            UpdateUserRequest {
+                user_id,
+                display_name,
+                role,
+                store_ids,
+                active,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn reset_password(
+    state: State<'_, AppState>,
+    user_id: UserId,
+    new_password: String,
+) -> Result<(), String> {
+    let session = require_manage_users(state.inner())?;
+    state
+        .inner()
+        .auth
+        .reset_password(
+            &session,
+            ResetPasswordRequest {
+                user_id,
+                new_password,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_stores(state: State<'_, AppState>) -> Result<Vec<tpv_domain::people::Store>, String> {
+    require_manage_users(state.inner())?;
+    state
+        .inner()
+        .catalog
+        .list_stores()
         .await
         .map_err(|error| error.to_string())
 }
@@ -546,7 +663,12 @@ fn main() {
             sync_status,
             list_failed_sync_events,
             retry_sync_events,
-            retry_all_sync_events
+            retry_all_sync_events,
+            list_users,
+            create_user,
+            update_user,
+            reset_password,
+            list_stores
         ])
         .run(tauri::generate_context!())
         .expect("error while running General TPV");

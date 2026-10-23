@@ -5,7 +5,7 @@ use tpv_domain::audit::{AuditAction, AuditEvent};
 use tpv_domain::ids::UserId;
 use tpv_domain::people::{Role, UserAccount};
 
-use crate::dto::SessionUser;
+use crate::dto::{CreateUserRequest, ResetPasswordRequest, SessionUser, UpdateUserRequest};
 use crate::error::{ApplicationError, Result};
 use crate::ports::{AuditRepository, Clock, PasswordHasher, UserRepository};
 
@@ -129,22 +129,127 @@ impl AuthService {
             return Ok(());
         }
         let user = UserAccount::new(UserId::new(), &username, "Administrador", Role::Admin)?;
-        self.create_user(&user, password).await
+        self.create_account(&user, password, Some(user.id)).await
     }
 
-    pub async fn create_user(&self, user: &UserAccount, password: &str) -> Result<()> {
-        self.validate_password(password)?;
-        let hash = self
-            .hasher
-            .hash(password)
-            .map_err(|error| ApplicationError::Internal(error.to_string()))?;
-        self.users.create_user(user, &hash).await?;
+    pub async fn create_user(
+        &self,
+        actor: &SessionUser,
+        request: CreateUserRequest,
+    ) -> Result<UserAccount> {
+        require_manage_users(actor)?;
+        let mut user = UserAccount::new(
+            UserId::new(),
+            request.username,
+            request.display_name,
+            request.role,
+        )?;
+        if self.users.find_by_username(&user.username).await?.is_some() {
+            return Err(ApplicationError::Conflict(format!(
+                "el usuario '{}' ya existe",
+                user.username
+            )));
+        }
+        user.store_ids = request.store_ids;
+        self.create_account(&user, &request.password, Some(actor.user.id))
+            .await?;
+        Ok(user)
+    }
+
+    pub async fn update_user(
+        &self,
+        actor: &SessionUser,
+        request: UpdateUserRequest,
+    ) -> Result<UserAccount> {
+        require_manage_users(actor)?;
+        let stored = self
+            .users
+            .find_by_id(request.user_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound(format!("user {}", request.user_id)))?;
+        let display_name = request.display_name.trim().to_string();
+        if display_name.is_empty() {
+            return Err(ApplicationError::Validation(
+                "el nombre visible es obligatorio".into(),
+            ));
+        }
+        if stored.account.id == actor.user.id && !request.active {
+            return Err(ApplicationError::Validation(
+                "no puedes desactivar tu propia cuenta".into(),
+            ));
+        }
+        if stored.account.role == Role::Admin
+            && stored.account.active
+            && (request.role != Role::Admin || !request.active)
+        {
+            let users = self.users.list_users().await?;
+            let other_admins = users
+                .iter()
+                .filter(|user| {
+                    user.id != stored.account.id && user.active && user.role == Role::Admin
+                })
+                .count();
+            if other_admins == 0 {
+                return Err(ApplicationError::Conflict(
+                    "no se puede desactivar o degradar al último administrador activo".into(),
+                ));
+            }
+        }
+        let updated = UserAccount {
+            display_name,
+            role: request.role,
+            store_ids: request.store_ids,
+            active: request.active,
+            ..stored.account.clone()
+        };
+        self.users.update_user(&updated).await?;
         let now = self.clock.now();
-        self.write_audit(
+        let action = match (stored.account.active, updated.active) {
+            (true, false) => AuditAction::UserDeactivated,
+            (false, true) => AuditAction::UserReactivated,
+            _ => AuditAction::UserUpdated,
+        };
+        self.write_audit_as(
             now,
-            AuditAction::UserCreated,
-            user,
-            serde_json::json!({"role": user.role}),
+            action,
+            Some(actor.user.id),
+            &updated,
+            serde_json::json!({
+                "role_before": stored.account.role,
+                "role_after": updated.role,
+                "active_before": stored.account.active,
+                "active_after": updated.active,
+                "store_ids": updated.store_ids,
+            }),
+        )
+        .await?;
+        Ok(updated)
+    }
+
+    pub async fn reset_password(
+        &self,
+        actor: &SessionUser,
+        request: ResetPasswordRequest,
+    ) -> Result<()> {
+        require_manage_users(actor)?;
+        let stored = self
+            .users
+            .find_by_id(request.user_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound(format!("user {}", request.user_id)))?;
+        self.set_password(stored.account.id, &request.new_password)
+            .await?;
+        // A password reset also clears any lockout left by failed attempts.
+        self.users
+            .record_login(stored.account.id, 0, None, stored.last_login_at)
+            .await?;
+        let now = self.clock.now();
+        self.write_audit_as(
+            now,
+            AuditAction::PasswordReset,
+            Some(actor.user.id),
+            &stored.account,
+            serde_json::json!({}),
         )
         .await
     }
@@ -185,8 +290,35 @@ impl AuthService {
         .await
     }
 
-    pub async fn list_users(&self) -> Result<Vec<UserAccount>> {
+    pub async fn list_users(&self, actor: &SessionUser) -> Result<Vec<UserAccount>> {
+        require_manage_users(actor)?;
         self.users.list_users().await
+    }
+
+    async fn create_account(
+        &self,
+        user: &UserAccount,
+        password: &str,
+        actor_id: Option<UserId>,
+    ) -> Result<()> {
+        self.validate_password(password)?;
+        let hash = self
+            .hasher
+            .hash(password)
+            .map_err(|error| ApplicationError::Internal(error.to_string()))?;
+        self.users.create_user(user, &hash).await?;
+        let now = self.clock.now();
+        self.write_audit_as(
+            now,
+            AuditAction::UserCreated,
+            actor_id,
+            user,
+            serde_json::json!({
+                "role": user.role,
+                "store_ids": user.store_ids,
+            }),
+        )
+        .await
     }
 
     async fn set_password(&self, user_id: UserId, password: &str) -> Result<()> {
@@ -214,15 +346,37 @@ impl AuthService {
         user: &UserAccount,
         details: serde_json::Value,
     ) -> Result<()> {
+        self.write_audit_as(now, action, Some(user.id), user, details)
+            .await
+    }
+
+    async fn write_audit_as(
+        &self,
+        now: OffsetDateTime,
+        action: AuditAction,
+        actor_id: Option<UserId>,
+        target: &UserAccount,
+        details: serde_json::Value,
+    ) -> Result<()> {
         let event = AuditEvent::new(
             now,
-            Some(user.id),
+            actor_id,
             None,
             action,
             "user",
-            user.id.to_string(),
+            target.id.to_string(),
             details,
         )?;
         self.audit.append(&event).await
+    }
+}
+
+fn require_manage_users(actor: &SessionUser) -> Result<()> {
+    if actor.user.role.can_manage_users() {
+        Ok(())
+    } else {
+        Err(ApplicationError::Unauthorized(
+            "el usuario no tiene permiso para gestionar usuarios".into(),
+        ))
     }
 }

@@ -16,9 +16,9 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | CLI de demostración end-to-end | Implementado |
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
 | Impresión ESC/POS + cola persistente | Implementado (renderer, fichero, directorio y red TCP) |
-| Autenticación Argon2id + RBAC local | Implementado (login, bloqueo por intentos, roles y auditoría) |
+| Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
-| SQLCipher, RBAC granular, USB/serie nativo | Pendiente de siguiente iteración |
+| SQLCipher y USB/serie nativo | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 

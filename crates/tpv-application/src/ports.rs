@@ -158,6 +158,7 @@ pub trait UserRepository: Send + Sync {
         user: &tpv_domain::people::UserAccount,
         password_hash: &str,
     ) -> Result<()>;
+    async fn update_user(&self, user: &tpv_domain::people::UserAccount) -> Result<()>;
     async fn set_password_hash(
         &self,
         id: tpv_domain::ids::UserId,

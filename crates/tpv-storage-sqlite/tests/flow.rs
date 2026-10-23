@@ -3,15 +3,17 @@ use std::sync::Arc;
 use sqlx::Row;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
-    CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
-    PrintQueueRepository, PrintService, SaleRepository, SaleService, SequenceRepository,
-    StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService, UserRepository,
+    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService,
+    OpenCashRequest, PrintQueueRepository, PrintService, ResetPasswordRequest, SaleRepository,
+    SaleService, SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository,
+    SyncService, UpdateUserRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{DeviceId, TenantId};
 use tpv_domain::money::Money;
+use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::SqliteStore;
@@ -610,4 +612,195 @@ async fn password_hash_is_not_stored_in_plain_text() {
     let hash = stored.password_hash.expect("hash must exist");
     assert_ne!(hash, "admin123");
     assert!(hash.starts_with("$argon2"));
+}
+
+#[tokio::test]
+async fn admin_manages_users_and_audits_changes() {
+    let services = services().await;
+    services
+        .auth
+        .bootstrap_password("admin", "admin123")
+        .await
+        .unwrap();
+    let admin = services.auth.login("admin", "admin123").await.unwrap();
+
+    let created = services
+        .auth
+        .create_user(
+            &admin,
+            CreateUserRequest {
+                username: "cajero".into(),
+                display_name: "Cajero Uno".into(),
+                role: Role::Cashier,
+                store_ids: vec![services.demo.store_id],
+                password: "cajero123".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.role, Role::Cashier);
+    assert_eq!(created.store_ids, vec![services.demo.store_id]);
+    assert!(
+        services
+            .auth
+            .list_users(&admin)
+            .await
+            .unwrap()
+            .iter()
+            .any(|user| user.id == created.id)
+    );
+
+    let updated = services
+        .auth
+        .update_user(
+            &admin,
+            UpdateUserRequest {
+                user_id: created.id,
+                display_name: "Supervisor".into(),
+                role: Role::Manager,
+                store_ids: vec![services.demo.store_id],
+                active: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.role, Role::Manager);
+    assert_eq!(updated.display_name, "Supervisor");
+
+    services
+        .auth
+        .reset_password(
+            &admin,
+            ResetPasswordRequest {
+                user_id: created.id,
+                new_password: "nueva1234".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let logged = services.auth.login("cajero", "nueva1234").await.unwrap();
+    assert_eq!(logged.user.id, created.id);
+
+    let deactivated = services
+        .auth
+        .update_user(
+            &admin,
+            UpdateUserRequest {
+                user_id: created.id,
+                display_name: "Supervisor".into(),
+                role: Role::Manager,
+                store_ids: vec![],
+                active: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!deactivated.active);
+    assert!(services.auth.login("cajero", "nueva1234").await.is_err());
+
+    let audits = services.audit.list_recent(None, 50).await.unwrap();
+    for action in [
+        tpv_domain::audit::AuditAction::UserCreated,
+        tpv_domain::audit::AuditAction::UserUpdated,
+        tpv_domain::audit::AuditAction::PasswordReset,
+        tpv_domain::audit::AuditAction::UserDeactivated,
+    ] {
+        assert!(audits.iter().any(|event| event.action == action));
+    }
+    let update_audit = audits
+        .iter()
+        .find(|event| event.action == tpv_domain::audit::AuditAction::UserUpdated)
+        .unwrap();
+    assert_eq!(update_audit.actor_id, Some(admin.user.id));
+}
+
+#[tokio::test]
+async fn cashier_cannot_manage_users() {
+    let services = services().await;
+    services
+        .auth
+        .bootstrap_password("admin", "admin123")
+        .await
+        .unwrap();
+    let admin = services.auth.login("admin", "admin123").await.unwrap();
+    services
+        .auth
+        .create_user(
+            &admin,
+            CreateUserRequest {
+                username: "cajero".into(),
+                display_name: "Cajero Uno".into(),
+                role: Role::Cashier,
+                store_ids: vec![services.demo.store_id],
+                password: "cajero123".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let cashier = services.auth.login("cajero", "cajero123").await.unwrap();
+
+    assert!(services.auth.list_users(&cashier).await.is_err());
+    assert!(
+        services
+            .auth
+            .create_user(
+                &cashier,
+                CreateUserRequest {
+                    username: "otro".into(),
+                    display_name: "Otro".into(),
+                    role: Role::Cashier,
+                    store_ids: vec![],
+                    password: "otro12345".into(),
+                },
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cannot_demote_or_deactivate_last_active_admin() {
+    let services = services().await;
+    services
+        .auth
+        .bootstrap_password("admin", "admin123")
+        .await
+        .unwrap();
+    let admin = services.auth.login("admin", "admin123").await.unwrap();
+
+    let demote = services
+        .auth
+        .update_user(
+            &admin,
+            UpdateUserRequest {
+                user_id: admin.user.id,
+                display_name: admin.user.display_name.clone(),
+                role: Role::Cashier,
+                store_ids: vec![],
+                active: true,
+            },
+        )
+        .await;
+    assert!(matches!(
+        demote,
+        Err(tpv_application::ApplicationError::Conflict(_))
+    ));
+
+    let deactivate = services
+        .auth
+        .update_user(
+            &admin,
+            UpdateUserRequest {
+                user_id: admin.user.id,
+                display_name: admin.user.display_name.clone(),
+                role: Role::Admin,
+                store_ids: vec![],
+                active: false,
+            },
+        )
+        .await;
+    assert!(matches!(
+        deactivate,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
 }

@@ -98,6 +98,37 @@ impl SqliteStore {
         Ok(())
     }
 
+    async fn update_user_inner(&self, user: &UserAccount) -> StorageResult<()> {
+        let mut tx = self.pool().begin().await?;
+        let result =
+            sqlx::query("UPDATE users SET display_name = ?, role = ?, active = ? WHERE id = ?")
+                .bind(&user.display_name)
+                .bind(enum_to_text(&user.role)?)
+                .bind(i64::from(user.active))
+                .bind(user.id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(crate::error::StorageError::NotFound(format!(
+                "user {}",
+                user.id
+            )));
+        }
+        sqlx::query("DELETE FROM user_stores WHERE user_id = ?")
+            .bind(user.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for store_id in &user.store_ids {
+            sqlx::query("INSERT INTO user_stores (user_id, store_id) VALUES (?, ?)")
+                .bind(user.id.to_string())
+                .bind(store_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn set_password_hash_inner(&self, id: UserId, password_hash: &str) -> StorageResult<()> {
         sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
             .bind(password_hash)
@@ -153,6 +184,10 @@ impl UserRepository for SqliteStore {
 
     async fn create_user(&self, user: &UserAccount, password_hash: &str) -> AppResult<()> {
         Ok(self.create_user_inner(user, password_hash).await?)
+    }
+
+    async fn update_user(&self, user: &UserAccount) -> AppResult<()> {
+        Ok(self.update_user_inner(user).await?)
     }
 
     async fn set_password_hash(&self, id: UserId, password_hash: &str) -> AppResult<()> {
