@@ -22,6 +22,7 @@ tpv-auth = { path = "../../../crates/tpv-auth" }
 tpv-domain = { path = "../../../crates/tpv-domain" }
 tpv-print = { path = "../../../crates/tpv-print" }
 tpv-storage-sqlite = { path = "../../../crates/tpv-storage-sqlite" }
+tpv-sync = { path = "../../../crates/tpv-sync" }
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]

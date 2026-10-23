@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN provisioned_revision INTEGER NOT NULL DEFAULT 0;

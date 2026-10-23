@@ -18,6 +18,7 @@
     type SessionUser,
     type Store,
     type SyncStatus,
+    type SyncSummary,
     type UserAccount,
     type UserRole
   } from './lib/api';
@@ -45,6 +46,8 @@
   let syncStatus = $state<SyncStatus | null>(null);
   let syncQuarantine = $state<QuarantinedEvent[]>([]);
   let syncBusy = $state(false);
+  let syncNowBusy = $state(false);
+  let syncSummary = $state<SyncSummary | null>(null);
   let backupBusy = $state(false);
   let usersOpen = $state(false);
   let users = $state<UserAccount[]>([]);
@@ -186,6 +189,21 @@
       message = String(error);
     } finally {
       syncBusy = false;
+    }
+  }
+
+  async function syncNow() {
+    if (syncNowBusy) return;
+    syncNowBusy = true;
+    try {
+      syncSummary = await api.syncNow();
+      message = `Sincronizado: ${syncSummary.accepted} aceptados, ${syncSummary.users_applied} usuario(s), ${syncSummary.master_applied} maestro(s).`;
+      await refreshSync();
+      await refreshSales();
+    } catch (error) {
+      message = String(error);
+    } finally {
+      syncNowBusy = false;
     }
   }
 
@@ -752,6 +770,21 @@
             <div><strong>{syncStatus.sent}</strong><span>enviados</span></div>
             <div><strong>{syncStatus.failed}</strong><span>fallidos</span></div>
           </div>
+          {#if session?.user.role === 'admin' || session?.user.role === 'manager'}
+            <button
+              class="secondary full"
+              type="button"
+              disabled={syncNowBusy}
+              onclick={() => void syncNow()}
+            >
+              {syncNowBusy ? 'Sincronizando…' : 'Sincronizar ahora'}
+            </button>
+            {#if syncSummary}
+              <p class="muted small">
+                {syncSummary.accepted} aceptados · {syncSummary.users_applied} usuario(s) · {syncSummary.master_applied} maestro(s)
+              </p>
+            {/if}
+          {/if}
           {#if syncStatus.oldest_pending_at}
             <p class="muted small">
               Pendiente desde {new Date(syncStatus.oldest_pending_at).toLocaleString('es-ES')}

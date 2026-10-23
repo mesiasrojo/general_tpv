@@ -11,6 +11,7 @@ use tpv_domain::master_data::{
     ConflictOutcome, ConflictReason, MasterDataApplyResult, MasterDataChange, MasterDataConflict,
     MasterDataKind, resolve_change,
 };
+use tpv_domain::people::Role;
 use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
@@ -73,6 +74,41 @@ pub struct DeviceRecord {
     pub revoked_at: Option<time::OffsetDateTime>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CentralUserRecord {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<Uuid>,
+    pub active: bool,
+    pub version: u64,
+    pub created_at: time::OffsetDateTime,
+    pub updated_at: time::OffsetDateTime,
+    #[serde(default, skip_serializing)]
+    pub password_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewCentralUser {
+    pub tenant_id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<Uuid>,
+    pub password_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateCentralUser {
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<Uuid>,
+    pub active: bool,
+    pub password_hash: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EnrollDevice {
     pub device_id: Uuid,
@@ -86,6 +122,9 @@ pub struct EnrollDevice {
 pub enum StoreError {
     #[error("central database error: {0}")]
     Database(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
 
     #[error(transparent)]
     Domain(#[from] tpv_domain::DomainError),
@@ -127,6 +166,21 @@ pub trait CentralStore: Send + Sync {
         &self,
         limit: u32,
     ) -> Result<Vec<MasterDataConflict>, StoreError>;
+    async fn list_central_users(&self) -> Result<Vec<CentralUserRecord>, StoreError>;
+    async fn create_central_user(
+        &self,
+        user: NewCentralUser,
+    ) -> Result<CentralUserRecord, StoreError>;
+    async fn update_central_user(
+        &self,
+        id: Uuid,
+        update: UpdateCentralUser,
+    ) -> Result<Option<CentralUserRecord>, StoreError>;
+    async fn set_central_user_password(
+        &self,
+        id: Uuid,
+        password_hash: &str,
+    ) -> Result<Option<CentralUserRecord>, StoreError>;
 }
 
 #[derive(Default)]
@@ -135,6 +189,7 @@ struct MemoryLedger {
     devices: Vec<MemoryDevice>,
     master_data: Vec<MemoryMasterData>,
     master_conflicts: Vec<MasterDataConflict>,
+    users: Vec<CentralUserRecord>,
     next_seq: u64,
 }
 
@@ -389,6 +444,81 @@ impl CentralStore for MemoryStore {
         conflicts.sort_by_key(|left| std::cmp::Reverse(left.detected_at));
         conflicts.truncate(limit as usize);
         Ok(conflicts)
+    }
+
+    async fn list_central_users(&self) -> Result<Vec<CentralUserRecord>, StoreError> {
+        let ledger = self.inner.read().await;
+        let mut users = ledger.users.clone();
+        users.sort_by(|left, right| left.username.cmp(&right.username));
+        Ok(users)
+    }
+
+    async fn create_central_user(
+        &self,
+        user: NewCentralUser,
+    ) -> Result<CentralUserRecord, StoreError> {
+        let mut ledger = self.inner.write().await;
+        if ledger.users.iter().any(|existing| {
+            existing.tenant_id == user.tenant_id
+                && existing.username.eq_ignore_ascii_case(&user.username)
+        }) {
+            return Err(StoreError::Conflict(format!(
+                "username {} already exists",
+                user.username
+            )));
+        }
+        let now = time::OffsetDateTime::now_utc();
+        let record = CentralUserRecord {
+            id: Uuid::now_v7(),
+            tenant_id: user.tenant_id,
+            username: user.username,
+            display_name: user.display_name,
+            role: user.role,
+            store_ids: user.store_ids,
+            active: true,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            password_hash: user.password_hash,
+        };
+        ledger.users.push(record.clone());
+        Ok(record)
+    }
+
+    async fn update_central_user(
+        &self,
+        id: Uuid,
+        update: UpdateCentralUser,
+    ) -> Result<Option<CentralUserRecord>, StoreError> {
+        let mut ledger = self.inner.write().await;
+        let Some(user) = ledger.users.iter_mut().find(|user| user.id == id) else {
+            return Ok(None);
+        };
+        user.display_name = update.display_name;
+        user.role = update.role;
+        user.store_ids = update.store_ids;
+        user.active = update.active;
+        if let Some(password_hash) = update.password_hash {
+            user.password_hash = password_hash;
+        }
+        user.version = user.version.saturating_add(1);
+        user.updated_at = time::OffsetDateTime::now_utc();
+        Ok(Some(user.clone()))
+    }
+
+    async fn set_central_user_password(
+        &self,
+        id: Uuid,
+        password_hash: &str,
+    ) -> Result<Option<CentralUserRecord>, StoreError> {
+        let mut ledger = self.inner.write().await;
+        let Some(user) = ledger.users.iter_mut().find(|user| user.id == id) else {
+            return Ok(None);
+        };
+        user.password_hash = password_hash.to_string();
+        user.version = user.version.saturating_add(1);
+        user.updated_at = time::OffsetDateTime::now_utc();
+        Ok(Some(user.clone()))
     }
 }
 
@@ -764,6 +894,155 @@ impl CentralStore for PostgresStore {
         .await?;
         rows.iter().map(row_to_master_conflict).collect()
     }
+
+    async fn list_central_users(&self) -> Result<Vec<CentralUserRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, username, display_name, role, store_ids,
+                    active, version, created_at, updated_at, password_hash
+             FROM central_users
+             ORDER BY username",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_central_user).collect()
+    }
+
+    async fn create_central_user(
+        &self,
+        user: NewCentralUser,
+    ) -> Result<CentralUserRecord, StoreError> {
+        let store_ids = serde_json::to_value(&user.store_ids)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        let username = user.username.clone();
+        let row = sqlx::query(
+            "INSERT INTO central_users
+                (id, tenant_id, username, display_name, role, store_ids,
+                 password_hash, active, version, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, 1, NOW(), NOW())
+             RETURNING id, tenant_id, username, display_name, role, store_ids,
+                       active, version, created_at, updated_at, password_hash",
+        )
+        .bind(Uuid::now_v7())
+        .bind(user.tenant_id)
+        .bind(&user.username)
+        .bind(&user.display_name)
+        .bind(role_to_str(user.role))
+        .bind(store_ids)
+        .bind(&user.password_hash)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            if let sqlx::Error::Database(database_error) = &error {
+                if database_error.is_unique_violation() {
+                    return StoreError::Conflict(format!("username {username} already exists"));
+                }
+            }
+            StoreError::from(error)
+        })?;
+        row_to_central_user(&row)
+    }
+
+    async fn update_central_user(
+        &self,
+        id: Uuid,
+        update: UpdateCentralUser,
+    ) -> Result<Option<CentralUserRecord>, StoreError> {
+        let store_ids = serde_json::to_value(&update.store_ids)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        let row = if let Some(password_hash) = update.password_hash {
+            sqlx::query(
+                "UPDATE central_users
+                 SET display_name = $2, role = $3, store_ids = $4, active = $5,
+                     password_hash = $6, version = version + 1, updated_at = NOW()
+                 WHERE id = $1
+                 RETURNING id, tenant_id, username, display_name, role, store_ids,
+                           active, version, created_at, updated_at, password_hash",
+            )
+            .bind(id)
+            .bind(&update.display_name)
+            .bind(role_to_str(update.role))
+            .bind(store_ids)
+            .bind(update.active)
+            .bind(password_hash)
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "UPDATE central_users
+                 SET display_name = $2, role = $3, store_ids = $4, active = $5,
+                     version = version + 1, updated_at = NOW()
+                 WHERE id = $1
+                 RETURNING id, tenant_id, username, display_name, role, store_ids,
+                           active, version, created_at, updated_at, password_hash",
+            )
+            .bind(id)
+            .bind(&update.display_name)
+            .bind(role_to_str(update.role))
+            .bind(store_ids)
+            .bind(update.active)
+            .fetch_optional(&self.pool)
+            .await?
+        };
+        row.as_ref().map(row_to_central_user).transpose()
+    }
+
+    async fn set_central_user_password(
+        &self,
+        id: Uuid,
+        password_hash: &str,
+    ) -> Result<Option<CentralUserRecord>, StoreError> {
+        let row = sqlx::query(
+            "UPDATE central_users
+             SET password_hash = $2, version = version + 1, updated_at = NOW()
+             WHERE id = $1
+             RETURNING id, tenant_id, username, display_name, role, store_ids,
+                       active, version, created_at, updated_at, password_hash",
+        )
+        .bind(id)
+        .bind(password_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_central_user).transpose()
+    }
+}
+
+fn role_to_str(role: Role) -> &'static str {
+    match role {
+        Role::Admin => "admin",
+        Role::Manager => "manager",
+        Role::Cashier => "cashier",
+        Role::Auditor => "auditor",
+    }
+}
+
+fn role_from_str(value: &str) -> Result<Role, StoreError> {
+    match value {
+        "admin" => Ok(Role::Admin),
+        "manager" => Ok(Role::Manager),
+        "cashier" => Ok(Role::Cashier),
+        "auditor" => Ok(Role::Auditor),
+        _ => Err(StoreError::Database(format!("invalid user role: {value}"))),
+    }
+}
+
+fn row_to_central_user(row: &sqlx::postgres::PgRow) -> Result<CentralUserRecord, StoreError> {
+    let store_ids: serde_json::Value = row.try_get("store_ids")?;
+    let store_ids = serde_json::from_value(store_ids)
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    Ok(CentralUserRecord {
+        id: row.try_get("id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        username: row.try_get("username")?,
+        display_name: row.try_get("display_name")?,
+        role: role_from_str(&row.try_get::<String, _>("role")?)?,
+        store_ids,
+        active: row.try_get("active")?,
+        version: u64::try_from(row.try_get::<i64, _>("version")?)
+            .map_err(|_| StoreError::Database("negative user version".into()))?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        password_hash: row.try_get("password_hash")?,
+    })
 }
 
 #[cfg(test)]
@@ -808,6 +1087,58 @@ mod tests {
                 .any(|stored| stored.event.event_id == event_id)
         );
         assert!(store.health().await.unwrap().events >= 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a PostgreSQL database"]
+    async fn postgres_central_user_roundtrip() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let store = PostgresStore::connect(&url).await.unwrap();
+        let tenant_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let username = format!("user-{}", &Uuid::now_v7().simple().to_string()[..12]);
+        let created = store
+            .create_central_user(NewCentralUser {
+                tenant_id,
+                username: username.clone(),
+                display_name: "Usuario PostgreSQL".into(),
+                role: Role::Cashier,
+                store_ids: vec![store_id],
+                password_hash: "hash-v1".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.version, 1);
+        assert_eq!(created.password_hash, "hash-v1");
+
+        let listed = store.list_central_users().await.unwrap();
+        assert!(listed.iter().any(|user| user.id == created.id));
+
+        let updated = store
+            .update_central_user(
+                created.id,
+                UpdateCentralUser {
+                    display_name: "Usuario Actualizado".into(),
+                    role: Role::Manager,
+                    store_ids: vec![store_id],
+                    active: false,
+                    password_hash: Some("hash-v2".into()),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.password_hash, "hash-v2");
+        assert!(!updated.active);
+
+        let reset = store
+            .set_central_user_password(created.id, "hash-v3")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.version, 3);
+        assert_eq!(reset.password_hash, "hash-v3");
     }
 
     #[tokio::test]

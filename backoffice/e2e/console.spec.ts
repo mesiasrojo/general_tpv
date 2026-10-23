@@ -42,6 +42,21 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
     detected_at: '2026-10-23T12:00:00Z'
   };
 
+  let centralUsers = [
+    {
+      id: '00000000-0000-7000-8000-000000000401',
+      tenant_id: activeDevice.tenant_id,
+      username: 'supervisor',
+      display_name: 'Supervisora',
+      role: 'manager',
+      store_ids: [activeDevice.store_id],
+      active: true,
+      version: 1,
+      created_at: '2026-10-19T09:00:00Z',
+      updated_at: '2026-10-19T09:00:00Z'
+    }
+  ];
+
   await page.route('**/health', (route) =>
     route.fulfill({ json: { status: 'ok', events: 3, cursor: 3 } })
   );
@@ -52,6 +67,66 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
   await page.route('**/api/v1/master-data/conflicts', (route) =>
     route.fulfill({ json: [conflict] })
   );
+  await page.route('**/api/v1/users/*/password', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    const userId = route.request().url().split('/').at(-2);
+    const body = route.request().postDataJSON() as { password: string };
+    expect(body.password).toBe('nuevaClave123');
+    const user = centralUsers.find((item) => item.id === userId);
+    if (!user) throw new Error('unknown user');
+    user.version += 1;
+    user.updated_at = '2026-10-23T12:10:00Z';
+    await route.fulfill({ json: user });
+  });
+  await page.route('**/api/v1/users/*', async (route) => {
+    expect(route.request().method()).toBe('PUT');
+    const userId = route.request().url().split('/').at(-1);
+    const body = route.request().postDataJSON() as {
+      display_name: string;
+      role: string;
+      store_ids: string[];
+      active: boolean;
+    };
+    const user = centralUsers.find((item) => item.id === userId);
+    if (!user) throw new Error('unknown user');
+    user.display_name = body.display_name;
+    user.role = body.role;
+    user.store_ids = body.store_ids;
+    user.active = body.active;
+    user.version += 1;
+    user.updated_at = '2026-10-23T12:08:00Z';
+    await route.fulfill({ json: user });
+  });
+  await page.route('**/api/v1/users', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: centralUsers });
+      return;
+    }
+    expect(route.request().method()).toBe('POST');
+    const body = route.request().postDataJSON() as {
+      tenant_id: string;
+      username: string;
+      display_name: string;
+      role: string;
+      store_ids: string[];
+      password: string;
+    };
+    expect(body.password).toBe('central123');
+    const created = {
+      id: crypto.randomUUID(),
+      tenant_id: body.tenant_id,
+      username: body.username,
+      display_name: body.display_name,
+      role: body.role,
+      store_ids: body.store_ids,
+      active: true,
+      version: 1,
+      created_at: '2026-10-23T12:00:00Z',
+      updated_at: '2026-10-23T12:00:00Z'
+    };
+    centralUsers = [...centralUsers, created];
+    await route.fulfill({ status: 201, json: created });
+  });
   await page.route('**/api/v1/devices/*/revoke', async (route) => {
     expect(route.request().method()).toBe('POST');
     activeDevice = {
@@ -61,12 +136,34 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
     };
     await route.fulfill({ json: activeDevice });
   });
-  page.on('dialog', (dialog) => void dialog.accept());
+  page.on('dialog', (dialog) => {
+    if (dialog.type() === 'prompt') {
+      void dialog.accept('nuevaClave123');
+    } else {
+      void dialog.accept();
+    }
+  });
 
   await page.goto('/');
 
+  await expect(page.getByRole('heading', { name: 'Usuarios centrales' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Dispositivos registrados' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Conflictos detectados' })).toBeVisible();
+  await expect(page.getByRole('row', { name: /supervisor/ })).toBeVisible();
+
+  await page.getByLabel('Usuario').fill('central.cashier');
+  await page.getByLabel('Nombre visible').fill('Cajero Central');
+  await page.getByLabel('Rol').selectOption('cashier');
+  await page.getByLabel('Contraseña inicial').fill('central123');
+  await page.getByRole('button', { name: 'Crear usuario' }).click();
+
+  const userRow = page.getByRole('row', { name: /central.cashier/ });
+  await expect(userRow).toBeVisible();
+  await expect(userRow.getByText('Activo')).toBeVisible();
+  await userRow.getByRole('button', { name: 'Desactivar' }).click();
+  await expect(userRow.getByText('Inactivo')).toBeVisible();
+  await userRow.getByRole('button', { name: 'Restablecer' }).click();
+  await expect(userRow.getByText('3', { exact: true })).toBeVisible();
 
   const deviceRow = page.getByRole('row', { name: /TPV Caja 1/ });
   await expect(deviceRow.getByText('Activo')).toBeVisible();

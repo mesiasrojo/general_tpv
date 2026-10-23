@@ -180,17 +180,21 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - Los maestros se publican con versión monotónica por entidad y viajan en el outbox como `master_data.upsert` / `master_data.deleted`.
 - La central mantiene `central_master_data` por tenant/tienda/tipo/entidad; las versiones antiguas se ignoran y las divergencias con la misma versión se registran en `central_master_conflicts`.
 - La copia local aplica la misma política; `GET /api/v1/master-data/conflicts` expone los conflictos auditados.
+- Los usuarios centrales generan `user.provisioned` con el hash Argon2id y una revisión monotónica. El terminal los aplica con `upsert_provisioned`, ignora revisiones antiguas y limpia bloqueos al cambiar la contraseña.
+- Una cuenta desactivada centralmente se propaga al terminal y el login local devuelve `usuario desactivado`.
 - Un evento rechazado o agotado se marca en `sync_outbox` con `failed_at`, `attempts` y `last_error`; deja de bloquear la cola y aparece en la consola de cuarentena.
 - La UI del TPV y el CLI muestran el estado local y permiten reintentar la cuarentena sin reiniciar el terminal.
 
 ## 6. Central y backoffice
 
-- `tpv-server` expone salud, push, pull, eventos, ventas y gestión de dispositivos.
+- `tpv-server` expone salud, push, pull, eventos, ventas, dispositivos y usuarios centrales.
 - `POST /api/v1/devices/enroll` emite un token por dispositivo; `GET /api/v1/devices` y `POST /api/v1/devices/{id}/revoke` requieren el token de administración.
+- `GET/POST /api/v1/users`, `PUT /api/v1/users/{id}` y `POST /api/v1/users/{id}/password` gestionan cuentas centrales; las contraseñas se guardan como Argon2id y nunca se devuelven por la API.
+- Cada alta, cambio o reset de usuario emite `user.provisioned` firmado para cada tienda.
 - `GET /api/v1/master-data/conflicts` lista los conflictos de maestros auditados.
 - Sirve el backoffice estático si existe `backoffice/build` o `TPV_BACKOFFICE_DIR`.
-- El backoffice muestra salud, cursor, ventas, facturas, últimos eventos, dispositivos registrados y conflictos de datos maestros.
-- Desde la consola de dispositivos se puede revocar un terminal; la central rechaza su token inmediatamente.
+- El backoffice muestra salud, cursor, ventas, facturas, usuarios centrales, últimos eventos, dispositivos registrados y conflictos de datos maestros.
+- Desde la consola de usuarios se pueden crear cuentas, activarlas o desactivarlas y restablecer contraseñas; desde la de dispositivos se revoca un terminal.
 - La consola no reescribe ventas ni documentos.
 - Las llamadas de gestión usan el token de administración configurado en la central.
 
@@ -221,10 +225,11 @@ Implementado:
 - Arnés HIL para impresoras de red, serie y USB, activable por variables de entorno.
 - Prueba de carga de ventas confirmadas y procesamiento de la cola de impresión.
 - Consola backoffice de dispositivos y conflictos, con revocación y prueba Playwright.
+- Usuarios centrales con Argon2id, API de gestión, consola backoffice y provisioning `user.provisioned`.
+- Aplicación del provisioning en el pull del CLI y en el botón de sincronización de Tauri.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
-- Gestión de usuarios desde backoffice central y aprovisionamiento a terminales.
 - Ejecución HIL en tienda piloto, certificación de impresoras y reglas udev/WinUSB.
 - Firma de actualizaciones, SBOM y pipeline de release.
 
@@ -235,6 +240,5 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 ## 9. Siguiente iteración recomendada
 
 1. Ejecución HIL en tienda piloto y ajuste de umbrales de carga.
-2. Gestión de usuarios desde el backoffice central y aprovisionamiento a terminales.
-3. Edición de maestros desde la UI del TPV.
-4. Firma de actualizaciones, SBOM y pipeline de release.
+2. Edición de maestros desde la UI del TPV.
+3. Firma de actualizaciones, SBOM y pipeline de release.

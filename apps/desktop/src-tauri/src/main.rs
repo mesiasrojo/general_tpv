@@ -9,22 +9,25 @@ use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
     CashRepository, CashService, CatalogRepository, CatalogService, CloseCashRequest,
-    ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
-    PrintQueueRepository, PrintService, PrinterPort, QuarantinedEvent, ResetPasswordRequest,
-    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
-    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UserRepository,
+    ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, MasterDataRepository,
+    MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
+    QuarantinedEvent, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
+    SequenceRepository, SessionUser, StartSaleRequest, SyncContext, SyncOutboxRepository,
+    SyncService, SyncStatus, UpdateUserRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
 use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
-use tpv_domain::people::{Role, UserAccount};
+use tpv_domain::master_data::MasterDataChange;
+use tpv_domain::people::{Role, UserAccount, UserProvision};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{
     EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
 };
 use tpv_storage_sqlite::{DemoData, KeyStore, SqliteStore};
+use tpv_sync::{RetryPolicy, SyncClient, SyncWorker};
 
 #[derive(Clone)]
 struct AppState {
@@ -41,6 +44,11 @@ struct AppState {
     auth: AuthService,
     session: Arc<RwLock<Option<SessionUser>>>,
     demo: DemoData,
+    store: Arc<SqliteStore>,
+    sync_ctx: SyncContext,
+    sync_repo: Arc<dyn SyncOutboxRepository>,
+    users: Arc<dyn UserRepository>,
+    master_data: MasterDataService,
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +368,17 @@ struct BackupSummary {
     bytes: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct SyncSummary {
+    accepted: usize,
+    duplicates: usize,
+    rejected: usize,
+    pulled: usize,
+    users_applied: usize,
+    master_applied: usize,
+    master_conflicts: usize,
+}
+
 #[tauri::command]
 async fn print_ticket(
     state: State<'_, AppState>,
@@ -595,6 +614,79 @@ async fn backup_now(state: State<'_, AppState>) -> Result<BackupSummary, String>
     })
 }
 
+#[tauri::command]
+async fn sync_now(state: State<'_, AppState>) -> Result<SyncSummary, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let url = std::env::var("TPV_SYNC_URL")
+        .map_err(|_| "TPV_SYNC_URL no configurada en el terminal".to_string())?;
+    let token = state
+        .store
+        .device_token()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminal no enrolado; ejecuta la CLI con --sync-url".to_string())?;
+    let client = SyncClient::new(url, Some(token));
+    let worker = SyncWorker::new(client.clone(), RetryPolicy::default());
+    let report = worker
+        .push_pending(state.sync_repo.as_ref(), state.sync_ctx.device_id, 100)
+        .await
+        .map_err(|error| error.to_string())?;
+    let pulled = client
+        .pull(0, Some(state.demo.store_id.as_uuid()))
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut users_applied = 0;
+    let mut master_applied = 0;
+    let mut master_conflicts = 0;
+    for stored in &pulled.events {
+        match stored.event.aggregate_type.as_str() {
+            "user" if stored.event.event_type == "user.provisioned" => {
+                if let Ok(provision) =
+                    serde_json::from_value::<UserProvision>(stored.event.payload.clone())
+                {
+                    if state
+                        .users
+                        .upsert_provisioned(&provision)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        users_applied += 1;
+                    }
+                }
+            }
+            "master_data" => {
+                if let Ok(change) =
+                    serde_json::from_value::<MasterDataChange>(stored.event.payload.clone())
+                {
+                    let result = state
+                        .master_data
+                        .apply_change(stored.event.tenant_id, stored.event.store_id, &change)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if result.applied {
+                        master_applied += 1;
+                    }
+                    if result.conflict.is_some() {
+                        master_conflicts += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(SyncSummary {
+        accepted: report.accepted,
+        duplicates: report.duplicates,
+        rejected: report.rejected,
+        pulled: pulled.events.len(),
+        users_applied,
+        master_applied,
+        master_conflicts,
+    })
+}
+
 struct PrinterSettings {
     spec: Option<String>,
     profile: Option<PrinterProfile>,
@@ -616,6 +708,7 @@ async fn build_app_state(
     let user_repo: Arc<dyn UserRepository> = store.clone();
     let audit_repo: Arc<dyn tpv_application::AuditRepository> = store.clone();
     let backup_repo: Arc<dyn BackupRepository> = store.clone();
+    let master_data_repo: Arc<dyn MasterDataRepository> = store.clone();
     let tickets_dir = data_dir.join("tickets");
     let backup_dir = data_dir.join("backups");
     std::fs::create_dir_all(&tickets_dir)?;
@@ -635,7 +728,7 @@ async fn build_app_state(
     let printer_label = printer_spec;
 
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
-    let sync = store.sync_context().await?;
+    let sync_ctx = store.sync_context().await?;
     let catalog = CatalogService::new(catalog_repo.clone());
     let sales = SaleService::new(
         sale_repo.clone(),
@@ -643,7 +736,7 @@ async fn build_app_state(
         clock.clone(),
         sequence_repo.clone(),
         "TPV",
-        sync.clone(),
+        sync_ctx.clone(),
     );
     let invoices = InvoiceService::new(
         invoice_repo,
@@ -651,9 +744,14 @@ async fn build_app_state(
         catalog_repo.clone(),
         sequence_repo,
         clock.clone(),
-        sync.clone(),
+        sync_ctx.clone(),
     );
-    let cash = CashService::new(cash_repo, sale_repo.clone(), clock.clone(), sync);
+    let cash = CashService::new(
+        cash_repo,
+        sale_repo.clone(),
+        clock.clone(),
+        sync_ctx.clone(),
+    );
     let print = PrintService::new(
         sale_repo,
         catalog_repo,
@@ -661,9 +759,15 @@ async fn build_app_state(
         Arc::new(renderer),
         clock.clone(),
     );
-    let sync_service = SyncService::new(sync_repo);
+    let sync_service = SyncService::new(sync_repo.clone());
     let backup_service = BackupService::new(backup_repo);
-    let auth = AuthService::new(user_repo, Arc::new(Argon2PasswordHasher), audit_repo, clock);
+    let master_data = MasterDataService::new(master_data_repo, clock.clone());
+    let auth = AuthService::new(
+        user_repo.clone(),
+        Arc::new(Argon2PasswordHasher),
+        audit_repo,
+        clock,
+    );
     auth.bootstrap_password("admin", "admin123").await?;
     Ok(AppState {
         catalog,
@@ -679,6 +783,11 @@ async fn build_app_state(
         auth,
         session: Arc::new(RwLock::new(None)),
         demo,
+        store,
+        sync_ctx,
+        sync_repo,
+        users: user_repo,
+        master_data,
     })
 }
 
@@ -759,7 +868,8 @@ fn main() {
             update_user,
             reset_password,
             list_stores,
-            backup_now
+            backup_now,
+            sync_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running General TPV");
@@ -825,7 +935,8 @@ mod e2e_tests {
                 update_user,
                 reset_password,
                 list_stores,
-                backup_now
+                backup_now,
+                sync_now
             ])
             .build(mock_context(noop_assets()))
             .expect("mock app");

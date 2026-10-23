@@ -195,4 +195,10 @@ pub trait UserRepository: Send + Sync {
         last_login_at: Option<time::OffsetDateTime>,
     ) -> Result<()>;
     async fn list_users(&self) -> Result<Vec<tpv_domain::people::UserAccount>>;
+    /// Inserts or updates an account received from the central server.
+    /// Returns `true` when the provision was newer and has been applied.
+    async fn upsert_provisioned(
+        &self,
+        provision: &tpv_domain::people::UserProvision,
+    ) -> Result<bool>;
 }

@@ -2988,6 +2988,8 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "tpv-application",
+ "tpv-auth",
  "tpv-domain",
  "tracing",
  "tracing-subscriber",

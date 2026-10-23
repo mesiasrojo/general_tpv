@@ -17,7 +17,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
 | Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
-| Backoffice SvelteKit | Implementado (eventos, dispositivos y conflictos; revocación) |
+| Backoffice SvelteKit | Implementado (eventos, usuarios, dispositivos y conflictos) |
+| Usuarios centrales y aprovisionamiento | Implementado (API, backoffice, pull del CLI y botón Tauri) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
@@ -68,6 +69,13 @@ cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 \
   --device-name "Caja 1" --enroll --retry-failed
 ```
 
+Los usuarios centrales se crean desde el backoffice o con `POST /api/v1/users`. Cada alta, actualización o restablecimiento de contraseña genera un evento `user.provisioned` por tienda. El CLI aplica estos eventos en el pull y la app Tauri con el botón “Sincronizar ahora” (`TPV_SYNC_URL`). Una desactivación central también se propaga y bloquea el login local. Para probar una cuenta aprovisionada:
+
+```bash
+TPV_LOGIN_PASSWORD=tuClave cargo run -p tpv-cli -- data/tpv.db \
+  --sync-url http://127.0.0.1:8080 --login-user central.cashier
+```
+
 Los cambios de datos maestros viajan como eventos versionados (`master_data.upsert` / `master_data.deleted`). La resolución es determinista: gana la versión mayor; las versiones antiguas se descartan; si dos dispositivos publican la misma versión con contenido distinto, gana el `occurred_at` más reciente y el conflicto queda registrado. Puede probarse el flujo con:
 
 ```bash
@@ -102,6 +110,10 @@ El servidor expone:
 - `POST /api/v1/devices/enroll`
 - `GET /api/v1/devices`
 - `POST /api/v1/devices/{device_id}/revoke`
+- `GET /api/v1/users`
+- `POST /api/v1/users`
+- `PUT /api/v1/users/{user_id}`
+- `POST /api/v1/users/{user_id}/password`
 
 ### Impresión nativa
 
@@ -170,7 +182,7 @@ npm run dev
 
 Por defecto apunta a `http://localhost:8080`. Se puede cambiar con `VITE_CENTRAL_URL` y `VITE_CENTRAL_TOKEN`.
 
-El backoffice muestra salud, eventos, ventas, facturas, dispositivos registrados y conflictos de datos maestros. Desde la tabla de dispositivos se puede revocar un terminal con confirmación; la central deja de aceptar su token inmediatamente.
+El backoffice muestra salud, eventos, ventas, facturas, usuarios centrales, dispositivos registrados y conflictos de datos maestros. Permite crear usuarios, activarlos o desactivarlos, restablecer contraseñas y revocar terminales con confirmación. Cada cambio de usuario genera eventos `user.provisioned` por tienda; los terminales los aplican en su siguiente sincronización.
 
 Para servir el backoffice desde la central:
 
@@ -222,7 +234,7 @@ cd ui && npm run check && npm run build && npm run test:e2e
 cd backoffice && npm run check && npm run build && npm run test:e2e
 ```
 
-La prueba de comandos Tauri usa el runtime mock oficial y recorre login, caja, venta, cobro, ticket, factura, backup y RBAC. La prueba de UI usa Playwright con el Chrome instalado en el sistema y un puente IPC simulado; no descarga navegadores adicionales.
+La prueba de comandos Tauri usa el runtime mock oficial y recorre login, caja, venta, cobro, ticket, factura, backup y RBAC. La prueba de UI usa Playwright con el Chrome instalado en el sistema y un puente IPC simulado; no descarga navegadores adicionales. La prueba del backoffice cubre usuarios centrales, dispositivos, conflictos y revocación.
 
 ## Documentación
 

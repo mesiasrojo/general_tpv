@@ -265,6 +265,28 @@ impl UserAccount {
     }
 }
 
+/// User data and password hash provisioned from the central server.
+///
+/// The password hash is never exposed through `Debug`; it is still serialized
+/// in the signed sync event so a terminal can recreate the local account.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserProvision {
+    pub user: UserAccount,
+    pub password_hash: String,
+    pub revision: u64,
+}
+
+impl std::fmt::Debug for UserProvision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserProvision")
+            .field("user", &self.user)
+            .field("password_hash", &"<redacted>")
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
 /// Validates Spanish DNI, NIE and CIF identifiers.
 ///
 /// This is intentionally a pure function so it can be reused by the UI and by

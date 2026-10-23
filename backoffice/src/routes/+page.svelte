@@ -57,6 +57,21 @@
     detected_at: string;
   }
 
+  type UserRole = 'admin' | 'manager' | 'cashier' | 'auditor';
+
+  interface CentralUser {
+    id: string;
+    tenant_id: string;
+    username: string;
+    display_name: string;
+    role: UserRole;
+    store_ids: string[];
+    active: boolean;
+    version: number;
+    created_at: string;
+    updated_at: string;
+  }
+
   const base = (import.meta.env.VITE_CENTRAL_URL ?? 'http://localhost:8080').replace(/\/+$/, '');
   const token = import.meta.env.VITE_CENTRAL_TOKEN ?? '';
 
@@ -64,16 +79,28 @@
   let events = $state<StoredEvent[]>([]);
   let devices = $state<DeviceRecord[]>([]);
   let conflicts = $state<MasterDataConflict[]>([]);
+  let centralUsers = $state<CentralUser[]>([]);
   let error = $state('');
   let actionError = $state('');
+  let usersError = $state('');
   let loading = $state(false);
   let busyDeviceId = $state('');
+  let busyUserId = $state('');
+  let userCreating = $state(false);
   let lastUpdated = $state('');
+
+  let newTenantId = $state('');
+  let newStoreIds = $state('');
+  let newUsername = $state('');
+  let newDisplayName = $state('');
+  let newUserRole = $state<UserRole>('cashier');
+  let newUserPassword = $state('');
 
   let sales = $derived(events.filter((item) => item.event.aggregate_type === 'sale'));
   let invoices = $derived(events.filter((item) => item.event.aggregate_type === 'invoice'));
   let lastSale = $derived(sales.at(-1) ?? null);
   let activeDevices = $derived(devices.filter((device) => device.status === 'active').length);
+  let activeUsers = $derived(centralUsers.filter((user) => user.active).length);
 
   onMount(() => {
     void load();
@@ -83,23 +110,41 @@
     loading = true;
     error = '';
     actionError = '';
+    usersError = '';
     const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
     try {
-      const [healthResponse, eventsResponse, devicesResponse, conflictsResponse] = await Promise.all([
+      const [
+        healthResponse,
+        eventsResponse,
+        devicesResponse,
+        conflictsResponse,
+        usersResponse
+      ] = await Promise.all([
         fetch(`${base}/health`),
         fetch(`${base}/api/v1/events`, { headers }),
         fetch(`${base}/api/v1/devices`, { headers }),
-        fetch(`${base}/api/v1/master-data/conflicts`, { headers })
+        fetch(`${base}/api/v1/master-data/conflicts`, { headers }),
+        fetch(`${base}/api/v1/users`, { headers })
       ]);
       if (!healthResponse.ok) throw new Error(`health HTTP ${healthResponse.status}`);
       if (!eventsResponse.ok) throw new Error(`events HTTP ${eventsResponse.status}`);
       if (!devicesResponse.ok) throw new Error(`devices HTTP ${devicesResponse.status}`);
       if (!conflictsResponse.ok) throw new Error(`conflicts HTTP ${conflictsResponse.status}`);
+      if (!usersResponse.ok) throw new Error(`users HTTP ${usersResponse.status}`);
       health = (await healthResponse.json()) as Health;
       events = (await eventsResponse.json()) as StoredEvent[];
       devices = (await devicesResponse.json()) as DeviceRecord[];
       conflicts = (await conflictsResponse.json()) as MasterDataConflict[];
+      centralUsers = (await usersResponse.json()) as CentralUser[];
+      const firstDevice = devices[0];
+      if (!newTenantId && firstDevice) {
+        newTenantId = firstDevice.tenant_id;
+      }
+      if (!newStoreIds) {
+        newStoreIds =
+          firstDevice?.store_id ?? events.find((item) => item.event.store_id)?.event.store_id ?? '';
+      }
       lastUpdated = new Date().toLocaleString('es-ES');
     } catch (cause) {
       error = `No se pudo leer la central (${base}): ${String(cause)}`;
@@ -129,6 +174,123 @@
       actionError = `No se pudo revocar ${device.name}: ${String(cause)}`;
     } finally {
       busyDeviceId = '';
+    }
+  }
+
+  function parseStoreIds(value: string): string[] {
+    return value
+      .split(/[\s,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  async function responseMessage(response: Response): Promise<string> {
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (body.error) return body.error;
+    } catch {
+      // Fall back to the HTTP status below.
+    }
+    return `HTTP ${response.status}`;
+  }
+
+  async function createCentralUser() {
+    if (userCreating) return;
+    usersError = '';
+    const storeIds = parseStoreIds(newStoreIds);
+    if (!newTenantId.trim() || !newUsername.trim() || !newDisplayName.trim()) {
+      usersError = 'Tenant, usuario y nombre visible son obligatorios.';
+      return;
+    }
+    if (storeIds.length === 0) {
+      usersError = 'Indica al menos una tienda.';
+      return;
+    }
+    if (newUserPassword.length < 8) {
+      usersError = 'La contraseña debe tener al menos 8 caracteres.';
+      return;
+    }
+    userCreating = true;
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      const response = await fetch(`${base}/api/v1/users`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          tenant_id: newTenantId.trim(),
+          username: newUsername.trim(),
+          display_name: newDisplayName.trim(),
+          role: newUserRole,
+          store_ids: storeIds,
+          password: newUserPassword
+        })
+      });
+      if (!response.ok) throw new Error(await responseMessage(response));
+      const user = (await response.json()) as CentralUser;
+      centralUsers = [...centralUsers, user];
+      newUsername = '';
+      newDisplayName = '';
+      newUserPassword = '';
+    } catch (cause) {
+      usersError = `No se pudo crear el usuario: ${String(cause)}`;
+    } finally {
+      userCreating = false;
+    }
+  }
+
+  async function toggleCentralUser(user: CentralUser) {
+    if (busyUserId) return;
+    busyUserId = user.id;
+    usersError = '';
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      const response = await fetch(`${base}/api/v1/users/${user.id}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          display_name: user.display_name,
+          role: user.role,
+          store_ids: user.store_ids,
+          active: !user.active
+        })
+      });
+      if (!response.ok) throw new Error(await responseMessage(response));
+      const updated = (await response.json()) as CentralUser;
+      centralUsers = centralUsers.map((item) => (item.id === updated.id ? updated : item));
+    } catch (cause) {
+      usersError = `No se pudo actualizar ${user.username}: ${String(cause)}`;
+    } finally {
+      busyUserId = '';
+    }
+  }
+
+  async function resetCentralUserPassword(user: CentralUser) {
+    if (busyUserId) return;
+    const password = window.prompt(`Nueva contraseña para ${user.username} (mínimo 8 caracteres)`);
+    if (password === null) return;
+    if (password.length < 8) {
+      usersError = 'La contraseña debe tener al menos 8 caracteres.';
+      return;
+    }
+    busyUserId = user.id;
+    usersError = '';
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      const response = await fetch(`${base}/api/v1/users/${user.id}/password`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ password })
+      });
+      if (!response.ok) throw new Error(await responseMessage(response));
+      const updated = (await response.json()) as CentralUser;
+      centralUsers = centralUsers.map((item) => (item.id === updated.id ? updated : item));
+    } catch (cause) {
+      usersError = `No se pudo restablecer la contraseña: ${String(cause)}`;
+    } finally {
+      busyUserId = '';
     }
   }
 
@@ -208,6 +370,11 @@
       <span>{devices.length} registrados</span>
     </article>
     <article>
+      <p class="eyebrow">USUARIOS</p>
+      <strong>{activeUsers}</strong>
+      <span>{centralUsers.length} centrales</span>
+    </article>
+    <article>
       <p class="eyebrow">CONFLICTOS</p>
       <strong>{conflicts.length}</strong>
       <span>datos maestros</span>
@@ -217,6 +384,119 @@
       <strong class="small">{lastUpdated || '—'}</strong>
       <span>{base}</span>
     </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">USUARIOS</p>
+        <h2>Usuarios centrales</h2>
+      </div>
+      <span class="muted small">{activeUsers} activos · {centralUsers.length} registrados</span>
+    </div>
+
+    {#if usersError}
+      <p class="error" role="alert">{usersError}</p>
+    {/if}
+
+    <form
+      class="user-form"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createCentralUser();
+      }}
+    >
+      <label class="field">
+        <span>Tenant</span>
+        <input bind:value={newTenantId} placeholder="UUID del tenant" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Tiendas</span>
+        <input bind:value={newStoreIds} placeholder="UUID, UUID" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Usuario</span>
+        <input bind:value={newUsername} autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Nombre visible</span>
+        <input bind:value={newDisplayName} />
+      </label>
+      <label class="field">
+        <span>Rol</span>
+        <select bind:value={newUserRole}>
+          <option value="cashier">Cajero</option>
+          <option value="manager">Responsable</option>
+          <option value="auditor">Auditor</option>
+          <option value="admin">Administrador</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Contraseña inicial</span>
+        <input bind:value={newUserPassword} type="password" autocomplete="new-password" />
+      </label>
+      <div class="form-actions">
+        <button class="primary" type="submit" disabled={userCreating}>
+          {userCreating ? 'Creando…' : 'Crear usuario'}
+        </button>
+      </div>
+    </form>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Usuario</th>
+            <th>Nombre</th>
+            <th>Rol</th>
+            <th>Tiendas</th>
+            <th>Estado</th>
+            <th>Versión</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each centralUsers as user (user.id)}
+            <tr>
+              <td class="mono strong">{user.username}</td>
+              <td>{user.display_name}</td>
+              <td>{user.role}</td>
+              <td class="mono small" title={user.store_ids.join(', ')}>
+                {user.store_ids.map(shortId).join(', ')}
+              </td>
+              <td>
+                <span class="pill" class:revoked={!user.active}>
+                  {user.active ? 'Activo' : 'Inactivo'}
+                </span>
+              </td>
+              <td class="mono">{user.version}</td>
+              <td class="row-actions">
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={busyUserId === user.id}
+                  onclick={() => void toggleCentralUser(user)}
+                >
+                  {user.active ? 'Desactivar' : 'Activar'}
+                </button>
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={busyUserId === user.id}
+                  onclick={() => void resetCentralUserPassword(user)}
+                >
+                  Restablecer
+                </button>
+              </td>
+            </tr>
+          {:else}
+            <tr>
+              <td colspan="7" class="empty">Todavía no hay usuarios centrales.</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <section class="panel">
@@ -484,6 +764,49 @@
     color: #ffecec;
     padding: 7px 10px;
     font-size: 0.8rem;
+  }
+
+  button.secondary {
+    background: #20343a;
+    color: #edf7f5;
+    padding: 7px 10px;
+    font-size: 0.8rem;
+  }
+
+  .user-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+    align-items: end;
+  }
+
+  .field {
+    display: grid;
+    gap: 5px;
+  }
+
+  .field span {
+    color: #9fb8b5;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .field input,
+  .field select {
+    background: #0b171b;
+    border: 1px solid #284047;
+    border-radius: 9px;
+    color: #edf7f5;
+    padding: 9px 10px;
+    font: inherit;
+  }
+
+  .row-actions {
+    display: flex;
+    gap: 6px;
   }
 
   .error {

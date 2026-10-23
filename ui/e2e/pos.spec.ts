@@ -215,6 +215,16 @@ test.describe('TPV desktop UI', () => {
               return api.list_sales();
             case 'sync_status':
               return api.sync_status();
+            case 'sync_now':
+              return {
+                accepted: 1,
+                duplicates: 0,
+                rejected: 0,
+                pulled: 1,
+                users_applied: 1,
+                master_applied: 0,
+                master_conflicts: 0
+              };
             case 'list_failed_sync_events':
               return api.list_failed_sync_events();
             case 'search_products':
@@ -254,6 +264,9 @@ test.describe('TPV desktop UI', () => {
     await page.getByRole('button', { name: 'Entrar' }).click();
 
     await expect(page.getByRole('heading', { name: '100%SHOPPING' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Sincronizar ahora' }).click();
+    await expect(page.getByText(/Sincronizado: 1 aceptados, 1 usuario/)).toBeVisible();
 
     const search = page.getByRole('textbox', { name: 'Buscar artículo' });
     await search.fill('café');

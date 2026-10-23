@@ -13,6 +13,7 @@ use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
 use tpv_domain::master_data::{MasterDataChange, MasterDataKind};
 use tpv_domain::money::Money;
+use tpv_domain::people::UserProvision;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, apply_profile_defaults, build_printer, printer_profile};
 use tpv_storage_sqlite::{DatabaseKey, KeyStore, SqliteStore};
@@ -40,6 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut printer_spec = None;
     let mut printer_profile_name = None;
     let mut device_name = "TPV CLI".to_string();
+    let mut login_username = "admin".to_string();
+    let mut login_password =
+        std::env::var("TPV_LOGIN_PASSWORD").unwrap_or_else(|_| "admin123".to_string());
     let mut path = None;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -55,6 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--import-key" => import_key_path = iter.next().cloned(),
             "--printer" => printer_spec = iter.next().cloned(),
             "--printer-profile" => printer_profile_name = iter.next().cloned(),
+            "--login-user" => login_username = iter.next().cloned().unwrap_or_default(),
+            "--login-password" => login_password = iter.next().cloned().unwrap_or_default(),
             "--device-name" => {
                 device_name = iter
                     .next()
@@ -130,13 +136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sync = store.sync_context().await?;
 
     let auth = AuthService::new(
-        user_repo,
+        user_repo.clone(),
         Arc::new(Argon2PasswordHasher),
         audit_repo,
         clock.clone(),
     );
     auth.bootstrap_password("admin", "admin123").await?;
-    let session = auth.login("admin", "admin123").await?;
+    let session = auth.login(&login_username, &login_password).await?;
     println!(
         "Sesión iniciada: {} ({:?}) · {}",
         session.user.display_name, session.user.role, session.session_id
@@ -422,31 +428,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Pull: {} eventos en la central.", pulled.events.len());
         let mut master_applied = 0;
         let mut master_conflicts = 0;
+        let mut users_applied = 0;
         for stored in &pulled.events {
-            if stored.event.aggregate_type != "master_data" {
-                continue;
-            }
-            match serde_json::from_value::<MasterDataChange>(stored.event.payload.clone()) {
-                Ok(change) => {
-                    let result = master_data_service
-                        .apply_change(stored.event.tenant_id, stored.event.store_id, &change)
-                        .await?;
-                    if result.applied {
-                        master_applied += 1;
-                    }
-                    if let Some(conflict) = result.conflict {
-                        master_conflicts += 1;
-                        println!(
-                            "  Conflicto maestro: {} {} · {} · versión local {}",
-                            conflict.kind.as_str(),
-                            conflict.entity_id,
-                            conflict.reason.as_str(),
-                            conflict.local_version
-                        );
+            match stored.event.aggregate_type.as_str() {
+                "user" if stored.event.event_type == "user.provisioned" => {
+                    match serde_json::from_value::<UserProvision>(stored.event.payload.clone()) {
+                        Ok(provision) => {
+                            if user_repo.upsert_provisioned(&provision).await? {
+                                users_applied += 1;
+                            }
+                        }
+                        Err(error) => println!("  Provisión de usuario inválida: {error}"),
                     }
                 }
-                Err(error) => println!("  Cambio maestro inválido: {error}"),
+                "master_data" => {
+                    match serde_json::from_value::<MasterDataChange>(stored.event.payload.clone()) {
+                        Ok(change) => {
+                            let result = master_data_service
+                                .apply_change(
+                                    stored.event.tenant_id,
+                                    stored.event.store_id,
+                                    &change,
+                                )
+                                .await?;
+                            if result.applied {
+                                master_applied += 1;
+                            }
+                            if let Some(conflict) = result.conflict {
+                                master_conflicts += 1;
+                                println!(
+                                    "  Conflicto maestro: {} {} · {} · versión local {}",
+                                    conflict.kind.as_str(),
+                                    conflict.entity_id,
+                                    conflict.reason.as_str(),
+                                    conflict.local_version
+                                );
+                            }
+                        }
+                        Err(error) => println!("  Cambio maestro inválido: {error}"),
+                    }
+                }
+                _ => {}
             }
+        }
+        if users_applied > 0 {
+            println!("Usuarios: {users_applied} cuenta(s) aprovisionadas desde la central.");
         }
         if master_applied > 0 || master_conflicts > 0 {
             println!(

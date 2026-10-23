@@ -209,6 +209,16 @@ export interface SyncStatus {
   last_error: string | null;
 }
 
+export interface SyncSummary {
+  accepted: number;
+  duplicates: number;
+  rejected: number;
+  pulled: number;
+  users_applied: number;
+  master_applied: number;
+  master_conflicts: number;
+}
+
 export interface QuarantinedEvent {
   event: {
     event_id: string;
@@ -265,6 +275,7 @@ export const api = {
   listPrintJobs: () => invoke<PrintJob[]>('list_print_jobs'),
   listSales: () => invoke<SaleView[]>('list_sales'),
   syncStatus: () => invoke<SyncStatus>('sync_status'),
+  syncNow: () => invoke<SyncSummary>('sync_now'),
   listFailedSyncEvents: (limit = 20) =>
     invoke<QuarantinedEvent[]>('list_failed_sync_events', { limit }),
   retrySyncEvents: (eventIds: string[]) =>

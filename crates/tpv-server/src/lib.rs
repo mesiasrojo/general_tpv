@@ -13,20 +13,25 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
+use tpv_application::PasswordHasher;
+use tpv_auth::Argon2PasswordHasher;
+use tpv_domain::ids::{DeviceId, StoreId, TenantId, UserId};
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
+use tpv_domain::people::{Role, UserAccount, UserProvision};
 use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
 pub use store::{
-    CentralStore, DeviceRecord, DeviceStatus, EnrollDevice, MemoryStore, PostgresStore,
-    PushStoreResult, StoreError, StoreHealth, StoredEvent,
+    CentralStore, CentralUserRecord, DeviceRecord, DeviceStatus, EnrollDevice, MemoryStore,
+    NewCentralUser, PostgresStore, PushStoreResult, StoreError, StoreHealth, StoredEvent,
+    UpdateCentralUser,
 };
 
 #[derive(Clone)]
@@ -81,6 +86,29 @@ pub struct EnrollResponse {
     pub token: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateCentralUserRequest {
+    pub tenant_id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<Uuid>,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCentralUserRequest {
+    pub display_name: String,
+    pub role: Role,
+    pub store_ids: Vec<Uuid>,
+    pub active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetCentralUserPasswordRequest {
+    pub password: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
@@ -124,6 +152,13 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
@@ -229,6 +264,15 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/enroll", post(enroll_device))
         .route("/api/v1/devices/{device_id}/revoke", post(revoke_device))
+        .route(
+            "/api/v1/users",
+            get(list_central_users).post(create_central_user),
+        )
+        .route("/api/v1/users/{user_id}", put(update_central_user))
+        .route(
+            "/api/v1/users/{user_id}/password",
+            post(reset_central_user_password),
+        )
         .fallback_service(ServeDir::new(backoffice_dir).not_found_service(ServeFile::new(index)))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -461,6 +505,182 @@ async fn list_master_data_conflicts(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(conflicts))
+}
+
+async fn list_central_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CentralUserRecord>>, ApiError> {
+    state.authorize(&headers)?;
+    let users = state
+        .store
+        .list_central_users()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(users))
+}
+
+async fn create_central_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCentralUserRequest>,
+) -> Result<(StatusCode, Json<CentralUserRecord>), ApiError> {
+    state.authorize(&headers)?;
+    if request.tenant_id.is_nil() {
+        return Err(ApiError::bad_request("tenant_id is required"));
+    }
+    let (username, display_name) =
+        normalize_user_fields(&request.username, &request.display_name, &request.store_ids)?;
+    validate_password(&request.password)?;
+    let password_hash = hash_password(&request.password)?;
+    let user = state
+        .store
+        .create_central_user(NewCentralUser {
+            tenant_id: request.tenant_id,
+            username,
+            display_name,
+            role: request.role,
+            store_ids: request.store_ids,
+            password_hash,
+        })
+        .await
+        .map_err(store_error)?;
+    provision_user(&state, &user).await?;
+    Ok((StatusCode::CREATED, Json(user)))
+}
+
+async fn update_central_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Json(request): Json<UpdateCentralUserRequest>,
+) -> Result<Json<CentralUserRecord>, ApiError> {
+    state.authorize(&headers)?;
+    let (_, display_name) =
+        normalize_user_fields("unchanged", &request.display_name, &request.store_ids)?;
+    let user = state
+        .store
+        .update_central_user(
+            user_id,
+            UpdateCentralUser {
+                display_name,
+                role: request.role,
+                store_ids: request.store_ids,
+                active: request.active,
+                password_hash: None,
+            },
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or_else(|| ApiError::not_found("user not found"))?;
+    provision_user(&state, &user).await?;
+    Ok(Json(user))
+}
+
+async fn reset_central_user_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Json(request): Json<ResetCentralUserPasswordRequest>,
+) -> Result<Json<CentralUserRecord>, ApiError> {
+    state.authorize(&headers)?;
+    validate_password(&request.password)?;
+    let password_hash = hash_password(&request.password)?;
+    let user = state
+        .store
+        .set_central_user_password(user_id, &password_hash)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(|| ApiError::not_found("user not found"))?;
+    provision_user(&state, &user).await?;
+    Ok(Json(user))
+}
+
+fn normalize_user_fields(
+    username: &str,
+    display_name: &str,
+    store_ids: &[Uuid],
+) -> Result<(String, String), ApiError> {
+    let username = username.trim().to_lowercase();
+    let display_name = display_name.trim().to_string();
+    if username.is_empty() || display_name.is_empty() {
+        return Err(ApiError::bad_request(
+            "username and display_name are required",
+        ));
+    }
+    if store_ids.is_empty() || store_ids.iter().any(Uuid::is_nil) {
+        return Err(ApiError::bad_request(
+            "at least one valid store_id is required",
+        ));
+    }
+    Ok((username, display_name))
+}
+
+fn validate_password(password: &str) -> Result<(), ApiError> {
+    if password.chars().count() < 8 {
+        return Err(ApiError::bad_request(
+            "password must have at least 8 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_password(password: &str) -> Result<String, ApiError> {
+    Argon2PasswordHasher
+        .hash(password)
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+fn store_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::Conflict(message) => ApiError::conflict(message),
+        other => ApiError::internal(other.to_string()),
+    }
+}
+
+async fn provision_user(state: &AppState, user: &CentralUserRecord) -> Result<(), ApiError> {
+    let account = UserAccount {
+        id: UserId::from_uuid(user.id),
+        username: user.username.clone(),
+        display_name: user.display_name.clone(),
+        role: user.role,
+        store_ids: user
+            .store_ids
+            .iter()
+            .map(|store_id| StoreId::from_uuid(*store_id))
+            .collect(),
+        active: user.active,
+    };
+    let provision = UserProvision {
+        user: account,
+        password_hash: user.password_hash.clone(),
+        revision: user.version,
+    };
+    let payload =
+        serde_json::to_value(&provision).map_err(|error| ApiError::internal(error.to_string()))?;
+    let now = time::OffsetDateTime::now_utc();
+    let sequence = u64::try_from(now.unix_timestamp_nanos()).unwrap_or_default();
+    for store_id in &user.store_ids {
+        let event = SyncEvent::new(
+            TenantId::from_uuid(user.tenant_id),
+            StoreId::from_uuid(*store_id),
+            DeviceId::from_uuid(Uuid::nil()),
+            sequence,
+            "user",
+            user.id,
+            "user.provisioned",
+            1,
+            now,
+            payload.clone(),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        state
+            .store
+            .push(vec![event])
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+    Ok(())
 }
 
 async fn list_events(
@@ -849,6 +1069,138 @@ mod tests {
                 .iter()
                 .any(|conflict| conflict.reason == ConflictReason::SameVersionDiverged)
         );
+    }
+
+    #[tokio::test]
+    async fn central_user_crud_provisions_sync_events() {
+        let app = app(AppState::new(Some("secret".into())));
+        let tenant_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/users",
+                Some("secret"),
+                Some(json!({
+                    "tenant_id": tenant_id,
+                    "username": "Cajero.Central",
+                    "display_name": "Cajero Central",
+                    "role": "cashier",
+                    "store_ids": [store_id],
+                    "password": "central123"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let user: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(user["username"], "cajero.central");
+        assert_eq!(user["version"], 1);
+        assert!(user.get("password_hash").is_none());
+        let user_id = Uuid::parse_str(user["id"].as_str().unwrap()).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/api/v1/users", Some("secret"), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let users: Vec<CentralUserRecord> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].password_hash.is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/sync/pull?cursor=0&store_id={store_id}"),
+                Some("secret"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pull: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let provisioned = pull["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stored| stored["event"]["event_type"] == "user.provisioned")
+            .expect("provision event");
+        let provision: UserProvision =
+            serde_json::from_value(provisioned["event"]["payload"].clone()).unwrap();
+        assert_eq!(provision.user.id.as_uuid(), user_id);
+        assert_eq!(provision.user.username, "cajero.central");
+        assert_eq!(provision.revision, 1);
+        assert!(provision.password_hash.starts_with("$argon2"));
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "PUT",
+                &format!("/api/v1/users/{user_id}"),
+                Some("secret"),
+                Some(json!({
+                    "display_name": "Cajero Actualizado",
+                    "role": "manager",
+                    "store_ids": [store_id],
+                    "active": true
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(updated["version"], 2);
+        assert_eq!(updated["display_name"], "Cajero Actualizado");
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/v1/users/{user_id}/password"),
+                Some("secret"),
+                Some(json!({"password": "nuevaClave123"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reset["version"], 3);
+
+        let duplicate = app
+            .oneshot(request(
+                "POST",
+                "/api/v1/users",
+                Some("secret"),
+                Some(json!({
+                    "tenant_id": tenant_id,
+                    "username": "cajero.central",
+                    "display_name": "Duplicado",
+                    "role": "cashier",
+                    "store_ids": [store_id],
+                    "password": "central123"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

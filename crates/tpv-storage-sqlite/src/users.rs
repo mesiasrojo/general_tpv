@@ -3,7 +3,7 @@ use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use tpv_application::{Result as AppResult, StoredUser, UserRepository};
 use tpv_domain::ids::{StoreId, UserId};
-use tpv_domain::people::{Role, UserAccount};
+use tpv_domain::people::{Role, UserAccount, UserProvision};
 
 use crate::error::StorageResult;
 use crate::helpers::{enum_from_text, enum_to_text, format_time, parse_optional_time, parse_uuid};
@@ -157,6 +157,57 @@ impl SqliteStore {
         Ok(())
     }
 
+    async fn upsert_provisioned_inner(&self, provision: &UserProvision) -> StorageResult<bool> {
+        let user = &provision.user;
+        let revision = i64::try_from(provision.revision).unwrap_or(i64::MAX);
+        let mut tx = self.pool().begin().await?;
+        let current =
+            sqlx::query_scalar::<_, i64>("SELECT provisioned_revision FROM users WHERE id = ?")
+                .bind(user.id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        if current.is_some_and(|current| current >= revision) {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO users
+                (id, username, display_name, role, active, password_hash,
+                 failed_attempts, provisioned_revision)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                username = excluded.username,
+                display_name = excluded.display_name,
+                role = excluded.role,
+                active = excluded.active,
+                password_hash = excluded.password_hash,
+                failed_attempts = 0,
+                locked_until = NULL,
+                provisioned_revision = excluded.provisioned_revision",
+        )
+        .bind(user.id.to_string())
+        .bind(&user.username)
+        .bind(&user.display_name)
+        .bind(enum_to_text(&user.role)?)
+        .bind(i64::from(user.active))
+        .bind(&provision.password_hash)
+        .bind(revision)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM user_stores WHERE user_id = ?")
+            .bind(user.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for store_id in &user.store_ids {
+            sqlx::query("INSERT INTO user_stores (user_id, store_id) VALUES (?, ?)")
+                .bind(user.id.to_string())
+                .bind(store_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     async fn list_users_inner(&self) -> StorageResult<Vec<UserAccount>> {
         let rows = sqlx::query("SELECT id FROM users ORDER BY username")
             .fetch_all(self.pool())
@@ -208,5 +259,9 @@ impl UserRepository for SqliteStore {
 
     async fn list_users(&self) -> AppResult<Vec<UserAccount>> {
         Ok(self.list_users_inner().await?)
+    }
+
+    async fn upsert_provisioned(&self, provision: &UserProvision) -> AppResult<bool> {
+        Ok(self.upsert_provisioned_inner(provision).await?)
     }
 }

@@ -19,6 +19,8 @@ thiserror.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tpv-application = { path = "../tpv-application" }
+tpv-auth = { path = "../tpv-auth" }
 tpv-domain = { path = "../tpv-domain" }
 uuid.workspace = true
 
