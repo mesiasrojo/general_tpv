@@ -45,7 +45,7 @@ La venta confirmada es inmutable. Cualquier corrección posterior debe ser devol
 
 La UI permite rectificar una factura completa desde el histórico de ventas. La operación exige rol responsable o administrador, solicita un motivo y genera una nota de crédito con serie `REC`, importes negativos, evento `invoice.rectified` y auditoría.
 
-La devolución parcial selecciona líneas y cantidades de la factura original, prorratea importe e IVA por cantidad y emite otra rectificativa `REC`. Si el reembolso es en efectivo, registra automáticamente un gasto de caja con la referencia de la nota de crédito; el reembolso por tarjeta queda registrado fiscalmente y pendiente de conciliación con el terminal de pago.
+La devolución parcial selecciona líneas y cantidades de la factura original, prorratea importe e IVA por cantidad y emite otra rectificativa `REC`. Si el reembolso es en efectivo, registra automáticamente un gasto de caja con la referencia de la nota de crédito. Si es con tarjeta, exige la referencia del justificante del terminal y la guarda en la rectificativa para permitir la conciliación manual; la integración automática con el TPV bancario queda pendiente.
 
 ## 3. Dinero e IVA
 
@@ -214,7 +214,7 @@ Implementado:
 - Login local con Argon2id, bloqueo por intentos, roles y auditoría.
 - RBAC por comando: venta, caja, impresión, sync y gestión de usuarios.
 - Movimientos de caja de gasto, retirada e ingreso con importe, motivo, evento `cash.movement` y auditoría.
-- Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC` y gasto de caja automático para reembolsos en efectivo.
+- Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC`, gasto de caja automático para efectivo y referencia obligatoria del justificante para tarjeta.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
 - Clientes editables desde la UI, selector de cliente en la venta, validación de NIF y sincronización maestra.
@@ -246,7 +246,7 @@ Implementado:
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
-- Conciliación de reembolsos por tarjeta con el terminal de pago y su liquidación bancaria.
+- Integración automática con el terminal de pago y conciliación bancaria; hoy la referencia del justificante se registra manualmente.
 - Ejecución HIL en tienda piloto, certificación de impresoras y reglas udev/WinUSB.
 - Firma nativa de instaladores (Authenticode y notarización Apple) y publicación pública del release.
 
@@ -258,4 +258,4 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 1. Ejecución HIL en tienda piloto y ajuste de umbrales de carga.
 2. Firma nativa de instaladores y publicación de la primera release pública.
-3. Integración de reembolsos por tarjeta con el terminal de pago y conciliación de liquidaciones.
+3. Integración automática con el terminal de pago y conciliación de liquidaciones bancarias.

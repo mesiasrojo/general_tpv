@@ -371,6 +371,7 @@ export const api = {
     invoiceId: string,
     reason: string,
     refundMethod: 'cash' | 'card',
+    refundReference: string | null,
     lines: RefundLineInput[],
     sessionId: string | null
   ) =>
@@ -378,6 +379,7 @@ export const api = {
       invoiceId,
       reason,
       refundMethod,
+      refundReference,
       lines,
       sessionId
     }),

@@ -136,6 +136,8 @@ pub struct RectifyInvoiceLinesRequest {
     pub series: String,
     pub year: u16,
     pub reason: String,
+    #[serde(default)]
+    pub refund_reference: Option<String>,
     pub lines: Vec<InvoiceLineSelection>,
 }
 

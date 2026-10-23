@@ -16,6 +16,8 @@ pub enum InvoiceKind {
     Rectificative {
         original_invoice_id: InvoiceId,
         reason: String,
+        #[serde(default)]
+        refund_reference: Option<String>,
     },
 }
 
@@ -129,12 +131,14 @@ impl Invoice {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn rectificative(
         original: &Invoice,
         series: impl Into<String>,
         number: u64,
         issued_at: OffsetDateTime,
         reason: impl Into<String>,
+        refund_reference: Option<String>,
         lines: Vec<InvoiceLine>,
         totals: SaleTotals,
     ) -> Result<Self> {
@@ -149,6 +153,9 @@ impl Invoice {
                 "a rectificative invoice requires a reason".into(),
             ));
         }
+        let refund_reference = refund_reference
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let series = series.into().trim().to_string();
         if series.is_empty() {
             return Err(DomainError::Validation("invoice series is required".into()));
@@ -168,6 +175,7 @@ impl Invoice {
             kind: InvoiceKind::Rectificative {
                 original_invoice_id: original.id,
                 reason,
+                refund_reference,
             },
             lines,
             totals,

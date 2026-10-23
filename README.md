@@ -31,7 +31,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cadena de suministro | Implementado (cargo-deny, npm audit y Dependabot) |
 | Movimientos de caja | Implementado (gasto, retirada e ingreso con auditoría) |
 | Rectificación de facturas | Implementado (nota de crédito total desde el histórico) |
-| Devoluciones parciales | Implementado (selección de cantidades y reembolso efectivo/tarjeta) |
+| Devoluciones parciales | Implementado (cantidades, efectivo/tarjeta y referencia del justificante) |
 | Certificación con hardware físico | Pendiente de ejecución en tienda piloto |
 
 ## Arranque rápido
@@ -185,7 +185,7 @@ Los roles administrador y responsable disponen del botón **Catálogo** en la ba
 
 El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
 
-Tras emitir una factura, el histórico de ventas muestra los botones **Rectificar** y **Devolver** para administradores y responsables. **Rectificar** emite una nota de crédito de la factura completa. **Devolver** abre el detalle de líneas, permite indicar cantidades parciales, motivo y forma de reembolso (efectivo o tarjeta), emite la rectificativa `REC` y, si el reembolso es en efectivo, registra automáticamente el gasto de caja con la referencia de la devolución.
+Tras emitir una factura, el histórico de ventas muestra los botones **Rectificar** y **Devolver** para administradores y responsables. **Rectificar** emite una nota de crédito de la factura completa. **Devolver** abre el detalle de líneas, permite indicar cantidades parciales, motivo, forma de reembolso y referencia del justificante. Los reembolsos con tarjeta exigen esa referencia, que queda guardada en la rectificativa `REC`; los reembolsos en efectivo registran además un gasto de caja automático.
 
 El panel de caja permite registrar gastos, retiradas e ingresos con importe y motivo. Los cajeros pueden registrar gastos; retiradas e ingresos requieren responsable o administrador. Cada movimiento se guarda en la sesión, genera `cash.movement` y queda auditado.
 

@@ -160,6 +160,7 @@ impl InvoiceService {
             number,
             now,
             request.reason,
+            None,
             lines,
             totals,
         )?;
@@ -257,6 +258,7 @@ impl InvoiceService {
             number,
             now,
             request.reason,
+            request.refund_reference,
             lines,
             totals,
         )?;

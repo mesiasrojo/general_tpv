@@ -331,6 +331,7 @@ test.describe('TPV desktop UI', () => {
           invoiceId: string,
           reason: string,
           refundMethod: string,
+          _refundReference: string | null,
           lines: Array<{ source_line_id: string; quantity: string }>
         ) {
           if (!invoiceRecord || invoiceRecord.id !== invoiceId) throw 'factura no encontrada';
@@ -481,6 +482,7 @@ test.describe('TPV desktop UI', () => {
                 String(args.invoiceId),
                 String(args.reason),
                 String(args.refundMethod),
+                args.refundReference ? String(args.refundReference) : null,
                 args.lines as Array<{ source_line_id: string; quantity: string }>
               );
             case 'print_ticket':
@@ -568,6 +570,7 @@ test.describe('TPV desktop UI', () => {
     await page.getByRole('button', { name: 'Devolver' }).first().click();
     const refund = page.getByRole('dialog', { name: 'Devolución parcial' });
     await expect(refund).toBeVisible();
+    await expect(refund.getByLabel('Referencia del reembolso')).toBeVisible();
     await refund.getByLabel('Cantidad a devolver Café solo').fill('0,5');
     await refund.getByLabel('Motivo de la devolución').fill('Devolución parcial E2E');
     await refund.getByRole('button', { name: 'Emitir devolución' }).click();

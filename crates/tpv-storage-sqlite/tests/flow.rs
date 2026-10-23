@@ -14,6 +14,7 @@ use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{DeviceId, TenantId};
+use tpv_domain::invoice::InvoiceKind;
 use tpv_domain::money::Money;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
@@ -253,6 +254,7 @@ async fn issues_invoice_and_rejects_second_invoice() {
             series: "REC".into(),
             year: 2026,
             reason: "Devolución parcial".into(),
+            refund_reference: Some("AUTH-123".into()),
             lines: vec![InvoiceLineSelection {
                 source_line_id: invoice.lines[0].source_line_id,
                 quantity: "0.5".into(),
@@ -264,6 +266,12 @@ async fn issues_invoice_and_rejects_second_invoice() {
     assert_eq!(partial.lines.len(), 1);
     assert_eq!(partial.lines[0].quantity.as_decimal(), Decimal::new(5, 1));
     assert_eq!(partial.totals.gross, Money::from_cents(-25));
+    match &partial.kind {
+        InvoiceKind::Rectificative {
+            refund_reference, ..
+        } => assert_eq!(refund_reference.as_deref(), Some("AUTH-123")),
+        InvoiceKind::Standard => panic!("expected a rectificative invoice"),
+    }
     partial.validate_totals().unwrap();
     assert!(
         services

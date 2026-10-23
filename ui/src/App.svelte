@@ -62,6 +62,7 @@
   let refundInvoice = $state<Invoice | null>(null);
   let refundReason = $state('');
   let refundMethod = $state<'cash' | 'card'>('cash');
+  let refundReference = $state('');
   let refundQuantities = $state<Record<string, string>>({});
   let refundBusy = $state(false);
   let customers = $state<Customer[]>([]);
@@ -728,6 +729,7 @@
       );
       refundReason = '';
       refundMethod = cash ? 'cash' : 'card';
+      refundReference = '';
       refundOpen = true;
       message = '';
     } catch (error) {
@@ -766,12 +768,18 @@
       message = 'Abre la caja para reembolsar en efectivo.';
       return;
     }
+    const reference = refundReference.trim();
+    if (refundMethod === 'card' && !reference) {
+      message = 'El reembolso con tarjeta requiere la referencia del justificante.';
+      return;
+    }
     refundBusy = true;
     try {
       const summary = await api.refundInvoiceLines(
         refundInvoice.id,
         reason,
         refundMethod,
+        reference || null,
         lines,
         cash?.id ?? null
       );
@@ -1787,6 +1795,10 @@
             <option value="cash">Efectivo</option>
             <option value="card">Tarjeta</option>
           </select>
+        </label>
+        <label class="field">
+          <span>Referencia del reembolso</span>
+          <input bind:value={refundReference} placeholder="Obligatoria para tarjeta" />
         </label>
         <p class="muted small">
           Importe estimado: <strong>{formatMoney(refundPreview)}</strong>

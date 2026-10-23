@@ -359,6 +359,7 @@ async fn refund_invoice_lines(
     invoice_id: InvoiceId,
     reason: String,
     refund_method: String,
+    refund_reference: Option<String>,
     lines: Vec<InvoiceLineSelection>,
     session_id: Option<CashSessionId>,
 ) -> Result<RefundSummary, String> {
@@ -370,6 +371,12 @@ async fn refund_invoice_lines(
     let refund_method = refund_method.trim().to_lowercase();
     if refund_method != "cash" && refund_method != "card" {
         return Err("la forma de reembolso debe ser cash o card".into());
+    }
+    let refund_reference = refund_reference
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if refund_method == "card" && refund_reference.is_none() {
+        return Err("el reembolso con tarjeta requiere la referencia del justificante".into());
     }
     if refund_method == "cash" {
         let session_id =
@@ -393,6 +400,7 @@ async fn refund_invoice_lines(
             series: "REC".into(),
             year,
             reason,
+            refund_reference,
             lines,
         })
         .await
@@ -1405,6 +1413,28 @@ mod e2e_tests {
         let fetched = invoke(&webview, "get_invoice", json!({ "invoiceId": invoice_id }))
             .expect("get invoice");
         assert_eq!(fetched["lines"].as_array().expect("invoice lines").len(), 1);
+        let forbidden = invoke(
+            &webview,
+            "refund_invoice_lines",
+            json!({
+                "invoiceId": invoice_id,
+                "reason": "Reembolso tarjeta sin referencia",
+                "refundMethod": "card",
+                "refundReference": null,
+                "sessionId": null,
+                "lines": [{
+                    "source_line_id": line_id,
+                    "quantity": "1"
+                }]
+            }),
+        )
+        .expect_err("card refund requires a reference");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("referencia")
+        );
         let refund = invoke(
             &webview,
             "refund_invoice_lines",
@@ -1412,6 +1442,7 @@ mod e2e_tests {
                 "invoiceId": invoice_id,
                 "reason": "Devolución parcial",
                 "refundMethod": "cash",
+                "refundReference": null,
                 "sessionId": cash_id,
                 "lines": [{
                     "source_line_id": line_id,
@@ -1574,6 +1605,7 @@ mod e2e_tests {
                 "invoiceId": invoice_id,
                 "reason": "Intento de cajero",
                 "refundMethod": "cash",
+                "refundReference": null,
                 "sessionId": cash_id,
                 "lines": [{
                     "source_line_id": line_id,
