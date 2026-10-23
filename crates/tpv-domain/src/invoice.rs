@@ -46,6 +46,25 @@ impl InvoiceLine {
             kind: line.kind,
         })
     }
+
+    /// Returns a positive line for a partial quantity of the original line.
+    pub fn partial(&self, quantity: Quantity) -> Result<Self> {
+        if quantity > self.quantity {
+            return Err(DomainError::Validation(
+                "return quantity exceeds the invoiced quantity".into(),
+            ));
+        }
+        let base = self.unit_price * quantity.as_decimal();
+        let discount = Decimal::ONE - Decimal::new(i64::from(self.discount_bp), 4);
+        let gross = Money::from_decimal_round(base * discount)?;
+        let tax = self.tax_rate.tax_from_gross(gross)?;
+        Ok(Self {
+            quantity,
+            gross,
+            tax,
+            ..self.clone()
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,5 +275,22 @@ mod tests {
         sale.state = crate::sale::SaleState::Draft;
         let customer = customer(sale.customer_id.unwrap());
         assert!(Invoice::from_sale(&sale, &customer, "FAC-2026", 1, now()).is_err());
+    }
+
+    #[test]
+    fn partial_line_prorates_gross_and_rejects_excess() {
+        let sale = confirmed_sale();
+        let customer = customer(sale.customer_id.unwrap());
+        let invoice = Invoice::from_sale(&sale, &customer, "FAC-2026", 1, now()).unwrap();
+        let line = &invoice.lines[0];
+        let half = line
+            .partial(Quantity::new(Decimal::new(5, 1)).unwrap())
+            .unwrap();
+        assert_eq!(half.quantity.as_decimal(), Decimal::new(5, 1));
+        assert_eq!(half.gross, Money::from_cents(605));
+        assert!(
+            line.partial(Quantity::new(Decimal::new(2, 0)).unwrap())
+                .is_err()
+        );
     }
 }

@@ -10,12 +10,13 @@ use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
     CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
-    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService,
-    MasterDataRepository, MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService,
-    PrinterPort, ProductService, QuarantinedEvent, RectifyInvoiceRequest, ResetPasswordRequest,
-    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
-    SyncContext, SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest,
-    UpsertProductRequest, UserRepository,
+    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceLineSelection,
+    InvoiceRepository, InvoiceService, MasterDataRepository, MasterDataService, OpenCashRequest,
+    PrintQueueRepository, PrintService, PrinterPort, ProductService, QuarantinedEvent,
+    RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository,
+    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
+    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UpsertProductRequest,
+    UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -323,6 +324,90 @@ async fn rectify_invoice(
         })
         .await
         .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Serialize)]
+struct RefundSummary {
+    invoice: Invoice,
+    cash: Option<CashSession>,
+}
+
+#[tauri::command]
+async fn get_invoice(state: State<'_, AppState>, invoice_id: InvoiceId) -> Result<Invoice, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .invoices
+        .get_invoice(invoice_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn refund_invoice_lines(
+    state: State<'_, AppState>,
+    invoice_id: InvoiceId,
+    reason: String,
+    refund_method: String,
+    lines: Vec<InvoiceLineSelection>,
+    session_id: Option<CashSessionId>,
+) -> Result<RefundSummary, String> {
+    require_manager(state.inner())?;
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err("la devolución requiere un motivo".into());
+    }
+    let refund_method = refund_method.trim().to_lowercase();
+    if refund_method != "cash" && refund_method != "card" {
+        return Err("la forma de reembolso debe ser cash o card".into());
+    }
+    if refund_method == "cash" {
+        let session_id =
+            session_id.ok_or_else(|| "abre la caja para reembolsar en efectivo".to_string())?;
+        let open = state
+            .cash
+            .find_open(state.demo.register_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no hay una caja abierta".to_string())?;
+        if open.id != session_id {
+            return Err("la sesión de caja indicada no está abierta".into());
+        }
+    }
+    let year = u16::try_from(OffsetDateTime::now_utc().year()).unwrap_or(2026);
+    let state = state.inner().clone();
+    let invoice = state
+        .invoices
+        .rectify_invoice_lines(RectifyInvoiceLinesRequest {
+            invoice_id,
+            series: "REC".into(),
+            year,
+            reason,
+            lines,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let cash = if refund_method == "cash" {
+        let amount_cents = -invoice.totals.gross.cents();
+        if amount_cents <= 0 {
+            return Err("la devolución no tiene importe positivo".into());
+        }
+        let movement_reason = format!("Devolución {}", invoice.full_number());
+        let movement = state
+            .cash
+            .movement(CashMovementRequest {
+                session_id: session_id.expect("cash session was validated"),
+                kind: CashMovementKind::Expense,
+                amount_cents,
+                reason: movement_reason,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Some(movement)
+    } else {
+        None
+    };
+    Ok(RefundSummary { invoice, cash })
 }
 
 #[tauri::command]
@@ -1019,6 +1104,8 @@ fn main() {
             confirm_sale,
             issue_invoice,
             rectify_invoice,
+            get_invoice,
+            refund_invoice_lines,
             open_cash,
             close_cash,
             cash_status,
@@ -1106,6 +1193,8 @@ mod e2e_tests {
                 confirm_sale,
                 issue_invoice,
                 rectify_invoice,
+                get_invoice,
+                refund_invoice_lines,
                 open_cash,
                 close_cash,
                 cash_status,
@@ -1241,18 +1330,46 @@ mod e2e_tests {
             invoke(&webview, "issue_invoice", json!({ "saleId": sale_id })).expect("issue invoice");
         let invoice_id = invoice["id"].as_str().expect("invoice id").to_string();
         assert_eq!(invoice["kind"]["type"], "standard");
-        let rectified = invoke(
+        let line_id = invoice["lines"][0]["source_line_id"]
+            .as_str()
+            .expect("invoice line id")
+            .to_string();
+        let fetched = invoke(&webview, "get_invoice", json!({ "invoiceId": invoice_id }))
+            .expect("get invoice");
+        assert_eq!(fetched["lines"].as_array().expect("invoice lines").len(), 1);
+        let refund = invoke(
             &webview,
-            "rectify_invoice",
+            "refund_invoice_lines",
             json!({
                 "invoiceId": invoice_id,
-                "reason": "Devolución de cliente"
+                "reason": "Devolución parcial",
+                "refundMethod": "cash",
+                "sessionId": cash_id,
+                "lines": [{
+                    "source_line_id": line_id,
+                    "quantity": "1"
+                }]
             }),
         )
-        .expect("rectify invoice");
-        assert_eq!(rectified["kind"]["type"], "rectificative");
-        assert_eq!(rectified["kind"]["data"]["reason"], "Devolución de cliente");
-        assert_eq!(rectified["kind"]["data"]["original_invoice_id"], invoice_id);
+        .expect("partial refund");
+        assert_eq!(refund["invoice"]["kind"]["type"], "rectificative");
+        assert_eq!(
+            refund["invoice"]["kind"]["data"]["reason"],
+            "Devolución parcial"
+        );
+        assert_eq!(refund["invoice"]["totals"]["gross"], -120);
+        let movements = refund["cash"]["movements"]
+            .as_array()
+            .expect("cash movements");
+        let movement = movements.last().expect("refund movement");
+        assert_eq!(movement["kind"], "expense");
+        assert_eq!(movement["amount"], 120);
+        assert!(
+            movement["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("REC-000001")
+        );
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);
 
@@ -1358,6 +1475,27 @@ mod e2e_tests {
             }),
         )
         .expect_err("cashier cannot rectify invoices");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("responsable")
+        );
+        let forbidden = invoke(
+            &webview,
+            "refund_invoice_lines",
+            json!({
+                "invoiceId": invoice_id,
+                "reason": "Intento de cajero",
+                "refundMethod": "cash",
+                "sessionId": cash_id,
+                "lines": [{
+                    "source_line_id": line_id,
+                    "quantity": "1"
+                }]
+            }),
+        )
+        .expect_err("cashier cannot partially refund invoices");
         assert!(
             forbidden
                 .as_str()

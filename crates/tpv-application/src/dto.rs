@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::cash::{CashCount, CashMovementKind};
-use tpv_domain::ids::{CustomerId, ProductId, RegisterId, SaleId, SellerId, StoreId, UserId};
+use tpv_domain::ids::{
+    CustomerId, ProductId, RegisterId, SaleId, SaleLineId, SellerId, StoreId, UserId,
+};
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
@@ -92,6 +94,21 @@ pub struct RectifyInvoiceRequest {
     pub series: String,
     pub year: u16,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceLineSelection {
+    pub source_line_id: SaleLineId,
+    pub quantity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RectifyInvoiceLinesRequest {
+    pub invoice_id: tpv_domain::ids::InvoiceId,
+    pub series: String,
+    pub year: u16,
+    pub reason: String,
+    pub lines: Vec<InvoiceLineSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

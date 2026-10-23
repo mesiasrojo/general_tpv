@@ -46,6 +46,7 @@ test.describe('TPV desktop UI', () => {
 
       const catalogItems: Array<Record<string, unknown>> = [];
       let cashSession: any = null;
+      let invoiceRecord: any = null;
       const api = {
         async current_user() {
           return session;
@@ -235,7 +236,8 @@ test.describe('TPV desktop UI', () => {
         async issue_invoice() {
           if (!sale) throw 'venta no iniciada';
           sale.invoice_id = '00000000-0000-7000-8000-000000000901';
-          return {
+          const source = sale.lines[0];
+          invoiceRecord = {
             id: sale.invoice_id,
             sale_id: sale.id,
             customer_id: customerId,
@@ -243,9 +245,26 @@ test.describe('TPV desktop UI', () => {
             number: 1,
             issued_at: now(),
             kind: { type: 'standard' },
-            lines: [],
+            lines: [
+              {
+                source_line_id: source.id,
+                description: source.description,
+                quantity: source.quantity,
+                unit_price: source.unit_price,
+                discount_bp: 0,
+                tax_rate: source.tax_rate,
+                gross: totals.gross,
+                tax: totals.tax,
+                kind: 'sale'
+              }
+            ],
             totals
           };
+          return invoiceRecord;
+        },
+        async get_invoice(invoiceId: string) {
+          if (!invoiceRecord || invoiceRecord.id !== invoiceId) throw 'factura no encontrada';
+          return invoiceRecord;
         },
         async rectify_invoice(invoiceId: string, reason: string) {
           return {
@@ -261,6 +280,60 @@ test.describe('TPV desktop UI', () => {
             },
             lines: [],
             totals
+          };
+        },
+        async refund_invoice_lines(
+          invoiceId: string,
+          reason: string,
+          refundMethod: string,
+          lines: Array<{ source_line_id: string; quantity: string }>
+        ) {
+          if (!invoiceRecord || invoiceRecord.id !== invoiceId) throw 'factura no encontrada';
+          let amount = 0;
+          for (const selection of lines) {
+            const line = invoiceRecord.lines.find(
+              (entry: any) => entry.source_line_id === selection.source_line_id
+            );
+            if (!line) throw 'línea no encontrada';
+            amount += Math.round(
+              (Math.abs(line.gross) * Number(selection.quantity)) / Number(line.quantity)
+            );
+          }
+          if (refundMethod === 'cash' && cashSession) {
+            cashSession.movements.push({
+              id: crypto.randomUUID(),
+              kind: 'expense',
+              amount,
+              reason: 'Devolución REC-000001',
+              created_at: now()
+            });
+          }
+          return {
+            invoice: {
+              id: crypto.randomUUID(),
+              sale_id: invoiceRecord.sale_id,
+              customer_id: customerId,
+              series: 'REC',
+              number: 1,
+              issued_at: now(),
+              kind: {
+                type: 'rectificative',
+                data: { original_invoice_id: invoiceId, reason }
+              },
+              lines: [],
+              totals: {
+                ...totals,
+                gross: -amount,
+                net: -amount,
+                tax: 0,
+                tax_breakdown: [],
+                paid: 0,
+                received: 0,
+                due: 0,
+                change: 0
+              }
+            },
+            cash: refundMethod === 'cash' ? cashSession : null
           };
         },
         async print_ticket() {
@@ -352,6 +425,15 @@ test.describe('TPV desktop UI', () => {
               return api.issue_invoice();
             case 'rectify_invoice':
               return api.rectify_invoice(String(args.invoiceId), String(args.reason));
+            case 'get_invoice':
+              return api.get_invoice(String(args.invoiceId));
+            case 'refund_invoice_lines':
+              return api.refund_invoice_lines(
+                String(args.invoiceId),
+                String(args.reason),
+                String(args.refundMethod),
+                args.lines as Array<{ source_line_id: string; quantity: string }>
+              );
             case 'print_ticket':
               return api.print_ticket();
             default:
@@ -422,6 +504,16 @@ test.describe('TPV desktop UI', () => {
 
     await page.getByRole('button', { name: 'Emitir factura' }).click();
     await expect(page.getByText(/Factura FAC-000001 emitida/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Devolver' }).first().click();
+    const refund = page.getByRole('dialog', { name: 'Devolución parcial' });
+    await expect(refund).toBeVisible();
+    await refund.getByLabel('Cantidad a devolver Café solo').fill('0,5');
+    await refund.getByLabel('Motivo de la devolución').fill('Devolución parcial E2E');
+    await refund.getByRole('button', { name: 'Emitir devolución' }).click();
+    await expect(page.getByText(/Devolución REC-000001 emitida/)).toBeVisible();
+    await expect(page.locator('.movement-row', { hasText: 'Devolución REC-000001' })).toBeVisible();
+
     await page.getByRole('button', { name: 'Rectificar' }).first().click();
     await expect(page.getByText(/Rectificación REC-000001 emitida/)).toBeVisible();
   });

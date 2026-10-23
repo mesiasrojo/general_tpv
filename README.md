@@ -30,7 +30,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cadena de suministro | Implementado (cargo-deny, npm audit y Dependabot) |
 | Movimientos de caja | Implementado (gasto, retirada e ingreso con auditoría) |
 | Rectificación de facturas | Implementado (nota de crédito total desde el histórico) |
-| Devoluciones parciales | Pendiente (la rectificación actual cubre la factura completa) |
+| Devoluciones parciales | Implementado (selección de cantidades y reembolso efectivo/tarjeta) |
 | Certificación con hardware físico | Pendiente de ejecución en tienda piloto |
 
 ## Arranque rápido
@@ -182,7 +182,7 @@ Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linu
 
 Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados.
 
-Tras emitir una factura, el histórico de ventas muestra el botón **Rectificar** para administradores y responsables. Solicita un motivo y genera una nota de crédito con serie `REC`, líneas e importes negativos y evento `invoice.rectified`. La rectificación actual cubre la factura completa; las devoluciones parciales por línea quedan pendientes.
+Tras emitir una factura, el histórico de ventas muestra los botones **Rectificar** y **Devolver** para administradores y responsables. **Rectificar** emite una nota de crédito de la factura completa. **Devolver** abre el detalle de líneas, permite indicar cantidades parciales, motivo y forma de reembolso (efectivo o tarjeta), emite la rectificativa `REC` y, si el reembolso es en efectivo, registra automáticamente el gasto de caja con la referencia de la devolución.
 
 El panel de caja permite registrar gastos, retiradas e ingresos con importe y motivo. Los cajeros pueden registrar gastos; retiradas e ingresos requieren responsable o administrador. Cada movimiento se guarda en la sesión, genera `cash.movement` y queda auditado.
 

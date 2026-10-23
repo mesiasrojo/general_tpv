@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use rust_decimal::Decimal;
 use sqlx::Row;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
-    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService,
-    OpenCashRequest, PrintQueueRepository, PrintService, ResetPasswordRequest, SaleRepository,
-    SaleService, SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository,
-    SyncService, UpdateUserRequest, UserRepository,
+    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceLineSelection,
+    InvoiceRepository, InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService,
+    RectifyInvoiceLinesRequest, ResetPasswordRequest, SaleRepository, SaleService,
+    SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService,
+    UpdateUserRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
@@ -243,6 +245,26 @@ async fn issues_invoice_and_rejects_second_invoice() {
         .unwrap()
         .expect("invoice must be persisted");
     assert_eq!(stored.lines.len(), invoice.lines.len());
+
+    let partial = services
+        .invoices
+        .rectify_invoice_lines(RectifyInvoiceLinesRequest {
+            invoice_id: invoice.id,
+            series: "REC".into(),
+            year: 2026,
+            reason: "Devolución parcial".into(),
+            lines: vec![InvoiceLineSelection {
+                source_line_id: invoice.lines[0].source_line_id,
+                quantity: "0.5".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(partial.full_number(), "REC-000001");
+    assert_eq!(partial.lines.len(), 1);
+    assert_eq!(partial.lines[0].quantity.as_decimal(), Decimal::new(5, 1));
+    assert_eq!(partial.totals.gross, Money::from_cents(-25));
+    partial.validate_totals().unwrap();
     assert!(
         services
             .invoices

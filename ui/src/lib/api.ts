@@ -124,6 +124,18 @@ export interface SaleView {
   totals: SaleTotals;
 }
 
+export interface InvoiceLine {
+  source_line_id: string;
+  description: string;
+  quantity: string;
+  unit_price: string;
+  discount_bp: number;
+  tax_rate: TaxRate;
+  gross: MoneyCents;
+  tax: MoneyCents;
+  kind: LineKind;
+}
+
 export interface Invoice {
   id: string;
   sale_id: string;
@@ -132,8 +144,18 @@ export interface Invoice {
   number: number;
   issued_at: string;
   kind: unknown;
-  lines: unknown[];
+  lines: InvoiceLine[];
   totals: SaleTotals;
+}
+
+export interface RefundLineInput {
+  source_line_id: string;
+  quantity: string;
+}
+
+export interface RefundSummary {
+  invoice: Invoice;
+  cash: CashSession | null;
 }
 
 export interface CashCount {
@@ -306,6 +328,21 @@ export const api = {
   issueInvoice: (saleId: string) => invoke<Invoice>('issue_invoice', { saleId }),
   rectifyInvoice: (invoiceId: string, reason: string) =>
     invoke<Invoice>('rectify_invoice', { invoiceId, reason }),
+  getInvoice: (invoiceId: string) => invoke<Invoice>('get_invoice', { invoiceId }),
+  refundInvoiceLines: (
+    invoiceId: string,
+    reason: string,
+    refundMethod: 'cash' | 'card',
+    lines: RefundLineInput[],
+    sessionId: string | null
+  ) =>
+    invoke<RefundSummary>('refund_invoice_lines', {
+      invoiceId,
+      reason,
+      refundMethod,
+      lines,
+      sessionId
+    }),
   openCash: () => invoke<CashSession>('open_cash'),
   closeCash: (
     sessionId: string,

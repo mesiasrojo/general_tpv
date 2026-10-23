@@ -56,6 +56,12 @@
   let movementKind = $state<CashMovementKind>('expense');
   let movementAmount = $state('0,00');
   let movementReason = $state('');
+  let refundOpen = $state(false);
+  let refundInvoice = $state<Invoice | null>(null);
+  let refundReason = $state('');
+  let refundMethod = $state<'cash' | 'card'>('cash');
+  let refundQuantities = $state<Record<string, string>>({});
+  let refundBusy = $state(false);
   let usersOpen = $state(false);
   let users = $state<UserAccount[]>([]);
   let stores = $state<Store[]>([]);
@@ -95,6 +101,22 @@
       );
     })
   );
+
+  let refundPreview = $derived.by(() => {
+    if (!refundInvoice) return 0;
+    let cents = 0;
+    for (const line of refundInvoice.lines) {
+      const raw = Number.parseFloat(
+        (refundQuantities[line.source_line_id] ?? '0').replace(',', '.')
+      );
+      const max = Number.parseFloat(line.quantity);
+      if (!Number.isFinite(raw) || raw <= 0 || !Number.isFinite(max) || max <= 0) {
+        continue;
+      }
+      cents += Math.round((Math.abs(line.gross) * Math.min(raw, max)) / max);
+    }
+    return cents;
+  });
 
   onMount(() => {
     void restoreSession();
@@ -604,6 +626,79 @@
     }
   }
 
+  async function openRefund(invoiceId: string) {
+    if (refundBusy) return;
+    try {
+      const loaded = await api.getInvoice(invoiceId);
+      refundInvoice = loaded;
+      refundQuantities = Object.fromEntries(
+        loaded.lines.map((line) => [line.source_line_id, '0'])
+      );
+      refundReason = '';
+      refundMethod = cash ? 'cash' : 'card';
+      refundOpen = true;
+      message = '';
+    } catch (error) {
+      message = String(error);
+    }
+  }
+
+  async function submitRefund() {
+    if (!refundInvoice || refundBusy) return;
+    const reason = refundReason.trim();
+    if (!reason) {
+      message = 'El motivo de la devolución es obligatorio.';
+      return;
+    }
+    const lines: { source_line_id: string; quantity: string }[] = [];
+    for (const line of refundInvoice.lines) {
+      const raw = (refundQuantities[line.source_line_id] ?? '0').replace(',', '.').trim();
+      const quantity = Number.parseFloat(raw);
+      const maximum = Number.parseFloat(line.quantity);
+      if (!Number.isFinite(quantity) || quantity < 0) {
+        message = `Cantidad no válida para ${line.description}.`;
+        return;
+      }
+      if (quantity === 0) continue;
+      if (quantity > maximum) {
+        message = `La cantidad de ${line.description} supera la facturada.`;
+        return;
+      }
+      lines.push({ source_line_id: line.source_line_id, quantity: raw });
+    }
+    if (lines.length === 0) {
+      message = 'Selecciona al menos una cantidad a devolver.';
+      return;
+    }
+    if (refundMethod === 'cash' && !cash) {
+      message = 'Abre la caja para reembolsar en efectivo.';
+      return;
+    }
+    refundBusy = true;
+    try {
+      const summary = await api.refundInvoiceLines(
+        refundInvoice.id,
+        reason,
+        refundMethod,
+        lines,
+        cash?.id ?? null
+      );
+      invoice = summary.invoice;
+      if (summary.cash) {
+        cash = summary.cash;
+      }
+      message = `Devolución ${summary.invoice.series}-${String(summary.invoice.number).padStart(6, '0')} emitida.`;
+      refundOpen = false;
+      refundInvoice = null;
+      await refreshSales();
+      await refreshSync();
+    } catch (error) {
+      message = String(error);
+    } finally {
+      refundBusy = false;
+    }
+  }
+
   async function reprintTicket() {
     if (!sale || !sale.sale.ticket_number || busy) return;
     busy = true;
@@ -1089,16 +1184,28 @@
               <span>{stateLabel(item.sale.state)}</span>
               <strong>{formatMoney(item.totals.gross)}</strong>
               {#if item.sale.invoice_id && (session?.user.role === 'admin' || session?.user.role === 'manager')}
-                <button
-                  class="secondary"
-                  type="button"
-                  disabled={rectifyBusy}
-                  onclick={() => {
-                    if (item.sale.invoice_id) void rectifyInvoice(item.sale.invoice_id);
-                  }}
-                >
-                  Rectificar
-                </button>
+                <div class="sale-actions">
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={rectifyBusy}
+                    onclick={() => {
+                      if (item.sale.invoice_id) void rectifyInvoice(item.sale.invoice_id);
+                    }}
+                  >
+                    Rectificar
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={refundBusy}
+                    onclick={() => {
+                      if (item.sale.invoice_id) void openRefund(item.sale.invoice_id);
+                    }}
+                  >
+                    Devolver
+                  </button>
+                </div>
               {:else}
                 <span></span>
               {/if}
@@ -1430,6 +1537,80 @@
       </div>
     </div>
   {/if}
+
+  {#if refundOpen && refundInvoice}
+    <div class="modal-backdrop" role="presentation">
+      <div
+        class="modal refund-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Devolución parcial"
+      >
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">DEVOLUCIÓN</p>
+            <h2>Devolución parcial</h2>
+            <p class="muted small">
+              Factura {refundInvoice.series}-{String(refundInvoice.number).padStart(6, '0')}
+            </p>
+          </div>
+          <button class="icon" type="button" onclick={() => (refundOpen = false)}>Esc</button>
+        </div>
+
+        <div class="refund-lines">
+          {#each refundInvoice.lines as line (line.source_line_id)}
+            <div class="refund-row">
+              <div>
+                <strong>{line.description}</strong>
+                <span class="muted small">
+                  Facturado {line.quantity} · {formatMoney(Math.abs(line.gross))}
+                </span>
+              </div>
+              <label class="field">
+                <span>Cantidad a devolver</span>
+                <input
+                  aria-label={`Cantidad a devolver ${line.description}`}
+                  value={refundQuantities[line.source_line_id] ?? '0'}
+                  inputmode="decimal"
+                  oninput={(event) => {
+                    refundQuantities[line.source_line_id] = event.currentTarget.value;
+                  }}
+                />
+              </label>
+            </div>
+          {/each}
+        </div>
+
+        <label class="field">
+          <span>Motivo de la devolución</span>
+          <input bind:value={refundReason} />
+        </label>
+        <label class="field">
+          <span>Forma de reembolso</span>
+          <select bind:value={refundMethod}>
+            <option value="cash">Efectivo</option>
+            <option value="card">Tarjeta</option>
+          </select>
+        </label>
+        <p class="muted small">
+          Importe estimado: <strong>{formatMoney(refundPreview)}</strong>
+        </p>
+        <div class="modal-actions">
+          <button
+            class="primary"
+            type="button"
+            disabled={refundBusy}
+            onclick={() => void submitRefund()}
+          >
+            {refundBusy ? 'Emitiendo…' : 'Emitir devolución'}
+          </button>
+          <button class="secondary" type="button" onclick={() => (refundOpen = false)}>
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>
 {/if}
 
@@ -1697,6 +1878,12 @@
     font-size: 0.88rem;
   }
 
+  .sale-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
   .invoice-card {
     border-color: rgb(112 224 161 / 45%);
   }
@@ -1820,6 +2007,27 @@
     width: min(980px, 100%);
     max-height: 90vh;
     overflow: auto;
+  }
+
+  .refund-modal {
+    width: min(720px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .refund-lines {
+    display: grid;
+    gap: 8px;
+    margin: 14px 0;
+  }
+
+  .refund-row {
+    display: grid;
+    grid-template-columns: 1fr 190px;
+    gap: 12px;
+    align-items: end;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
   }
 
   .user-create {
