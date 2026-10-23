@@ -43,6 +43,7 @@ pub trait CatalogRepository: Send + Sync {
     async fn save_store(&self, store: &Store) -> Result<()>;
 
     async fn list_sellers(&self) -> Result<Vec<Seller>>;
+    async fn find_seller(&self, id: tpv_domain::ids::SellerId) -> Result<Option<Seller>>;
     async fn save_seller(&self, seller: &Seller) -> Result<()>;
 }
 
@@ -107,4 +108,22 @@ pub trait AuditRepository: Send + Sync {
 pub trait SyncOutboxRepository: Send + Sync {
     async fn pending_events(&self, limit: u32) -> Result<Vec<SyncEvent>>;
     async fn mark_events_sent(&self, event_ids: &[uuid::Uuid]) -> Result<()>;
+}
+
+pub trait TicketRenderer: Send + Sync {
+    fn render_ticket(&self, document: &crate::dto::TicketDocument) -> Result<Vec<u8>>;
+}
+
+#[async_trait]
+pub trait PrinterPort: Send + Sync {
+    async fn print(&self, job: &crate::dto::PrintJob) -> Result<()>;
+}
+
+#[async_trait]
+pub trait PrintQueueRepository: Send + Sync {
+    async fn enqueue(&self, job: &crate::dto::PrintJob) -> Result<()>;
+    async fn pending(&self, limit: u32) -> Result<Vec<crate::dto::PrintJob>>;
+    async fn mark_printed(&self, id: tpv_domain::ids::PrintJobId) -> Result<()>;
+    async fn mark_failed(&self, id: tpv_domain::ids::PrintJobId, error: &str) -> Result<()>;
+    async fn list_recent(&self, limit: u32) -> Result<Vec<crate::dto::PrintJob>>;
 }

@@ -323,6 +323,14 @@ impl SqliteStore {
         rows.iter().map(row_to_seller).collect()
     }
 
+    async fn get_seller_by_id(&self, id: SellerId) -> StorageResult<Option<Seller>> {
+        let row = sqlx::query("SELECT * FROM sellers WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_seller).transpose()
+    }
+
     pub(crate) async fn persist_seller(&self, seller: &Seller) -> StorageResult<()> {
         sqlx::query(
             "INSERT INTO sellers (id, code, name, phone1, phone2, active)
@@ -393,6 +401,10 @@ impl CatalogRepository for SqliteStore {
 
     async fn list_sellers(&self) -> AppResult<Vec<Seller>> {
         Ok(self.all_sellers().await?)
+    }
+
+    async fn find_seller(&self, id: SellerId) -> AppResult<Option<Seller>> {
+        Ok(self.get_seller_by_id(id).await?)
     }
 
     async fn save_seller(&self, seller: &Seller) -> AppResult<()> {

@@ -15,8 +15,9 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cliente HTTP de sincronización | Implementado |
 | CLI de demostración end-to-end | Implementado |
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
+| Impresión ESC/POS + cola persistente | Implementado (renderer, fichero, directorio y red TCP) |
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
-| Impresión ESC/POS, SQLCipher, auth Argon2, PostgreSQL persistente | Pendiente de siguiente iteración |
+| SQLCipher, auth Argon2, PostgreSQL persistente, USB/serie nativo | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 
@@ -26,7 +27,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 cargo run -p tpv-cli -- --memory
 ```
 
-Ejecuta: apertura de caja, venta de 2 líneas, cobro con cambio, ticket por consola, factura, cierre de caja y listado de ventas.
+Ejecuta: apertura de caja, venta de 2 líneas, cobro con cambio, ticket por consola, **ticket ESC/POS en `data/ticket-000001.escpos`**, factura, cierre de caja y listado de ventas.
 
 ### 2. Central + sincronización
 
@@ -84,6 +85,7 @@ crates/tpv-domain             Dominio puro, sin I/O
 crates/tpv-application        Casos de uso y puertos
 crates/tpv-storage-sqlite     Adaptadores SQLite y migraciones
 crates/tpv-sync               Cliente HTTP de sincronización
+crates/tpv-print              Renderer ESC/POS y adaptadores de impresora
 crates/tpv-server             Central Axum
 apps/cli                      Demo end-to-end
 apps/desktop/src-tauri        Cliente Tauri

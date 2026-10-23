@@ -4,13 +4,14 @@ use time::format_description::well_known::Rfc3339;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, CashRepository, CashService, CatalogRepository,
     CatalogService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService,
-    OpenCashRequest, SaleRepository, SaleService, SequenceRepository, StartSaleRequest,
-    SyncContext, SyncOutboxRepository,
+    OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository, SaleService,
+    SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository,
 };
 use tpv_domain::cash::CashCount;
 use tpv_domain::ids::{DeviceId, TenantId};
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
+use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::SqliteStore;
 use tpv_sync::SyncClient;
 
@@ -60,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cash_repo: Arc<dyn CashRepository> = store.clone();
     let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
     let sync_repo: Arc<dyn SyncOutboxRepository> = store.clone();
+    let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
     let sync = SyncContext {
         tenant_id: TenantId::new(),
@@ -83,7 +85,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         clock.clone(),
         sync.clone(),
     );
-    let cash_service = CashService::new(cash_repo, sale_repo.clone(), clock, sync.clone());
+    let cash_service = CashService::new(cash_repo, sale_repo.clone(), clock.clone(), sync.clone());
+    let print_service = PrintService::new(
+        sale_repo.clone(),
+        catalog_repo.clone(),
+        print_repo,
+        Arc::new(EscPosRenderer::default()),
+        clock,
+    );
 
     println!(
         "Base de datos: {}",
@@ -177,6 +186,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("seller not found")?;
     let customer = catalog_service.get_customer(demo.customer_id).await?;
     print_ticket(&sale, &store_info, &seller, Some(&customer));
+
+    let job = print_service.enqueue_ticket(sale.id, false).await?;
+    let ticket_path = format!(
+        "data/ticket-{:06}.escpos",
+        sale.ticket_number.unwrap_or_default()
+    );
+    let printer = FilePrinter::new(&ticket_path);
+    let results = print_service.process_pending(&printer, 10).await?;
+    println!(
+        "Ticket ESC/POS: {} bytes · {} trabajo(s) procesado(s) · {}",
+        job.bytes.len(),
+        results.len(),
+        ticket_path
+    );
 
     let invoice = invoice_service
         .issue_invoice(tpv_application::IssueInvoiceRequest {

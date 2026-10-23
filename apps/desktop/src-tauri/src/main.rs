@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -7,14 +8,15 @@ use tauri::{Manager, State};
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, CatalogRepository, CatalogService, CashRepository,
     CashService, CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService,
-    OpenCashRequest, SaleRepository, SaleService, SequenceRepository, StartSaleRequest,
-    SaleView, SyncContext,
+    OpenCashRequest, PrintQueueRepository, PrintService, SaleRepository, SaleService,
+    SequenceRepository, StartSaleRequest, SaleView, SyncContext,
 };
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
 use tpv_domain::ids::{CustomerId, DeviceId, RegisterId, SellerId, StoreId, TenantId, UserId};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::sale::PaymentMethod;
+use tpv_print::{DirectoryPrinter, EscPosRenderer};
 use tpv_storage_sqlite::{DemoData, SqliteStore};
 use time::OffsetDateTime;
 
@@ -24,6 +26,8 @@ struct AppState {
     sales: SaleService,
     invoices: InvoiceService,
     cash: CashService,
+    print: PrintService,
+    print_dir: PathBuf,
     demo: DemoData,
 }
 
@@ -244,6 +248,66 @@ async fn cash_status(state: State<'_, AppState>) -> Result<Option<CashSession>, 
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Serialize)]
+struct PrintSummary {
+    job_id: String,
+    file: String,
+    bytes: usize,
+    success: bool,
+}
+
+#[tauri::command]
+async fn print_ticket(
+    state: State<'_, AppState>,
+    sale_id: tpv_domain::ids::SaleId,
+    reprint: bool,
+) -> Result<PrintSummary, String> {
+    let state = state.inner().clone();
+    let job = state
+        .print
+        .enqueue_ticket(sale_id, reprint)
+        .await
+        .map_err(|error| error.to_string())?;
+    let printer = DirectoryPrinter::new(state.print_dir.clone());
+    let results = state
+        .print
+        .process_pending(&printer, 10)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(PrintSummary {
+        job_id: job.id.to_string(),
+        file: state
+            .print_dir
+            .join(format!("{}.escpos", job.id))
+            .display()
+            .to_string(),
+        bytes: job.bytes.len(),
+        success: results.iter().all(|result| result.success),
+    })
+}
+
+#[tauri::command]
+async fn print_pending(state: State<'_, AppState>) -> Result<Vec<tpv_application::PrintResult>, String> {
+    let state = state.inner().clone();
+    let printer = DirectoryPrinter::new(state.print_dir.clone());
+    state
+        .print
+        .process_pending(&printer, 20)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_print_jobs(state: State<'_, AppState>) -> Result<Vec<tpv_application::PrintJob>, String> {
+    state
+        .inner()
+        .clone()
+        .print
+        .list_recent(20)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn list_sales(state: State<'_, AppState>) -> Result<Vec<SaleView>, String> {
     let state = state.inner().clone();
@@ -284,6 +348,9 @@ fn main() {
             let invoice_repo: Arc<dyn InvoiceRepository> = store.clone();
             let cash_repo: Arc<dyn CashRepository> = store.clone();
             let sequence_repo: Arc<dyn SequenceRepository> = store.clone();
+            let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
+            let tickets_dir = data_dir.join("tickets");
+            std::fs::create_dir_all(&tickets_dir)?;
             let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
             let sync = SyncContext {
                 tenant_id: TenantId::new(),
@@ -301,17 +368,26 @@ fn main() {
             let invoices = InvoiceService::new(
                 invoice_repo,
                 sale_repo.clone(),
-                catalog_repo,
+                catalog_repo.clone(),
                 sequence_repo,
                 clock.clone(),
                 sync.clone(),
             );
-            let cash = CashService::new(cash_repo, sale_repo, clock, sync);
+            let cash = CashService::new(cash_repo, sale_repo.clone(), clock.clone(), sync);
+            let print = PrintService::new(
+                sale_repo,
+                catalog_repo,
+                print_repo,
+                Arc::new(EscPosRenderer::default()),
+                clock,
+            );
             app.manage(AppState {
                 catalog,
                 sales,
                 invoices,
                 cash,
+                print,
+                print_dir: tickets_dir,
                 demo,
             });
             Ok(())
@@ -327,6 +403,9 @@ fn main() {
             open_cash,
             close_cash,
             cash_status,
+            print_ticket,
+            print_pending,
+            list_print_jobs,
             list_sales
         ])
         .run(tauri::generate_context!())

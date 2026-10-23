@@ -4,14 +4,15 @@ use sqlx::Row;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, CashRepository, CashService,
     CloseCashRequest, ConfirmSaleRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
-    SaleRepository, SaleService, SequenceRepository, StartSaleRequest, SyncContext,
-    SyncOutboxRepository,
+    PrintQueueRepository, PrintService, SaleRepository, SaleService, SequenceRepository,
+    StartSaleRequest, SyncContext, SyncOutboxRepository,
 };
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{DeviceId, TenantId};
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
+use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::SqliteStore;
 
 struct Services {
@@ -22,6 +23,7 @@ struct Services {
     cash: CashService,
     sequence: Arc<dyn SequenceRepository>,
     audit: Arc<dyn AuditRepository>,
+    print_service: PrintService,
 }
 
 async fn services() -> Services {
@@ -33,6 +35,7 @@ async fn services() -> Services {
     let cash_repo: Arc<dyn CashRepository> = store.clone();
     let sequence: Arc<dyn SequenceRepository> = store.clone();
     let audit: Arc<dyn AuditRepository> = store.clone();
+    let print_repo: Arc<dyn PrintQueueRepository> = store.clone();
     let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
     let sync = SyncContext {
         tenant_id: TenantId::new(),
@@ -49,12 +52,19 @@ async fn services() -> Services {
     let invoices = InvoiceService::new(
         invoices_repo,
         sales_repo.clone(),
-        catalog,
+        catalog.clone(),
         sequence.clone(),
         clock.clone(),
         sync.clone(),
     );
-    let cash = CashService::new(cash_repo, sales_repo, clock, sync);
+    let cash = CashService::new(cash_repo, sales_repo.clone(), clock.clone(), sync);
+    let print_service = PrintService::new(
+        sales_repo,
+        catalog,
+        print_repo,
+        Arc::new(EscPosRenderer::default()),
+        clock,
+    );
     Services {
         store,
         demo,
@@ -63,6 +73,7 @@ async fn services() -> Services {
         cash,
         sequence,
         audit,
+        print_service,
     }
 }
 
@@ -387,4 +398,73 @@ async fn outbox_can_be_read_and_marked_as_sent() {
         .collect::<Vec<_>>();
     services.store.mark_events_sent(&ids).await.unwrap();
     assert!(services.store.pending_events(100).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prints_ticket_through_persistent_queue() {
+    let services = services().await;
+    let mut sale = services
+        .sales
+        .start_sale(StartSaleRequest {
+            store_id: services.demo.store_id,
+            register_id: services.demo.register_id,
+            seller_id: services.demo.seller_id,
+            customer_id: Some(services.demo.customer_id),
+        })
+        .await
+        .unwrap();
+    sale = services
+        .sales
+        .add_line(AddLineRequest {
+            sale_id: sale.id,
+            sku: "1".into(),
+            quantity: "1".into(),
+            kind: "sale".into(),
+            discount_bp: None,
+        })
+        .await
+        .unwrap();
+    let totals = sale.totals().unwrap();
+    sale = services
+        .sales
+        .apply_payment(ApplyPaymentRequest {
+            sale_id: sale.id,
+            method: PaymentMethod::Cash,
+            amount_cents: totals.gross.cents(),
+            received_cents: totals.gross.cents(),
+            reference: None,
+        })
+        .await
+        .unwrap();
+    sale = services
+        .sales
+        .confirm_sale(ConfirmSaleRequest { sale_id: sale.id })
+        .await
+        .unwrap();
+
+    let job = services
+        .print_service
+        .enqueue_ticket(sale.id, false)
+        .await
+        .unwrap();
+    assert!(!job.bytes.is_empty());
+    assert_eq!(services.store.pending(10).await.unwrap().len(), 1);
+
+    let path = std::env::temp_dir().join(format!("tpv-flow-ticket-{}.escpos", std::process::id()));
+    let printer = FilePrinter::new(&path);
+    let results = services
+        .print_service
+        .process_pending(&printer, 10)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].success);
+    assert!(path.exists());
+    assert!(services.store.pending(10).await.unwrap().is_empty());
+    let recent = PrintQueueRepository::list_recent(services.store.as_ref(), 10)
+        .await
+        .unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].status, tpv_application::PrintJobStatus::Printed);
+    let _ = std::fs::remove_file(path);
 }

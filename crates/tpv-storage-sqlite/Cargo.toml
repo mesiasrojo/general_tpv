@@ -17,3 +17,6 @@ tokio.workspace = true
 tpv-application = { path = "../tpv-application" }
 tpv-domain = { path = "../tpv-domain" }
 uuid.workspace = true
+
+[dev-dependencies]
+tpv-print = { path = "../tpv-print" }

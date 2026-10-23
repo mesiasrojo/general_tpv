@@ -6,6 +6,7 @@ members = [
     "crates/tpv-storage-sqlite",
     "crates/tpv-sync",
     "crates/tpv-server",
+    "crates/tpv-print",
     "apps/cli",
 ]
 default-members = [
@@ -14,6 +15,7 @@ default-members = [
     "crates/tpv-storage-sqlite",
     "crates/tpv-sync",
     "crates/tpv-server",
+    "crates/tpv-print",
     "apps/cli",
 ]
 exclude = ["apps/desktop", "ui"]

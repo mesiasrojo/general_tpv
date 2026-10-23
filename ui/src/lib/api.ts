@@ -123,6 +123,26 @@ export interface CashCloseRecord {
   version: number;
 }
 
+export interface PrintJob {
+  id: string;
+  sale_id: string;
+  job_type: 'ticket' | 'invoice';
+  document: unknown;
+  bytes: number[];
+  status: 'pending' | 'printed' | 'failed';
+  attempts: number;
+  created_at: string;
+  printed_at: string | null;
+  last_error: string | null;
+}
+
+export interface PrintSummary {
+  job_id: string;
+  file: string;
+  bytes: number;
+  success: boolean;
+}
+
 export interface CashSession {
   id: string;
   store_id: string;
@@ -182,6 +202,10 @@ export const api = {
       countedVoucherCents
     }),
   cashStatus: () => invoke<CashSession | null>('cash_status'),
+  printTicket: (saleId: string, reprint = false) =>
+    invoke<PrintSummary>('print_ticket', { saleId, reprint }),
+  printPending: () => invoke<unknown[]>('print_pending'),
+  listPrintJobs: () => invoke<PrintJob[]>('list_print_jobs'),
   listSales: () => invoke<SaleView[]>('list_sales')
 };
 

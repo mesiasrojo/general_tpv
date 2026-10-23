@@ -121,3 +121,146 @@ impl SaleView {
         Ok(Self { sale, totals })
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketLine {
+    pub sku: String,
+    pub description: String,
+    pub quantity: String,
+    pub unit_price: String,
+    pub total: Money,
+    pub kind: tpv_domain::sale::LineKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketDocument {
+    pub store_name: String,
+    pub store_address: String,
+    pub store_tax_id: String,
+    pub store_phone: Option<String>,
+    pub ticket_label: String,
+    pub issued_at: time::OffsetDateTime,
+    pub seller_code: String,
+    pub seller_name: String,
+    pub customer_name: Option<String>,
+    pub customer_tax_id: Option<String>,
+    pub lines: Vec<TicketLine>,
+    pub totals: tpv_domain::sale::SaleTotals,
+    pub reprint: bool,
+    pub footer: Vec<String>,
+}
+
+impl TicketDocument {
+    pub fn from_sale(
+        sale: &tpv_domain::sale::Sale,
+        store: &tpv_domain::people::Store,
+        seller: &tpv_domain::people::Seller,
+        customer: Option<&tpv_domain::people::Customer>,
+        reprint: bool,
+    ) -> crate::Result<Self> {
+        if !sale.is_confirmed() {
+            return Err(crate::ApplicationError::Validation(
+                "the sale must be confirmed before printing".into(),
+            ));
+        }
+        let number = sale.ticket_number.ok_or_else(|| {
+            crate::ApplicationError::Validation("the sale has no ticket number".into())
+        })?;
+        let series = sale.ticket_series.as_deref().unwrap_or("TPV");
+        let lines = sale
+            .lines
+            .iter()
+            .map(|line| {
+                Ok(TicketLine {
+                    sku: line.sku.to_string(),
+                    description: line.description.clone(),
+                    quantity: line.quantity.to_string(),
+                    unit_price: line.unit_price.to_string(),
+                    total: line.gross_total()?,
+                    kind: line.kind,
+                })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let mut footer = vec![
+            "IVA INCLUIDO".to_string(),
+            "GRACIAS POR SU COMPRA".to_string(),
+        ];
+        if reprint {
+            footer.insert(0, "COPIA".to_string());
+        }
+        Ok(Self {
+            store_name: store.name.clone(),
+            store_address: store.address.one_line(),
+            store_tax_id: store.tax_id.clone(),
+            store_phone: store.phone.clone(),
+            ticket_label: format!("{series}-{number:06}"),
+            issued_at: sale.closed_at.unwrap_or(sale.created_at),
+            seller_code: seller.code.clone(),
+            seller_name: seller.name.clone(),
+            customer_name: customer.map(tpv_domain::people::Customer::full_name),
+            customer_tax_id: customer.and_then(|value| value.nif.clone()),
+            lines,
+            totals: sale.totals()?,
+            reprint,
+            footer,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrintJobType {
+    Ticket,
+    Invoice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrintJobStatus {
+    Pending,
+    Printed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrintJob {
+    pub id: tpv_domain::ids::PrintJobId,
+    pub sale_id: tpv_domain::ids::SaleId,
+    pub job_type: PrintJobType,
+    pub document: TicketDocument,
+    pub bytes: Vec<u8>,
+    pub status: PrintJobStatus,
+    pub attempts: u32,
+    pub created_at: time::OffsetDateTime,
+    pub printed_at: Option<time::OffsetDateTime>,
+    pub last_error: Option<String>,
+}
+
+impl PrintJob {
+    pub fn ticket(
+        sale_id: tpv_domain::ids::SaleId,
+        document: TicketDocument,
+        bytes: Vec<u8>,
+        created_at: time::OffsetDateTime,
+    ) -> Self {
+        Self {
+            id: tpv_domain::ids::PrintJobId::new(),
+            sale_id,
+            job_type: PrintJobType::Ticket,
+            document,
+            bytes,
+            status: PrintJobStatus::Pending,
+            attempts: 0,
+            created_at,
+            printed_at: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrintResult {
+    pub job_id: tpv_domain::ids::PrintJobId,
+    pub success: bool,
+    pub error: Option<String>,
+}

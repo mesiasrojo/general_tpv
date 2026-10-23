@@ -10,6 +10,7 @@ Este documento describe la primera rebanada vertical implementada del plan v2. E
 - `tpv-application`: casos de uso y puertos.
 - `tpv-storage-sqlite`: adaptador de persistencia.
 - `tpv-sync`: cliente HTTP de sincronización.
+- `tpv-print`: renderer ESC/POS y adaptadores de impresora.
 - `tpv-server`: central Axum.
 - `apps/desktop`: shell Tauri y comandos IPC.
 - `ui`: Svelte 5, sin lógica de negocio.
@@ -64,6 +65,26 @@ Base local SQLite con WAL y migraciones embebidas:
 
 SQLite guarda enums como texto, UUID como TEXT, fechas RFC3339 y dinero como INTEGER de céntimos.
 
+## 4.1 Impresión
+
+```text
+confirm_sale
+  └─ PrintService::enqueue_ticket
+       ├─ TicketDocument::from_sale
+       ├─ EscPosRenderer::render_ticket (Windows-1252, 42 columnas)
+       └─ PrintQueueRepository::enqueue (SQLite print_jobs)
+
+PrintService::process_pending
+  ├─ PrintQueueRepository::pending
+  ├─ PrinterPort::print
+  │    ├─ FilePrinter
+  │    ├─ DirectoryPrinter
+  │    └─ NetworkPrinter (TCP 9100)
+  └─ mark_printed / mark_failed
+```
+
+El ticket incluye cabecera de tienda, vendedor, cliente, líneas, desglose de IVA, total, entregado, cambio, pie legal, corte y pulso de cajón. La reimpresión se marca como "COPIA". La cola es persistente: si la impresora falla, el trabajo queda en estado `failed` y puede reintentarse.
+
 ## 5. Sincronización
 
 ```text
@@ -91,6 +112,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 
 Implementado:
 - `#![forbid(unsafe_code)]` en las crates de lógica.
+- Renderer ESC/POS probado con vectores de bytes y cola persistente.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.
 - Token bearer opcional en la central.
@@ -100,7 +122,7 @@ Implementado:
 Pendiente para producción:
 - SQLCipher y gestión de clave en keychain.
 - Autenticación Argon2id y RBAC completo.
-- Adaptador ESC/POS y cola de impresión.
+- Adaptadores USB/serie nativos y perfiles de impresora certificados.
 - PostgreSQL persistente y migraciones centrales.
 - Reintentos con backoff, cuarentena y resolución de conflictos de maestros.
 - Firma de actualizaciones, SBOM y pipeline de release.
@@ -112,9 +134,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Adaptador ESC/POS + plantilla de ticket + cola persistente.
-2. Autenticación y RBAC con Argon2id.
-3. PostgreSQL central y migraciones.
-4. Worker de sync con backoff y estado visible en UI.
-5. SQLCipher y backups cifrados.
-6. Pruebas E2E Tauri y hardware-in-the-loop.
+1. Autenticación y RBAC con Argon2id.
+2. PostgreSQL central y migraciones.
+3. Worker de sync con backoff y estado visible en UI.
+4. SQLCipher y backups cifrados.
+5. Adaptadores USB/serie y hardware-in-the-loop.
+6. Pruebas E2E Tauri.

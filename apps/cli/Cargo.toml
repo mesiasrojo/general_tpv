@@ -16,6 +16,7 @@ time.workspace = true
 tokio.workspace = true
 tpv-application = { path = "../../crates/tpv-application" }
 tpv-domain = { path = "../../crates/tpv-domain" }
+tpv-print = { path = "../../crates/tpv-print" }
 tpv-storage-sqlite = { path = "../../crates/tpv-storage-sqlite" }
 tpv-sync = { path = "../../crates/tpv-sync" }
 tracing.workspace = true

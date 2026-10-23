@@ -12,6 +12,7 @@
     type PaymentMethod,
     type Product,
     type ProductSearchResult,
+    type PrintSummary,
     type SaleView
   } from './lib/api';
 
@@ -26,6 +27,7 @@
   let amountCents = $state(0);
   let receivedCents = $state(0);
   let invoice = $state<Invoice | null>(null);
+  let printSummary = $state<PrintSummary | null>(null);
   let cash = $state<CashSession | null>(null);
   let countedCash = $state('0.00');
   let lastSales = $state<SaleView[]>([]);
@@ -136,7 +138,8 @@
     try {
       sale = await api.confirmSale(sale.sale.id);
       paymentOpen = false;
-      message = `Ticket ${sale.sale.ticket_number ?? ''} confirmado.`;
+      printSummary = await api.printTicket(sale.sale.id, false);
+      message = `Ticket ${sale.sale.ticket_number ?? ''} confirmado e impreso.`;
       await refreshSales();
     } catch (error) {
       message = String(error);
@@ -151,6 +154,19 @@
     try {
       invoice = await api.issueInvoice(sale.sale.id);
       message = `Factura ${invoice.series}-${String(invoice.number).padStart(6, '0')} emitida.`;
+    } catch (error) {
+      message = String(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function reprintTicket() {
+    if (!sale || !sale.sale.ticket_number || busy) return;
+    busy = true;
+    try {
+      printSummary = await api.printTicket(sale.sale.id, true);
+      message = `Copia de ticket generada: ${printSummary.file}`;
     } catch (error) {
       message = String(error);
     } finally {
@@ -363,6 +379,14 @@
           <button
             class="secondary"
             type="button"
+            disabled={!sale || !sale.sale.ticket_number || busy}
+            onclick={() => void reprintTicket()}
+          >
+            Reimprimir ticket
+          </button>
+          <button
+            class="secondary"
+            type="button"
             disabled={!sale || !sale.sale.ticket_number || !!sale.sale.invoice_id || busy}
             onclick={() => void issueInvoice()}
           >
@@ -438,6 +462,14 @@
           {/each}
         </div>
       </section>
+
+      {#if printSummary}
+        <section class="panel invoice-card">
+          <p class="eyebrow">IMPRESIÓN</p>
+          <h2>{printSummary.success ? 'Ticket generado' : 'Pendiente'}</h2>
+          <p class="muted small">{printSummary.bytes} bytes · {printSummary.file}</p>
+        </section>
+      {/if}
 
       {#if invoice}
         <section class="panel invoice-card">

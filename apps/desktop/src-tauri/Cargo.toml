@@ -19,5 +19,6 @@ time = { version = "0.3", features = ["serde", "formatting", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tpv-application = { path = "../../../crates/tpv-application" }
 tpv-domain = { path = "../../../crates/tpv-domain" }
+tpv-print = { path = "../../../crates/tpv-print" }
 tpv-storage-sqlite = { path = "../../../crates/tpv-storage-sqlite" }
 uuid = { version = "1", features = ["v7", "serde"] }

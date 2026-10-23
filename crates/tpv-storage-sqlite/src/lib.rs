@@ -7,6 +7,7 @@ mod cash;
 mod error;
 mod helpers;
 mod persistence;
+mod prints;
 mod sales;
 mod seed;
 mod store;
