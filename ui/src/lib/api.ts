@@ -178,6 +178,16 @@ export interface PrintSummary {
   success: boolean;
 }
 
+export type CashMovementKind = 'expense' | 'withdrawal' | 'deposit';
+
+export interface CashMovement {
+  id: string;
+  kind: CashMovementKind;
+  amount: MoneyCents;
+  reason: string;
+  created_at: string;
+}
+
 export interface CashSession {
   id: string;
   store_id: string;
@@ -185,7 +195,7 @@ export interface CashSession {
   opened_by: string;
   opened_at: string;
   opening_float: MoneyCents;
-  movements: unknown[];
+  movements: CashMovement[];
   close_history: CashCloseRecord[];
   reopen_history: unknown[];
   state: 'open' | 'closed';
@@ -310,6 +320,12 @@ export const api = {
       countedVoucherCents
     }),
   cashStatus: () => invoke<CashSession | null>('cash_status'),
+  cashMovement: (
+    sessionId: string,
+    kind: CashMovementKind,
+    amountCents: number,
+    reason: string
+  ) => invoke<CashSession>('cash_movement', { sessionId, kind, amountCents, reason }),
   printTicket: (saleId: string, reprint = false) =>
     invoke<PrintSummary>('print_ticket', { saleId, reprint }),
   printPending: () => invoke<unknown[]>('print_pending'),

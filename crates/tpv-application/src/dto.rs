@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tpv_domain::Money;
-use tpv_domain::cash::CashCount;
+use tpv_domain::cash::{CashCount, CashMovementKind};
 use tpv_domain::ids::{CustomerId, ProductId, RegisterId, SaleId, SellerId, StoreId, UserId};
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::people::Role;
@@ -105,6 +105,14 @@ pub struct OpenCashRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CashExpenseRequest {
     pub session_id: tpv_domain::ids::CashSessionId,
+    pub amount_cents: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashMovementRequest {
+    pub session_id: tpv_domain::ids::CashSessionId,
+    pub kind: CashMovementKind,
     pub amount_cents: i64,
     pub reason: String,
 }

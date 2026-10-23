@@ -45,6 +45,7 @@ test.describe('TPV desktop UI', () => {
       });
 
       const catalogItems: Array<Record<string, unknown>> = [];
+      let cashSession: any = null;
       const api = {
         async current_user() {
           return session;
@@ -81,6 +82,41 @@ test.describe('TPV desktop UI', () => {
             ],
             open_cash: null
           };
+        },
+        async open_cash() {
+          cashSession = {
+            id: crypto.randomUUID(),
+            store_id: storeId,
+            register_id: registerId,
+            opened_by: userId,
+            opened_at: now(),
+            opening_float: 10000,
+            movements: [],
+            close_history: [],
+            reopen_history: [],
+            state: 'open',
+            version: 1
+          };
+          return cashSession;
+        },
+        async cash_status() {
+          return cashSession;
+        },
+        async cash_movement(
+          sessionId: string,
+          kind: string,
+          amountCents: number,
+          reason: string
+        ) {
+          if (!cashSession || cashSession.id !== sessionId) throw 'caja no abierta';
+          cashSession.movements.push({
+            id: crypto.randomUUID(),
+            kind,
+            amount: amountCents,
+            reason,
+            created_at: now()
+          });
+          return cashSession;
         },
         async list_sales() {
           return sale && sale.ticket_number ? [saleView()] : [];
@@ -243,6 +279,17 @@ test.describe('TPV desktop UI', () => {
               return api.logout();
             case 'bootstrap':
               return api.bootstrap();
+            case 'open_cash':
+              return api.open_cash();
+            case 'cash_status':
+              return api.cash_status();
+            case 'cash_movement':
+              return api.cash_movement(
+                String(args.sessionId),
+                String(args.kind),
+                Number(args.amountCents),
+                String(args.reason)
+              );
             case 'list_sales':
               return api.list_sales();
             case 'sync_status':
@@ -331,6 +378,16 @@ test.describe('TPV desktop UI', () => {
 
     await page.getByRole('button', { name: 'Sincronizar ahora' }).click();
     await expect(page.getByText(/Sincronizado: 1 aceptados, 1 usuario/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Abrir caja · fondo 100,00 €' }).click();
+    await expect(page.getByText('Caja abierta con fondo de 100,00 €.')).toBeVisible();
+    await page.getByLabel('Importe del movimiento (€)').fill('3,50');
+    await page.getByLabel('Motivo del movimiento').fill('Compra de hielo');
+    await page.getByRole('button', { name: 'Registrar movimiento' }).click();
+    await expect(page.getByText(/Movimiento registrado: Gasto 3.50 €/)).toBeVisible();
+    const movementRow = page.locator('.movement-row', { hasText: 'Compra de hielo' });
+    await expect(movementRow).toContainText('Gasto');
+    await expect(movementRow).toContainText('−3.50 €');
 
     await page.getByRole('button', { name: 'Catálogo' }).click();
     await expect(page.getByRole('dialog', { name: 'Catálogo' })).toBeVisible();

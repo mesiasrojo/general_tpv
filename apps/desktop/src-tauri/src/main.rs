@@ -9,18 +9,20 @@ use tauri::{Manager, State};
 use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
-    CashRepository, CashService, CatalogRepository, CatalogService, CloseCashRequest,
-    ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, MasterDataRepository,
-    MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
-    ProductService, QuarantinedEvent, RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository,
-    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
-    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UpsertProductRequest,
-    UserRepository,
+    CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
+    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService,
+    MasterDataRepository, MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService,
+    PrinterPort, ProductService, QuarantinedEvent, RectifyInvoiceRequest, ResetPasswordRequest,
+    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
+    SyncContext, SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest,
+    UpsertProductRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
-use tpv_domain::cash::{CashCount, CashSession};
+use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
 use tpv_domain::catalog::Product;
-use tpv_domain::ids::{CustomerId, InvoiceId, RegisterId, SellerId, StoreId, UserId};
+use tpv_domain::ids::{
+    CashSessionId, CustomerId, InvoiceId, RegisterId, SellerId, StoreId, UserId,
+};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Role, UserAccount, UserProvision};
@@ -379,6 +381,31 @@ async fn cash_status(state: State<'_, AppState>) -> Result<Option<CashSession>, 
     state
         .cash
         .find_open(state.demo.register_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn cash_movement(
+    state: State<'_, AppState>,
+    session_id: CashSessionId,
+    kind: CashMovementKind,
+    amount_cents: i64,
+    reason: String,
+) -> Result<CashSession, String> {
+    let current = require_sell(state.inner())?;
+    if kind != CashMovementKind::Expense && !current.user.role.can_reopen_cash() {
+        return Err("solo un responsable puede registrar retiradas o ingresos".into());
+    }
+    let state = state.inner().clone();
+    state
+        .cash
+        .movement(CashMovementRequest {
+            session_id,
+            kind,
+            amount_cents,
+            reason,
+        })
         .await
         .map_err(|error| error.to_string())
 }
@@ -995,6 +1022,7 @@ fn main() {
             open_cash,
             close_cash,
             cash_status,
+            cash_movement,
             print_ticket,
             print_pending,
             list_print_jobs,
@@ -1081,6 +1109,7 @@ mod e2e_tests {
                 open_cash,
                 close_cash,
                 cash_status,
+                cash_movement,
                 print_ticket,
                 print_pending,
                 list_print_jobs,
@@ -1150,7 +1179,21 @@ mod e2e_tests {
         assert_eq!(info["store_name"], "100%SHOPPING");
         let store_id = info["store_id"].as_str().expect("store id").to_string();
 
-        invoke(&webview, "open_cash", json!({})).expect("open cash");
+        let opened = invoke(&webview, "open_cash", json!({})).expect("open cash");
+        let cash_id = opened["id"].as_str().expect("cash session id").to_string();
+        let cash = invoke(
+            &webview,
+            "cash_movement",
+            json!({
+                "sessionId": cash_id,
+                "kind": "expense",
+                "amountCents": 500,
+                "reason": "Compra de hielo"
+            }),
+        )
+        .expect("cash expense");
+        assert_eq!(cash["movements"][0]["kind"], "expense");
+        assert_eq!(cash["movements"][0]["amount"], 500);
         let sale = invoke(&webview, "start_sale", json!({})).expect("start sale");
         let sale_id = sale["sale"]["id"].as_str().expect("sale id").to_string();
 
@@ -1315,6 +1358,23 @@ mod e2e_tests {
             }),
         )
         .expect_err("cashier cannot rectify invoices");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("responsable")
+        );
+        let forbidden = invoke(
+            &webview,
+            "cash_movement",
+            json!({
+                "sessionId": cash_id,
+                "kind": "withdrawal",
+                "amountCents": 100,
+                "reason": "Intento de cajero"
+            }),
+        )
+        .expect_err("cashier cannot withdraw cash");
         assert!(
             forbidden
                 .as_str()

@@ -6,6 +6,7 @@
     stateLabel,
     taxPercent,
     type AppInfo,
+    type CashMovementKind,
     type CashSession,
     type Invoice,
     type LineKind,
@@ -51,6 +52,10 @@
   let syncSummary = $state<SyncSummary | null>(null);
   let backupBusy = $state(false);
   let rectifyBusy = $state(false);
+  let movementBusy = $state(false);
+  let movementKind = $state<CashMovementKind>('expense');
+  let movementAmount = $state('0,00');
+  let movementReason = $state('');
   let usersOpen = $state(false);
   let users = $state<UserAccount[]>([]);
   let stores = $state<Store[]>([]);
@@ -180,6 +185,21 @@
 
   function shortId(value: string): string {
     return value.length > 12 ? `${value.slice(0, 8)}…` : value;
+  }
+
+  function movementLabel(kind: CashMovementKind): string {
+    switch (kind) {
+      case 'expense':
+        return 'Gasto';
+      case 'withdrawal':
+        return 'Retirada';
+      case 'deposit':
+        return 'Ingreso';
+    }
+  }
+
+  function movementSignedAmount(kind: CashMovementKind, cents: number): string {
+    return `${kind === 'deposit' ? '+' : '−'}${formatMoney(cents)}`;
   }
 
   async function load() {
@@ -631,6 +651,36 @@
     }
   }
 
+  async function registerCashMovement() {
+    if (!cash || movementBusy) return;
+    const amount = Number.parseFloat(movementAmount.replace(',', '.'));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      message = 'El importe del movimiento debe ser positivo.';
+      return;
+    }
+    if (!movementReason.trim()) {
+      message = 'El motivo del movimiento es obligatorio.';
+      return;
+    }
+    const cents = Math.round(amount * 100);
+    movementBusy = true;
+    try {
+      cash = await api.cashMovement(
+        cash.id,
+        movementKind,
+        cents,
+        movementReason.trim()
+      );
+      message = `Movimiento registrado: ${movementLabel(movementKind)} ${formatMoney(cents)}.`;
+      movementAmount = '0,00';
+      movementReason = '';
+    } catch (error) {
+      message = String(error);
+    } finally {
+      movementBusy = false;
+    }
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     if (event.key === 'F10') {
       event.preventDefault();
@@ -893,6 +943,48 @@
           <p class="muted small">Fondo inicial: {formatMoney(cash.opening_float)}</p>
           {#if lastClose}
             <p class="muted small">Último cierre: {formatMoney(lastClose.expected.cash)} esperado · {formatMoney(lastClose.differences.cash)} diferencia</p>
+          {/if}
+          <div class="movement-form">
+            <label class="field">
+              <span>Tipo de movimiento</span>
+              <select bind:value={movementKind}>
+                <option value="expense">Gasto</option>
+                {#if session.user.role === 'admin' || session.user.role === 'manager'}
+                  <option value="withdrawal">Retirada</option>
+                  <option value="deposit">Ingreso</option>
+                {/if}
+              </select>
+            </label>
+            <label class="field">
+              <span>Importe del movimiento (€)</span>
+              <input bind:value={movementAmount} inputmode="decimal" />
+            </label>
+            <label class="field">
+              <span>Motivo del movimiento</span>
+              <input bind:value={movementReason} />
+            </label>
+            <button
+              class="secondary full"
+              type="button"
+              disabled={movementBusy}
+              onclick={() => void registerCashMovement()}
+            >
+              Registrar movimiento
+            </button>
+          </div>
+          {#if cash.movements.length > 0}
+            <div class="movement-list">
+              <p class="eyebrow">MOVIMIENTOS</p>
+              {#each cash.movements as movement (movement.id)}
+                <div class="movement-row">
+                  <span>{movementLabel(movement.kind)}</span>
+                  <span class="muted small">{movement.reason}</span>
+                  <strong class:deposit={movement.kind === 'deposit'}>
+                    {movementSignedAmount(movement.kind, movement.amount)}
+                  </strong>
+                </div>
+              {/each}
+            </div>
           {/if}
           <label class="field">
             <span>Efectivo contado (€)</span>
@@ -1616,6 +1708,33 @@
   .badge.warn {
     background: rgb(255 176 92 / 18%);
     color: #ffb05c;
+  }
+
+  .movement-form {
+    display: grid;
+    gap: 8px;
+    padding: 10px 0;
+    margin: 10px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .movement-list {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  .movement-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 8px;
+    align-items: center;
+    font-size: 0.85rem;
+  }
+
+  .movement-row strong.deposit {
+    color: #70e0a1;
   }
 
   .sync-counts {

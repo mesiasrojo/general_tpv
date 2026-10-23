@@ -63,6 +63,7 @@ Base local **SQLCipher** (SQLite + AES-256) con WAL y migraciones embebidas:
 - `invoices`, `invoice_lines`.
 - `document_sequences` para numeración atómica.
 - `cash_sessions` con movimientos, cierres y reaperturas en JSON.
+- Los movimientos de caja admiten gasto, retirada e ingreso; cada uno exige importe positivo y motivo.
 - `sync_outbox` con el sobre completo del evento.
 - `local_identity` con el tenant y dispositivo estables del terminal.
 - `audit_log` append-only.
@@ -209,6 +210,7 @@ Implementado:
 - Renderer ESC/POS probado con vectores de bytes y cola persistente.
 - Login local con Argon2id, bloqueo por intentos, roles y auditoría.
 - RBAC por comando: venta, caja, impresión, sync y gestión de usuarios.
+- Movimientos de caja de gasto, retirada e ingreso con importe, motivo, evento `cash.movement` y auditoría.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
 - Protección del último administrador activo y de la propia cuenta.

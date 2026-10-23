@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use tpv_domain::audit::{AuditAction, AuditEvent};
-use tpv_domain::cash::{CashCloseRecord, CashSession};
+use tpv_domain::cash::{CashCloseRecord, CashMovementKind, CashSession};
 use tpv_domain::ids::{CashSessionId, RegisterId, StoreId};
 use tpv_domain::money::Money;
 use tpv_domain::sync::SyncEvent;
 
 use crate::dto::{
-    CashExpenseRequest, CloseCashRequest, OpenCashRequest, ReopenCashRequest, SyncContext,
+    CashExpenseRequest, CashMovementRequest, CloseCashRequest, OpenCashRequest, ReopenCashRequest,
+    SyncContext,
 };
 use crate::error::{ApplicationError, Result};
 use crate::ports::{CashRepository, Clock, SaleRepository};
@@ -70,13 +71,31 @@ impl CashService {
     }
 
     pub async fn expense(&self, request: CashExpenseRequest) -> Result<CashSession> {
+        self.movement(CashMovementRequest {
+            session_id: request.session_id,
+            kind: CashMovementKind::Expense,
+            amount_cents: request.amount_cents,
+            reason: request.reason,
+        })
+        .await
+    }
+
+    pub async fn movement(&self, request: CashMovementRequest) -> Result<CashSession> {
         let mut session = self.load(request.session_id).await?;
         let now = self.clock.now();
-        session.expense(
-            Money::from_cents(request.amount_cents),
-            request.reason.clone(),
-            now,
-        )?;
+        let amount = Money::from_cents(request.amount_cents);
+        match request.kind {
+            CashMovementKind::Expense => session.expense(amount, request.reason.clone(), now)?,
+            CashMovementKind::Withdrawal => {
+                session.withdrawal(amount, request.reason.clone(), now)?;
+            }
+            CashMovementKind::Deposit => session.deposit(amount, request.reason.clone(), now)?,
+        }
+        let movement = match request.kind {
+            CashMovementKind::Expense => "expense",
+            CashMovementKind::Withdrawal => "withdrawal",
+            CashMovementKind::Deposit => "deposit",
+        };
         let event = self.build_event(
             session.store_id,
             "cash_session",
@@ -94,7 +113,7 @@ impl CashService {
             "cash_session",
             session.id.to_string(),
             serde_json::json!({
-                "movement": "expense",
+                "movement": movement,
                 "amount_cents": request.amount_cents,
                 "reason": request.reason,
             }),
