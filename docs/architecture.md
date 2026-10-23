@@ -228,11 +228,14 @@ Implementado:
 - Consola backoffice de dispositivos y conflictos, con revocación y prueba Playwright.
 - Usuarios centrales con Argon2id, API de gestión, consola backoffice y provisioning `user.provisioned`.
 - Aplicación del provisioning en el pull del CLI y en el botón de sincronización de Tauri.
+- CI con tests Rust, PostgreSQL, comandos Tauri, E2E de UI y auditoría de dependencias.
+- Release multi-plataforma con SBOM SPDX, checksums SHA-256 y borrador de GitHub Release.
+- Dependabot semanal para Cargo, npm y GitHub Actions.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
 - Ejecución HIL en tienda piloto, certificación de impresoras y reglas udev/WinUSB.
-- Firma de actualizaciones, SBOM y pipeline de release.
+- Firma nativa de instaladores (Authenticode y notarización Apple) y publicación pública del release.
 
 ## 8. Verifactu
 
@@ -241,4 +244,4 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 ## 9. Siguiente iteración recomendada
 
 1. Ejecución HIL en tienda piloto y ajuste de umbrales de carga.
-2. Firma de actualizaciones, SBOM y pipeline de release.
+2. Firma nativa de instaladores y publicación de la primera release pública.

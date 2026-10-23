@@ -5,25 +5,129 @@ on:
     branches: [main, master, develop]
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+
 jobs:
   rust:
     name: Rust · fmt, clippy, tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Check release versions
+        run: ./scripts/check-versions.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
+      - name: Release build
+        run: cargo build --release -p tpv-cli
+
+  postgres:
+    name: PostgreSQL · central store
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: tpv
+          POSTGRES_USER: tpv
+          POSTGRES_PASSWORD: tpv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tpv -d tpv"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://tpv:tpv@127.0.0.1:5432/tpv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: PostgreSQL integration tests
+        run: cargo test -p tpv-server -- --ignored
+
+  supply-chain:
+    name: Supply chain · advisories, licenses, npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            backoffice/package-lock.json
+      - name: Audit TPV UI production dependencies
+        working-directory: ui
+        run: npm ci && npm audit --omit=dev --audit-level=high
+      - name: Audit backoffice production dependencies
+        working-directory: backoffice
+        run: npm ci && npm audit --omit=dev --audit-level=high
+
+  desktop:
+    name: Desktop · Tauri commands
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            apps/desktop/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix ui && npm ci --prefix apps/desktop
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: Format
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+      - name: Clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
 
   frontend:
-    name: Svelte · check and build
+    name: Svelte · check, build and E2E
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +147,9 @@ jobs:
       - name: Build TPV UI
         working-directory: ui
         run: npm run build
+      - name: E2E TPV UI
+        working-directory: ui
+        run: npm run test:e2e
       - name: Install backoffice
         working-directory: backoffice
         run: npm ci
@@ -52,3 +159,15 @@ jobs:
       - name: Build backoffice
         working-directory: backoffice
         run: npm run build
+      - name: E2E backoffice
+        working-directory: backoffice
+        run: npm run test:e2e
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: |
+            ui/test-results
+            backoffice/test-results
+          if-no-files-found: ignore

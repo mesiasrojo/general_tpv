@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Check version consistency
+        run: ./scripts/check-versions.sh "${{ github.ref_name }}"
+
+  build:
+    name: Build · ${{ matrix.label }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            target: linux-x86_64
+            cli: target/release/tpv-cli
+          - os: windows-latest
+            label: windows-x86_64
+            target: windows-x86_64
+            cli: target/release/tpv-cli.exe
+          - os: macos-latest
+            label: macos-aarch64
+            target: macos-aarch64
+            cli: target/release/tpv-cli
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            apps/desktop/package-lock.json
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+      - name: Install frontend dependencies
+        run: npm ci --prefix ui && npm ci --prefix apps/desktop
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build --release -p tpv-cli
+      - name: Package CLI
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "${{ matrix.cli }}" "artifacts/tpv-cli-${{ matrix.target }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            mv "artifacts/tpv-cli-${{ matrix.target }}" "artifacts/tpv-cli-${{ matrix.target }}.exe"
+            powershell -Command "Compress-Archive -Path 'artifacts/tpv-cli-${{ matrix.target }}.exe' -DestinationPath 'artifacts/general-tpv-cli-${{ matrix.target }}.zip'"
+            rm "artifacts/tpv-cli-${{ matrix.target }}.exe"
+          else
+            tar -czf "artifacts/general-tpv-cli-${{ matrix.target }}.tar.gz" -C artifacts "tpv-cli-${{ matrix.target }}"
+            rm "artifacts/tpv-cli-${{ matrix.target }}"
+          fi
+      - name: Build and upload Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: General TPV ${{ github.ref_name }}
+          releaseBody: |
+            Release ${{ github.ref_name }} de General TPV.
+            Consulta `docs/release.md` para verificar artefactos y checksums.
+          releaseDraft: true
+          prerelease: false
+          args: --verbose
+      - name: Upload CLI artifact to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: artifacts/*
+
+  sbom:
+    name: SBOM
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: general-tpv-${{ github.ref_name }}-sbom.spdx.json
+      - name: Upload SBOM to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: general-tpv-${{ github.ref_name }}-sbom.spdx.json
+
+  checksums:
+    name: Checksums
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${{ github.ref_name }}" --dir release-assets --pattern '*' || true
+          cd release-assets
+          rm -f SHA256SUMS.txt
+          if ! compgen -G "*" > /dev/null; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+          sha256sum * > SHA256SUMS.txt
+      - name: Upload checksums
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: release-assets/SHA256SUMS.txt

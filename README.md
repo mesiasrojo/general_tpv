@@ -26,6 +26,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
 | Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
+| Pipeline de release | Implementado (builds multi-OS, SBOM SPDX, checksums y borrador de release) |
+| Cadena de suministro | Implementado (cargo-deny, npm audit y Dependabot) |
 | Certificación con hardware físico | Pendiente de ejecución en tienda piloto |
 
 ## Arranque rápido
@@ -239,8 +241,21 @@ cd backoffice && npm run check && npm run build && npm run test:e2e
 
 La prueba de comandos Tauri usa el runtime mock oficial y recorre login, caja, venta, cobro, ticket, factura, backup y RBAC. La prueba de UI usa Playwright con el Chrome instalado en el sistema y un puente IPC simulado; no descarga navegadores adicionales. La prueba del backoffice cubre usuarios centrales, dispositivos, conflictos y revocación.
 
+## Release
+
+El workflow de release se dispara con una etiqueta `v*`:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Genera builds del CLI y de la app Tauri para Linux, Windows y macOS, un SBOM SPDX, `SHA256SUMS.txt` y un borrador de release. Antes de etiquetar, ejecuta `./scripts/check-versions.sh v0.1.0`; el procedimiento completo está en [`docs/release.md`](docs/release.md).
+
 ## Documentación
 
 - [`docs/plan_version2.md`](docs/plan_version2.md): plan de producto, arquitectura, fases, pruebas y supuestos.
 - [`docs/architecture.md`](docs/architecture.md): mapa de la implementación actual y siguientes pasos.
+- [`docs/release.md`](docs/release.md): preflight, firma, SBOM, checksums y rollback.
+- [`SECURITY.md`](SECURITY.md): reporte de vulnerabilidades y prácticas de seguridad.
 - [`docs/descripcion_apliciacion_antigua.md`](docs/descripcion_apliciacion_antigua.md): análisis de la aplicación legada.
