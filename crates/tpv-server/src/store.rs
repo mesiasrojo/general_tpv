@@ -110,6 +110,39 @@ pub struct UpdateCentralUser {
 }
 
 #[derive(Debug, Clone)]
+pub struct EventQuery {
+    pub limit: u32,
+    pub offset: u32,
+    pub store_id: Option<Uuid>,
+    pub device_id: Option<Uuid>,
+    pub event_type: Option<String>,
+    pub from: Option<time::OffsetDateTime>,
+    pub to: Option<time::OffsetDateTime>,
+    pub sales_only: bool,
+}
+
+impl Default for EventQuery {
+    fn default() -> Self {
+        Self {
+            limit: 50,
+            offset: 0,
+            store_id: None,
+            device_id: None,
+            event_type: None,
+            from: None,
+            to: None,
+            sales_only: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EventPage {
+    pub items: Vec<StoredEvent>,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewCentralSession {
     pub token_hash: String,
     pub user_id: Uuid,
@@ -167,8 +200,8 @@ pub trait CentralStore: Send + Sync {
         store_id: Option<Uuid>,
         limit: u32,
     ) -> Result<Vec<StoredEvent>, StoreError>;
-    async fn list_events(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError>;
-    async fn list_sales(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError>;
+    async fn list_events(&self, query: &EventQuery) -> Result<EventPage, StoreError>;
+    async fn list_sales(&self, query: &EventQuery) -> Result<EventPage, StoreError>;
     async fn health(&self) -> Result<StoreHealth, StoreError>;
     async fn enroll_device(&self, device: EnrollDevice) -> Result<DeviceRecord, StoreError>;
     async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StoreError>;
@@ -302,20 +335,16 @@ impl CentralStore for MemoryStore {
             .collect())
     }
 
-    async fn list_events(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError> {
+    async fn list_events(&self, query: &EventQuery) -> Result<EventPage, StoreError> {
         let ledger = self.inner.read().await;
-        Ok(ledger.events.iter().take(limit as usize).cloned().collect())
+        memory_event_page(&ledger.events, query)
     }
 
-    async fn list_sales(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError> {
+    async fn list_sales(&self, query: &EventQuery) -> Result<EventPage, StoreError> {
         let ledger = self.inner.read().await;
-        Ok(ledger
-            .events
-            .iter()
-            .filter(|stored| stored.event.aggregate_type == "sale")
-            .take(limit as usize)
-            .cloned()
-            .collect())
+        let mut query = query.clone();
+        query.sales_only = true;
+        memory_event_page(&ledger.events, &query)
     }
 
     async fn health(&self) -> Result<StoreHealth, StoreError> {
@@ -621,6 +650,15 @@ pub struct PostgresStore {
     pool: PgPool,
 }
 
+/// Filtros compartidos por el conteo y la página de eventos. Los parámetros
+/// `$1..$6` son store, device, tipo, desde, hasta y solo-ventas.
+const EVENT_FILTER_SQL: &str = "($1::uuid IS NULL OR store_id = $1)
+   AND ($2::uuid IS NULL OR device_id = $2)
+   AND ($3::text IS NULL OR event_type = $3)
+   AND ($4::timestamptz IS NULL OR occurred_at >= $4)
+   AND ($5::timestamptz IS NULL OR occurred_at <= $5)
+   AND (NOT $6 OR aggregate_type = 'sale')";
+
 impl PostgresStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let pool = PgPoolOptions::new()
@@ -641,26 +679,43 @@ impl PostgresStore {
         Ok(cursor as u64)
     }
 
-    async fn query_events(
-        &self,
-        store_id: Option<Uuid>,
-        limit: u32,
-        only_sales: bool,
-    ) -> Result<Vec<StoredEvent>, StoreError> {
-        let rows = sqlx::query(
+    async fn query_events(&self, query: &EventQuery) -> Result<EventPage, StoreError> {
+        let total = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*) FROM central_events WHERE {EVENT_FILTER_SQL}"
+        ))
+        .bind(query.store_id)
+        .bind(query.device_id)
+        .bind(&query.event_type)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(query.sales_only)
+        .fetch_one(&self.pool)
+        .await?;
+        let rows = sqlx::query(&format!(
             "SELECT seq, envelope, received_at
              FROM central_events
-             WHERE ($1::uuid IS NULL OR store_id = $1)
-               AND (NOT $2 OR aggregate_type = 'sale')
-             ORDER BY seq ASC
-             LIMIT $3",
-        )
-        .bind(store_id)
-        .bind(only_sales)
-        .bind(i64::from(limit))
+             WHERE {EVENT_FILTER_SQL}
+             ORDER BY seq DESC
+             LIMIT $7 OFFSET $8"
+        ))
+        .bind(query.store_id)
+        .bind(query.device_id)
+        .bind(&query.event_type)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(query.sales_only)
+        .bind(i64::from(query.limit))
+        .bind(i64::from(query.offset))
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_event).collect()
+        let items = rows
+            .iter()
+            .map(row_to_event)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EventPage {
+            items,
+            total: u64::try_from(total).unwrap_or_default(),
+        })
     }
 }
 
@@ -777,12 +832,14 @@ impl CentralStore for PostgresStore {
         rows.iter().map(row_to_event).collect()
     }
 
-    async fn list_events(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError> {
-        self.query_events(None, limit, false).await
+    async fn list_events(&self, query: &EventQuery) -> Result<EventPage, StoreError> {
+        self.query_events(query).await
     }
 
-    async fn list_sales(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError> {
-        self.query_events(None, limit, true).await
+    async fn list_sales(&self, query: &EventQuery) -> Result<EventPage, StoreError> {
+        let mut query = query.clone();
+        query.sales_only = true;
+        self.query_events(&query).await
     }
 
     async fn health(&self) -> Result<StoreHealth, StoreError> {
@@ -1174,6 +1231,52 @@ impl CentralStore for PostgresStore {
             .await?;
         Ok(())
     }
+}
+
+fn memory_event_page(events: &[StoredEvent], query: &EventQuery) -> Result<EventPage, StoreError> {
+    let filtered = events
+        .iter()
+        .rev()
+        .filter(|stored| {
+            if query.sales_only && stored.event.aggregate_type != "sale" {
+                return false;
+            }
+            if let Some(store_id) = query.store_id {
+                if stored.event.store_id.as_uuid() != store_id {
+                    return false;
+                }
+            }
+            if let Some(device_id) = query.device_id {
+                if stored.event.device_id.as_uuid() != device_id {
+                    return false;
+                }
+            }
+            if let Some(event_type) = &query.event_type {
+                if &stored.event.event_type != event_type {
+                    return false;
+                }
+            }
+            if let Some(from) = query.from {
+                if stored.event.occurred_at < from {
+                    return false;
+                }
+            }
+            if let Some(to) = query.to {
+                if stored.event.occurred_at > to {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect::<Vec<_>>();
+    let total = u64::try_from(filtered.len()).unwrap_or_default();
+    let items = filtered
+        .into_iter()
+        .skip(query.offset as usize)
+        .take(query.limit as usize)
+        .cloned()
+        .collect();
+    Ok(EventPage { items, total })
 }
 
 fn role_to_str(role: Role) -> &'static str {

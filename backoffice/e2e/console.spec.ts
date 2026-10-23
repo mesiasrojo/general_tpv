@@ -41,6 +41,33 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
     outcome: 'accept_incoming',
     detected_at: '2026-10-23T12:00:00Z'
   };
+  const saleEvent = {
+    seq: 3,
+    received_at: '2026-10-23T12:00:00Z',
+    event: {
+      event_id: '00000000-0000-7000-8000-000000000501',
+      tenant_id: activeDevice.tenant_id,
+      store_id: activeDevice.store_id,
+      device_id: activeDevice.device_id,
+      device_seq: 3,
+      aggregate_type: 'sale',
+      aggregate_id: '00000000-0000-7000-8000-000000000601',
+      event_type: 'sale.confirmed',
+      schema_version: 1,
+      occurred_at: '2026-10-23T11:58:00Z',
+      payload: {
+        id: '00000000-0000-7000-8000-000000000601',
+        total_cents: 1250,
+        customer_id: '00000000-0000-7000-8000-000000000701',
+        lines: [
+          { description: 'Camiseta básica', quantity: '2', unit_price: '5.00', discount_bp: 0 },
+          { description: 'Bolsa', quantity: '1', unit_price: '2.50', discount_bp: 0 }
+        ],
+        payments: [{ method: 'cash', amount: 1250 }]
+      },
+      hash: 'test-hash'
+    }
+  };
 
   let centralUsers = [
     {
@@ -60,7 +87,16 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
   await page.route('**/health', (route) =>
     route.fulfill({ json: { status: 'ok', events: 3, cursor: 3 } })
   );
-  await page.route('**/api/v1/events', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/events*', (route) => {
+    const eventType = new URL(route.request().url()).searchParams.get('event_type');
+    const items = eventType && eventType !== 'sale.confirmed' ? [] : [saleEvent];
+    return route.fulfill({
+      json: { items, total: items.length, limit: 50, offset: 0 }
+    });
+  });
+  await page.route('**/api/v1/sales*', (route) =>
+    route.fulfill({ json: { items: [saleEvent], total: 1, limit: 50, offset: 0 } })
+  );
   await page.route('**/api/v1/devices', (route) =>
     route.fulfill({ json: [activeDevice, revokedDevice] })
   );
@@ -219,6 +255,29 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Dispositivos registrados' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Conflictos detectados' })).toBeVisible();
   await expect(page.getByRole('row', { name: /supervisor/ })).toBeVisible();
+
+  await expect(page.getByRole('heading', { name: 'Ventas y trazabilidad' })).toBeVisible();
+  const saleRow = page.getByRole('row', { name: /sale\.confirmed/ }).first();
+  await expect(saleRow.getByText('12.50 €')).toBeVisible();
+  await saleRow.getByRole('button', { name: 'Ver' }).click();
+  const detailDialog = page.getByRole('dialog');
+  await expect(detailDialog.getByRole('heading', { name: 'sale.confirmed' })).toBeVisible();
+  await expect(
+    detailDialog.getByRole('cell', { name: 'Camiseta básica', exact: true })
+  ).toBeVisible();
+  await expect(detailDialog.getByRole('cell', { name: 'cash', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(detailDialog).toHaveCount(0);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Exportar página CSV' }).click();
+  expect((await downloadPromise).suggestedFilename()).toMatch(/^ventas-\d{4}-\d{2}-\d{2}\.csv$/);
+
+  await page.getByLabel('Tipo de evento').fill('invoice.issued');
+  await page.getByRole('button', { name: 'Aplicar' }).click();
+  await expect(page.getByText('Sin eventos.')).toBeVisible();
+  await page.getByRole('button', { name: 'Limpiar' }).click();
+  await expect(page.getByRole('row', { name: /sale\.confirmed/ }).first()).toBeVisible();
 
   await page.getByLabel('Usuario').fill('central.cashier');
   await page.getByLabel('Nombre visible').fill('Cajero Central');

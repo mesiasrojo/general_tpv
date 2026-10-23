@@ -19,6 +19,13 @@
     received_at: string;
   }
 
+  interface EventPage {
+    items: StoredEvent[];
+    total: number;
+    limit: number;
+    offset: number;
+  }
+
   interface Health {
     status: string;
     events: number;
@@ -112,6 +119,19 @@
 
   let health = $state<Health | null>(null);
   let events = $state<StoredEvent[]>([]);
+  let eventsTotal = $state(0);
+  let eventsOffset = $state(0);
+  let sales = $state<StoredEvent[]>([]);
+  let salesTotal = $state(0);
+  let salesOffset = $state(0);
+  let invoiceTotal = $state(0);
+  let selectedEvent = $state<StoredEvent | null>(null);
+  let filterStoreId = $state('');
+  let filterDeviceId = $state('');
+  let filterEventType = $state('');
+  let filterFrom = $state('');
+  let filterTo = $state('');
+  const pageSize = 50;
   let devices = $state<DeviceRecord[]>([]);
   let conflicts = $state<MasterDataConflict[]>([]);
   let theme = $state<Theme>('light_theme');
@@ -132,10 +152,11 @@
   let newUserRole = $state<UserRole>('cashier');
   let newUserPassword = $state('');
 
-  let sales = $derived(events.filter((item) => item.event.aggregate_type === 'sale'));
-  let invoices = $derived(events.filter((item) => item.event.aggregate_type === 'invoice'));
-  let lastSale = $derived(sales.at(-1) ?? null);
+  let lastSale = $state<StoredEvent | null>(null);
   let activeDevices = $derived(devices.filter((device) => device.status === 'active').length);
+  let storeOptions = $derived(
+    [...new Map(devices.map((device) => [device.store_id, device])).values()]
+  );
   let activeUsers = $derived(centralUsers.filter((user) => user.active).length);
   let canWrite = $derived(authUser?.role === 'admin');
 
@@ -262,6 +283,61 @@
     loginPassword = '';
   }
 
+  function localDateBoundary(date: string, endOfDay: boolean): string {
+    const [year = 1970, month = 1, day = 1] = date.split('-').map(Number);
+    const local = endOfDay
+      ? new Date(year, month - 1, day, 23, 59, 59, 999)
+      : new Date(year, month - 1, day, 0, 0, 0, 0);
+    return local.toISOString();
+  }
+
+  function eventQuery(offset: number, limit = pageSize, eventType = ''): string {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (filterStoreId) params.set('store_id', filterStoreId);
+    if (filterDeviceId) params.set('device_id', filterDeviceId);
+    if (filterFrom) params.set('from', localDateBoundary(filterFrom, false));
+    if (filterTo) params.set('to', localDateBoundary(filterTo, true));
+    if (eventType) params.set('event_type', eventType);
+    return params.toString();
+  }
+
+  function applyFilters() {
+    eventsOffset = 0;
+    salesOffset = 0;
+    void load();
+  }
+
+  function clearFilters() {
+    filterStoreId = '';
+    filterDeviceId = '';
+    filterEventType = '';
+    filterFrom = '';
+    filterTo = '';
+    applyFilters();
+  }
+
+  function nextSalesPage() {
+    if (salesOffset + pageSize >= salesTotal) return;
+    salesOffset += pageSize;
+    void load();
+  }
+
+  function previousSalesPage() {
+    salesOffset = Math.max(0, salesOffset - pageSize);
+    void load();
+  }
+
+  function nextEventsPage() {
+    if (eventsOffset + pageSize >= eventsTotal) return;
+    eventsOffset += pageSize;
+    void load();
+  }
+
+  function previousEventsPage() {
+    eventsOffset = Math.max(0, eventsOffset - pageSize);
+    void load();
+  }
+
   async function load() {
     if (!authUser) return;
     loading = true;
@@ -273,27 +349,55 @@
       const [
         healthResponse,
         eventsResponse,
+        salesResponse,
+        invoicesResponse,
         devicesResponse,
         conflictsResponse,
         usersResponse
       ] = await Promise.all([
         fetch(`${base}/health`),
-        fetch(`${base}/api/v1/events`, { headers }),
+        fetch(`${base}/api/v1/events?${eventQuery(eventsOffset, pageSize, filterEventType)}`, {
+          headers
+        }),
+        fetch(`${base}/api/v1/sales?${eventQuery(salesOffset)}`, { headers }),
+        fetch(`${base}/api/v1/events?${eventQuery(0, 1, 'invoice.issued')}`, { headers }),
         fetch(`${base}/api/v1/devices`, { headers }),
         fetch(`${base}/api/v1/master-data/conflicts`, { headers }),
         fetch(`${base}/api/v1/users`, { headers })
       ]);
       if (!healthResponse.ok) throw new Error(`health HTTP ${healthResponse.status}`);
-      if ([eventsResponse, devicesResponse, conflictsResponse, usersResponse].some((response) => response.status === 401)) {
+      const dataResponses = [
+        eventsResponse,
+        salesResponse,
+        invoicesResponse,
+        devicesResponse,
+        conflictsResponse,
+        usersResponse
+      ];
+      if (dataResponses.some((response) => response.status === 401)) {
         clearSession('La sesión ha caducado. Vuelve a iniciar sesión.');
         return;
       }
       if (!eventsResponse.ok) throw new Error(`events HTTP ${eventsResponse.status}`);
+      if (!salesResponse.ok) throw new Error(`sales HTTP ${salesResponse.status}`);
+      if (!invoicesResponse.ok) throw new Error(`invoices HTTP ${invoicesResponse.status}`);
       if (!devicesResponse.ok) throw new Error(`devices HTTP ${devicesResponse.status}`);
       if (!conflictsResponse.ok) throw new Error(`conflicts HTTP ${conflictsResponse.status}`);
       if (!usersResponse.ok) throw new Error(`users HTTP ${usersResponse.status}`);
       health = (await healthResponse.json()) as Health;
-      events = (await eventsResponse.json()) as StoredEvent[];
+      const eventsPage = (await eventsResponse.json()) as EventPage;
+      const salesPage = (await salesResponse.json()) as EventPage;
+      const invoicesPage = (await invoicesResponse.json()) as EventPage;
+      events = eventsPage.items;
+      eventsTotal = eventsPage.total;
+      eventsOffset = eventsPage.offset;
+      sales = salesPage.items;
+      salesTotal = salesPage.total;
+      salesOffset = salesPage.offset;
+      if (salesPage.offset === 0) {
+        lastSale = salesPage.items[0] ?? null;
+      }
+      invoiceTotal = invoicesPage.total;
       devices = (await devicesResponse.json()) as DeviceRecord[];
       conflicts = (await conflictsResponse.json()) as MasterDataConflict[];
       centralUsers = (await usersResponse.json()) as CentralUser[];
@@ -487,19 +591,23 @@
     return typeof value === 'number' ? `${(value / 100).toFixed(2)} €` : '—';
   }
 
-  function saleTotal(event: SyncEvent): string {
+  function saleTotalCents(event: SyncEvent): number | null {
     if (typeof event.payload.total_cents === 'number') {
-      return money(event.payload.total_cents);
+      return event.payload.total_cents;
     }
     const payments = event.payload.payments;
     if (Array.isArray(payments)) {
-      const cents = payments.reduce((sum, payment) => {
+      return payments.reduce((sum, payment) => {
         const amount = (payment as { amount?: unknown }).amount;
         return sum + (typeof amount === 'number' ? amount : 0);
       }, 0);
-      return money(cents);
     }
-    return '—';
+    return null;
+  }
+
+  function saleTotal(event: SyncEvent): string {
+    const cents = saleTotalCents(event);
+    return cents === null ? '—' : money(cents);
   }
 
   function payloadValue(event: SyncEvent, key: string): string {
@@ -507,11 +615,71 @@
     if (typeof value === 'string' || typeof value === 'number') return String(value);
     return '—';
   }
+
+  function saleLines(event: SyncEvent): Array<Record<string, unknown>> {
+    return Array.isArray(event.payload.lines)
+      ? (event.payload.lines as Array<Record<string, unknown>>)
+      : [];
+  }
+
+  function salePayments(event: SyncEvent): Array<Record<string, unknown>> {
+    return Array.isArray(event.payload.payments)
+      ? (event.payload.payments as Array<Record<string, unknown>>)
+      : [];
+  }
+
+  function decimalMoney(value: unknown): string {
+    const number = Number(String(value ?? '').replace(',', '.'));
+    return Number.isFinite(number) ? `${number.toFixed(2)} €` : '—';
+  }
+
+  function lineTotal(line: Record<string, unknown>): string {
+    const unitPrice = Number(String(line.unit_price ?? '').replace(',', '.'));
+    const quantity = Number(String(line.quantity ?? '').replace(',', '.'));
+    const discount = Number(line.discount_bp ?? 0);
+    if (!Number.isFinite(unitPrice) || !Number.isFinite(quantity) || !Number.isFinite(discount)) {
+      return '—';
+    }
+    return `${(unitPrice * quantity * (1 - discount / 10_000)).toFixed(2)} €`;
+  }
+
+  function csvCell(value: unknown): string {
+    return `"${String(value ?? '').replaceAll('"', '""')}"`;
+  }
+
+  function exportSalesCsv() {
+    const rows = [
+      ['Secuencia', 'Ocurrido', 'Tienda', 'Dispositivo', 'Venta', 'Cliente', 'Factura', 'Total EUR'],
+      ...sales.map((item) => [
+        item.seq,
+        formatDate(item.event.occurred_at),
+        item.event.store_id,
+        item.event.device_id,
+        payloadValue(item.event, 'id'),
+        payloadValue(item.event, 'customer_id'),
+        payloadValue(item.event, 'invoice_id'),
+        ((saleTotalCents(item.event) ?? 0) / 100).toFixed(2)
+      ])
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(';')).join('\r\n')}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `ventas-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
 </script>
 
 <svelte:head>
   <title>General TPV · Central</title>
 </svelte:head>
+
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && selectedEvent) selectedEvent = null;
+  }}
+/>
 
 {#if authChecking}
   <main class="login-shell">
@@ -620,12 +788,12 @@
     </article>
     <article>
       <p class="eyebrow">VENTAS</p>
-      <strong>{sales.length}</strong>
+      <strong>{salesTotal}</strong>
       <span>última {lastSale ? formatDate(lastSale.event.occurred_at) : '—'}</span>
     </article>
     <article>
       <p class="eyebrow">FACTURAS</p>
-      <strong>{invoices.length}</strong>
+      <strong>{invoiceTotal}</strong>
       <span>eventos emitidos</span>
     </article>
     <article>
@@ -648,6 +816,58 @@
       <strong class="small">{lastUpdated || '—'}</strong>
       <span>{base}</span>
     </article>
+  </section>
+
+  <section class="panel filters-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">FILTROS</p>
+        <h2>Ventas y trazabilidad</h2>
+      </div>
+      <span class="muted small">Tienda, dispositivo y fechas se aplican a todo; el tipo solo a eventos</span>
+    </div>
+    <form
+      class="filters"
+      onsubmit={(event) => {
+        event.preventDefault();
+        applyFilters();
+      }}
+    >
+      <label class="field">
+        <span>Tienda</span>
+        <select bind:value={filterStoreId}>
+          <option value="">Todas</option>
+          {#each storeOptions as store (store.store_id)}
+            <option value={store.store_id}>{shortId(store.store_id)}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="field">
+        <span>Dispositivo</span>
+        <select bind:value={filterDeviceId}>
+          <option value="">Todos</option>
+          {#each devices as device (device.device_id)}
+            <option value={device.device_id}>{device.name}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="field">
+        <span>Desde</span>
+        <input type="date" bind:value={filterFrom} />
+      </label>
+      <label class="field">
+        <span>Hasta</span>
+        <input type="date" bind:value={filterTo} />
+      </label>
+      <label class="field">
+        <span>Tipo de evento</span>
+        <input bind:value={filterEventType} placeholder="sale.confirmed" autocomplete="off" />
+      </label>
+      <div class="filter-actions">
+        <button type="submit" disabled={loading}>Aplicar</button>
+        <button class="secondary" type="button" onclick={clearFilters}>Limpiar</button>
+      </div>
+    </form>
   </section>
 
   <section class="panel">
@@ -880,7 +1100,7 @@
         <p class="eyebrow">VENTAS</p>
         <h2>Eventos de venta</h2>
       </div>
-      <span class="muted small">Ordenados por secuencia de la central</span>
+      <span class="muted small">Más recientes primero</span>
     </div>
     <div class="table-wrap">
       <table>
@@ -892,6 +1112,7 @@
             <th>Dispositivo</th>
             <th>Ocurrido</th>
             <th>Total</th>
+            <th>Acciones</th>
           </tr>
         </thead>
         <tbody>
@@ -903,14 +1124,40 @@
               <td class="mono">{item.event.device_id.slice(0, 8)}…</td>
               <td>{formatDate(item.event.occurred_at)}</td>
               <td class="num strong">{saleTotal(item.event)}</td>
+              <td>
+                <button class="secondary" type="button" onclick={() => (selectedEvent = item)}>
+                  Ver
+                </button>
+              </td>
             </tr>
           {:else}
             <tr>
-              <td colspan="6" class="empty">Todavía no hay ventas sincronizadas.</td>
+              <td colspan="7" class="empty">Todavía no hay ventas sincronizadas.</td>
             </tr>
           {/each}
         </tbody>
       </table>
+    </div>
+    <div class="pager">
+      <span class="muted small">
+        {salesTotal} ventas · página {Math.floor(salesOffset / pageSize) + 1} de {Math.max(1, Math.ceil(salesTotal / pageSize))}
+      </span>
+      <div class="pager-actions">
+        <button class="secondary" type="button" disabled={salesOffset === 0} onclick={previousSalesPage}>
+          Anterior
+        </button>
+        <button
+          class="secondary"
+          type="button"
+          disabled={salesOffset + pageSize >= salesTotal}
+          onclick={nextSalesPage}
+        >
+          Siguiente
+        </button>
+        <button class="secondary" type="button" disabled={sales.length === 0} onclick={exportSalesCsv}>
+          Exportar página CSV
+        </button>
+      </div>
     </div>
   </section>
 
@@ -920,6 +1167,7 @@
         <p class="eyebrow">TRAZABILIDAD</p>
         <h2>Últimos eventos</h2>
       </div>
+      <span class="muted small">Más recientes primero</span>
     </div>
     <div class="table-wrap">
       <table>
@@ -930,27 +1178,127 @@
             <th>Agregado</th>
             <th>Recibido</th>
             <th>Hash</th>
+            <th>Acciones</th>
           </tr>
         </thead>
         <tbody>
-          {#each events.slice(-20).reverse() as item (item.event.event_id)}
+          {#each events as item (item.event.event_id)}
             <tr>
               <td class="mono">{item.seq}</td>
               <td>{item.event.event_type}</td>
               <td class="mono">{item.event.aggregate_type} · {payloadValue(item.event, 'id').slice(0, 8)}</td>
               <td>{formatDate(item.received_at)}</td>
               <td class="mono small">{item.event.event_id.slice(0, 12)}…</td>
+              <td>
+                <button class="secondary" type="button" onclick={() => (selectedEvent = item)}>
+                  Ver
+                </button>
+              </td>
             </tr>
           {:else}
             <tr>
-              <td colspan="5" class="empty">Sin eventos.</td>
+              <td colspan="6" class="empty">Sin eventos.</td>
             </tr>
           {/each}
         </tbody>
       </table>
     </div>
+    <div class="pager">
+      <span class="muted small">
+        {eventsTotal} eventos · página {Math.floor(eventsOffset / pageSize) + 1} de {Math.max(1, Math.ceil(eventsTotal / pageSize))}
+      </span>
+      <div class="pager-actions">
+        <button class="secondary" type="button" disabled={eventsOffset === 0} onclick={previousEventsPage}>
+          Anterior
+        </button>
+        <button
+          class="secondary"
+          type="button"
+          disabled={eventsOffset + pageSize >= eventsTotal}
+          onclick={nextEventsPage}
+        >
+          Siguiente
+        </button>
+      </div>
+    </div>
   </section>
 </main>
+
+  {#if selectedEvent}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={(event) => {
+        if (event.target === event.currentTarget) selectedEvent = null;
+      }}
+    >
+      <div class="detail-modal" role="dialog" aria-modal="true" aria-label="Detalle del evento">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">DETALLE</p>
+            <h2>{selectedEvent.event.event_type}</h2>
+          </div>
+          <button
+            class="secondary"
+            type="button"
+            onclick={() => (selectedEvent = null)}>Cerrar</button
+          >
+        </div>
+        <dl class="detail-grid">
+          <div><dt>Secuencia</dt><dd>{selectedEvent.seq}</dd></div>
+          <div><dt>Agregado</dt><dd>{selectedEvent.event.aggregate_type}</dd></div>
+          <div><dt>Tienda</dt><dd class="mono">{shortId(selectedEvent.event.store_id)}</dd></div>
+          <div><dt>Dispositivo</dt><dd class="mono">{shortId(selectedEvent.event.device_id)}</dd></div>
+          <div><dt>Ocurrido</dt><dd>{formatDate(selectedEvent.event.occurred_at)}</dd></div>
+          <div><dt>Recibido</dt><dd>{formatDate(selectedEvent.received_at)}</dd></div>
+          <div><dt>Evento</dt><dd class="mono small">{selectedEvent.event.event_id}</dd></div>
+          <div><dt>Total</dt><dd class="strong">{saleTotal(selectedEvent.event)}</dd></div>
+        </dl>
+
+        {#if selectedEvent.event.aggregate_type === 'sale'}
+          <h3>Líneas</h3>
+          <div class="table-wrap">
+            <table class="detail-table">
+              <thead>
+                <tr><th>Descripción</th><th>Unid.</th><th>Precio</th><th>Total</th></tr>
+              </thead>
+              <tbody>
+                {#each saleLines(selectedEvent.event) as line}
+                  <tr>
+                    <td>{String(line.description ?? line.name ?? '—')}</td>
+                    <td class="num">{String(line.quantity ?? '—')}</td>
+                    <td class="num">{decimalMoney(line.unit_price)}</td>
+                    <td class="num">{lineTotal(line)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <h3>Pagos</h3>
+          <div class="table-wrap">
+            <table class="detail-table">
+              <thead>
+                <tr><th>Forma</th><th>Importe</th></tr>
+              </thead>
+              <tbody>
+                {#each salePayments(selectedEvent.event) as payment}
+                  <tr>
+                    <td>{String(payment.method ?? '—')}</td>
+                    <td class="num">{money(payment.amount)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+
+        <details class="payload-details">
+          <summary>Ver payload JSON</summary>
+          <pre>{JSON.stringify(selectedEvent.event.payload, null, 2)}</pre>
+        </details>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -1051,6 +1399,120 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 10px;
+  }
+
+  .filters {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+    gap: 12px;
+    align-items: end;
+  }
+
+  .filter-actions,
+  .pager-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .pager {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    overflow-y: auto;
+    padding: clamp(12px, 3vw, 24px);
+    background: var(--modal-backdrop);
+    z-index: 30;
+  }
+
+  .detail-modal {
+    width: min(900px, 100%);
+    max-height: calc(100vh - 48px);
+    max-height: calc(100dvh - 48px);
+    overflow: auto;
+    margin: auto;
+    padding: 22px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: var(--panel);
+    box-shadow: var(--modal-shadow);
+  }
+
+  .modal-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 24px;
+    margin: 16px 0;
+  }
+
+  .detail-grid > div {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr);
+    gap: 8px;
+    align-items: baseline;
+  }
+
+  dt {
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  .detail-modal h3 {
+    margin: 20px 0 8px;
+    font-size: 0.95rem;
+  }
+
+  .detail-table {
+    font-size: 0.84rem;
+  }
+
+  .payload-details {
+    margin-top: 18px;
+  }
+
+  .payload-details summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+
+  .payload-details pre {
+    max-height: 320px;
+    overflow: auto;
+    margin: 10px 0 0;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel-2);
+    font-size: 0.78rem;
   }
 
   .status {
@@ -1259,7 +1721,8 @@
   }
 
   @media (max-width: 1050px) {
-    .user-form {
+    .user-form,
+    .filters {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
@@ -1280,8 +1743,15 @@
     }
 
     .user-form,
-    .cards {
+    .cards,
+    .filters,
+    .detail-grid {
       grid-template-columns: 1fr;
+    }
+
+    .detail-grid > div {
+      grid-template-columns: 1fr;
+      gap: 2px;
     }
 
     .form-actions button {

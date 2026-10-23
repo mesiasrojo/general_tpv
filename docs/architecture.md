@@ -203,8 +203,9 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - `GET/POST /api/v1/users`, `PUT /api/v1/users/{id}` y `POST /api/v1/users/{id}/password` gestionan cuentas centrales; las escrituras requieren rol `admin`, las lecturas admiten `manager` y `auditor`. Las contraseñas se guardan como Argon2id y nunca se devuelven por la API.
 - Cada alta, cambio o reset de usuario emite `user.provisioned` firmado para cada tienda.
 - `GET /api/v1/master-data/conflicts` lista los conflictos de maestros auditados.
+- `GET /api/v1/events` y `GET /api/v1/sales` paginan por `limit`/`offset` y filtran por `store_id`, `device_id`, `event_type` y rango `from`/`to`; el conteo y la página comparten filtros y se ordenan por `seq` descendente. Los índices de `event_type`, `occurred_at` y `device_id` acompañan a la consulta.
 - Sirve el backoffice estático si existe `backoffice/build` o `TPV_BACKOFFICE_DIR`.
-- El backoffice muestra salud, cursor, ventas, facturas, usuarios centrales, últimos eventos, dispositivos registrados y conflictos de datos maestros.
+- El backoffice muestra salud, cursor, ventas, facturas, usuarios centrales, eventos, dispositivos registrados y conflictos de datos maestros, con filtros, paginación, detalle de payload y exportación CSV de la página de ventas.
 - Desde la consola de usuarios se pueden crear cuentas, activarlas o desactivarlas y restablecer contraseñas; desde la de dispositivos se revoca un terminal.
 - La consola no reescribe ventas ni documentos.
 - El backoffice exige inicio de sesión; `manager` y `auditor` ven la consola en modo solo lectura y `cashier` no puede acceder.

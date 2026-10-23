@@ -17,7 +17,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
 | Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
-| Backoffice SvelteKit | Implementado (eventos, usuarios, dispositivos y conflictos) |
+| Backoffice SvelteKit | Implementado (eventos, usuarios, dispositivos y conflictos; filtros, paginación, detalle y CSV) |
 | Autenticación y RBAC del backoffice | Implementado (bootstrap, sesiones y roles admin/manager/auditor) |
 | Temas de apariencia | Implementado (`light_theme` por defecto y `dark_theme` conservado) |
 | Usuarios centrales y aprovisionamiento | Implementado (API, backoffice, pull del CLI y sync automática Tauri) |
@@ -138,6 +138,8 @@ El servidor expone:
 - `POST /api/v1/users`
 - `PUT /api/v1/users/{user_id}`
 - `POST /api/v1/users/{user_id}/password`
+
+`GET /api/v1/events` y `GET /api/v1/sales` aceptan `limit` (1–200, por defecto 50), `offset`, `store_id`, `device_id`, `event_type`, `from` y `to` (RFC3339). Devuelven `{ "items": [...], "total": N, "limit": L, "offset": O }` ordenados por secuencia descendente. El endpoint de ventas solo incluye eventos con agregado `sale`.
 
 ### Impresión nativa
 

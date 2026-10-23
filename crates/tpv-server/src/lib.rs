@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 pub use store::{
     CentralSessionRecord, CentralStore, CentralUserRecord, DeviceRecord, DeviceStatus,
-    EnrollDevice, MemoryStore, NewCentralSession, NewCentralUser, PostgresStore, PushStoreResult,
-    StoreError, StoreHealth, StoredEvent, UpdateCentralUser,
+    EnrollDevice, EventPage, EventQuery, MemoryStore, NewCentralSession, NewCentralUser,
+    PostgresStore, PushStoreResult, StoreError, StoreHealth, StoredEvent, UpdateCentralUser,
 };
 
 #[derive(Clone)]
@@ -67,6 +67,25 @@ pub struct PushResponse {
 pub struct RejectedEvent {
     pub event_id: Uuid,
     pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventQueryParams {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+    pub store_id: Option<Uuid>,
+    pub device_id: Option<Uuid>,
+    pub event_type: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventPageResponse {
+    pub items: Vec<StoredEvent>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -969,27 +988,63 @@ async fn provision_user(state: &AppState, user: &CentralUserRecord) -> Result<()
 async fn list_events(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<StoredEvent>>, ApiError> {
+    Query(params): Query<EventQueryParams>,
+) -> Result<Json<EventPageResponse>, ApiError> {
     state.authorize(&headers).await?;
-    let events = state
+    let query = event_query(params, false)?;
+    let page = state
         .store
-        .list_events(1000)
+        .list_events(&query)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(events))
+    Ok(Json(event_page_response(page, &query)))
 }
 
 async fn list_sales(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<StoredEvent>>, ApiError> {
+    Query(params): Query<EventQueryParams>,
+) -> Result<Json<EventPageResponse>, ApiError> {
     state.authorize(&headers).await?;
-    let events = state
+    let query = event_query(params, true)?;
+    let page = state
         .store
-        .list_sales(1000)
+        .list_sales(&query)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(events))
+    Ok(Json(event_page_response(page, &query)))
+}
+
+fn event_query(params: EventQueryParams, sales_only: bool) -> Result<EventQuery, ApiError> {
+    let parse_time = |value: Option<&str>,
+                      field: &str|
+     -> Result<Option<time::OffsetDateTime>, ApiError> {
+        value
+            .map(|value| {
+                time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                    .map_err(|_| ApiError::bad_request(format!("invalid {field}; use RFC3339")))
+            })
+            .transpose()
+    };
+    Ok(EventQuery {
+        limit: params.limit.unwrap_or(50).clamp(1, 200),
+        offset: params.offset.unwrap_or(0).min(1_000_000),
+        store_id: params.store_id,
+        device_id: params.device_id,
+        event_type: params.event_type.filter(|value| !value.trim().is_empty()),
+        from: parse_time(params.from.as_deref(), "from")?,
+        to: parse_time(params.to.as_deref(), "to")?,
+        sales_only,
+    })
+}
+
+fn event_page_response(page: EventPage, query: &EventQuery) -> EventPageResponse {
+    EventPageResponse {
+        items: page.items,
+        total: page.total,
+        limit: query.limit,
+        offset: query.offset,
+    }
 }
 
 #[cfg(test)]
@@ -1497,6 +1552,245 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+
+    fn typed_event(
+        device_id: Uuid,
+        tenant_id: Uuid,
+        store_id: Uuid,
+        device_seq: u64,
+        aggregate_type: &str,
+        event_type: &str,
+        occurred_at: time::OffsetDateTime,
+    ) -> SyncEvent {
+        SyncEvent::new(
+            tpv_domain::ids::TenantId::from_uuid(tenant_id),
+            tpv_domain::ids::StoreId::from_uuid(store_id),
+            tpv_domain::ids::DeviceId::from_uuid(device_id),
+            device_seq,
+            aggregate_type,
+            Uuid::now_v7(),
+            event_type,
+            1,
+            occurred_at,
+            json!({ "total_cents": 100 * i64::try_from(device_seq).unwrap_or_default() }),
+        )
+        .unwrap()
+    }
+
+    async fn push_events(app: &Router, device_id: Uuid, token: &str, events: &[SyncEvent]) {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync/push",
+                Some(token),
+                Some(json!({ "device_id": device_id, "events": events })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(request("GET", uri, None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn events_support_pagination_and_filters() {
+        let app = app(AppState::new(None));
+        let device_a = Uuid::now_v7();
+        let device_b = Uuid::now_v7();
+        let store_a = Uuid::now_v7();
+        let store_b = Uuid::now_v7();
+        let enrollment_a = enroll(&app, device_a, store_a, None).await;
+        let enrollment_b = enroll(&app, device_b, store_b, None).await;
+        let tenant_a = enrollment_a.device.tenant_id;
+        let tenant_b = enrollment_b.device.tenant_id;
+        let base = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+
+        push_events(
+            &app,
+            device_a,
+            &enrollment_a.token,
+            &[
+                typed_event(
+                    device_a,
+                    tenant_a,
+                    store_a,
+                    1,
+                    "sale",
+                    "sale.confirmed",
+                    base,
+                ),
+                typed_event(
+                    device_a,
+                    tenant_a,
+                    store_a,
+                    2,
+                    "sale",
+                    "sale.confirmed",
+                    base + time::Duration::seconds(10),
+                ),
+                typed_event(
+                    device_a,
+                    tenant_a,
+                    store_a,
+                    3,
+                    "invoice",
+                    "invoice.issued",
+                    base + time::Duration::seconds(20),
+                ),
+            ],
+        )
+        .await;
+        push_events(
+            &app,
+            device_b,
+            &enrollment_b.token,
+            &[typed_event(
+                device_b,
+                tenant_b,
+                store_b,
+                1,
+                "sale",
+                "sale.confirmed",
+                base + time::Duration::seconds(30),
+            )],
+        )
+        .await;
+
+        let page = get_json(&app, "/api/v1/events?limit=2").await;
+        assert_eq!(page["total"], 4);
+        assert_eq!(page["limit"], 2);
+        assert_eq!(page["offset"], 0);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["event"]["store_id"], store_b.to_string());
+        assert_eq!(items[1]["event"]["event_type"], "invoice.issued");
+
+        let second = get_json(&app, "/api/v1/events?limit=2&offset=2").await;
+        assert_eq!(second["total"], 4);
+        assert_eq!(second["items"].as_array().unwrap().len(), 2);
+
+        let beyond = get_json(&app, "/api/v1/events?offset=100").await;
+        assert_eq!(beyond["total"], 4);
+        assert!(beyond["items"].as_array().unwrap().is_empty());
+
+        let by_type = get_json(&app, "/api/v1/events?event_type=invoice.issued").await;
+        assert_eq!(by_type["total"], 1);
+        assert_eq!(by_type["items"][0]["event"]["event_type"], "invoice.issued");
+
+        let by_store = get_json(&app, &format!("/api/v1/events?store_id={store_a}")).await;
+        assert_eq!(by_store["total"], 3);
+
+        let by_device = get_json(&app, &format!("/api/v1/events?device_id={device_b}")).await;
+        assert_eq!(by_device["total"], 1);
+
+        let from = (base + time::Duration::seconds(15))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let by_date = get_json(&app, &format!("/api/v1/events?from={from}")).await;
+        assert_eq!(by_date["total"], 2);
+
+        let clamped = get_json(&app, "/api/v1/events?limit=9999").await;
+        assert_eq!(clamped["limit"], 200);
+    }
+
+    #[tokio::test]
+    async fn sales_endpoint_only_returns_sales_and_paginates() {
+        let app = app(AppState::new(None));
+        let device_a = Uuid::now_v7();
+        let device_b = Uuid::now_v7();
+        let store_a = Uuid::now_v7();
+        let store_b = Uuid::now_v7();
+        let enrollment_a = enroll(&app, device_a, store_a, None).await;
+        let enrollment_b = enroll(&app, device_b, store_b, None).await;
+        let tenant_a = enrollment_a.device.tenant_id;
+        let tenant_b = enrollment_b.device.tenant_id;
+        let base = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+
+        push_events(
+            &app,
+            device_a,
+            &enrollment_a.token,
+            &[
+                typed_event(
+                    device_a,
+                    tenant_a,
+                    store_a,
+                    1,
+                    "sale",
+                    "sale.confirmed",
+                    base,
+                ),
+                typed_event(
+                    device_a,
+                    tenant_a,
+                    store_a,
+                    2,
+                    "invoice",
+                    "invoice.issued",
+                    base + time::Duration::seconds(10),
+                ),
+                typed_event(
+                    device_a,
+                    tenant_a,
+                    store_a,
+                    3,
+                    "sale",
+                    "sale.confirmed",
+                    base + time::Duration::seconds(20),
+                ),
+            ],
+        )
+        .await;
+        push_events(
+            &app,
+            device_b,
+            &enrollment_b.token,
+            &[typed_event(
+                device_b,
+                tenant_b,
+                store_b,
+                1,
+                "sale",
+                "sale.confirmed",
+                base + time::Duration::seconds(30),
+            )],
+        )
+        .await;
+
+        let first = get_json(&app, "/api/v1/sales?limit=2").await;
+        assert_eq!(first["total"], 3);
+        let items = first["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|item| item["event"]["aggregate_type"] == "sale")
+        );
+
+        let second = get_json(&app, "/api/v1/sales?limit=2&offset=2").await;
+        assert_eq!(second["total"], 3);
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+
+        let by_store = get_json(&app, &format!("/api/v1/sales?store_id={store_b}")).await;
+        assert_eq!(by_store["total"], 1);
+        assert_eq!(
+            by_store["items"][0]["event"]["store_id"],
+            store_b.to_string()
+        );
+    }
+
     #[tokio::test]
     async fn bootstrap_login_session_and_rbac() {
         let state = AppState::with_auth(None, Arc::new(MemoryStore::new()), true);
