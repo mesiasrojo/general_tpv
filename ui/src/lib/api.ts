@@ -294,6 +294,8 @@ export const api = {
     }),
   confirmSale: (saleId: string) => invoke<SaleView>('confirm_sale', { saleId }),
   issueInvoice: (saleId: string) => invoke<Invoice>('issue_invoice', { saleId }),
+  rectifyInvoice: (invoiceId: string, reason: string) =>
+    invoke<Invoice>('rectify_invoice', { invoiceId, reason }),
   openCash: () => invoke<CashSession>('open_cash'),
   closeCash: (
     sessionId: string,

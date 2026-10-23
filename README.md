@@ -28,6 +28,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
 | Pipeline de release | Implementado (builds multi-OS, SBOM SPDX, checksums y borrador de release) |
 | Cadena de suministro | Implementado (cargo-deny, npm audit y Dependabot) |
+| Rectificación de facturas | Implementado (nota de crédito total desde el histórico) |
+| Devoluciones parciales | Pendiente (la rectificación actual cubre la factura completa) |
 | Certificación con hardware físico | Pendiente de ejecución en tienda piloto |
 
 ## Arranque rápido
@@ -178,6 +180,8 @@ npm run dev
 Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` y el resto de paquetes indicados en la sección de arranque). El crate `apps/desktop` está excluido del workspace principal, pero se compila y prueba desde `apps/desktop/src-tauri`.
 
 Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados.
+
+Tras emitir una factura, el histórico de ventas muestra el botón **Rectificar** para administradores y responsables. Solicita un motivo y genera una nota de crédito con serie `REC`, líneas e importes negativos y evento `invoice.rectified`. La rectificación actual cubre la factura completa; las devoluciones parciales por línea quedan pendientes.
 
 ### 4. Backoffice
 

@@ -196,6 +196,37 @@ test.describe('TPV desktop UI', () => {
           sale.closed_at = now();
           return saleView();
         },
+        async issue_invoice() {
+          if (!sale) throw 'venta no iniciada';
+          sale.invoice_id = '00000000-0000-7000-8000-000000000901';
+          return {
+            id: sale.invoice_id,
+            sale_id: sale.id,
+            customer_id: customerId,
+            series: 'FAC',
+            number: 1,
+            issued_at: now(),
+            kind: { type: 'standard' },
+            lines: [],
+            totals
+          };
+        },
+        async rectify_invoice(invoiceId: string, reason: string) {
+          return {
+            id: crypto.randomUUID(),
+            sale_id: sale?.id ?? '',
+            customer_id: customerId,
+            series: 'REC',
+            number: 1,
+            issued_at: now(),
+            kind: {
+              type: 'rectificative',
+              data: { original_invoice_id: invoiceId, reason }
+            },
+            lines: [],
+            totals
+          };
+        },
         async print_ticket() {
           return { job_id: crypto.randomUUID(), file: 'null', bytes: 1045, success: true };
         }
@@ -270,6 +301,10 @@ test.describe('TPV desktop UI', () => {
               );
             case 'confirm_sale':
               return api.confirm_sale();
+            case 'issue_invoice':
+              return api.issue_invoice();
+            case 'rectify_invoice':
+              return api.rectify_invoice(String(args.invoiceId), String(args.reason));
             case 'print_ticket':
               return api.print_ticket();
             default:
@@ -284,6 +319,7 @@ test.describe('TPV desktop UI', () => {
   });
 
   test('login, add a product, take payment and print', async ({ page }) => {
+    page.on('dialog', (dialog) => void dialog.accept('Devolución E2E'));
     await page.goto('/');
 
     await expect(page.getByRole('heading', { name: 'Identifícate' })).toBeVisible();
@@ -326,5 +362,10 @@ test.describe('TPV desktop UI', () => {
     await payment.getByRole('button', { name: 'Cobrar y cerrar' }).click();
     await expect(page.getByText(/Ticket 1 confirmado e impreso/)).toBeVisible();
     await expect(page.getByText('Cobrada').first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Emitir factura' }).click();
+    await expect(page.getByText(/Factura FAC-000001 emitida/)).toBeVisible();
+    await page.getByRole('button', { name: 'Rectificar' }).first().click();
+    await expect(page.getByText(/Rectificación REC-000001 emitida/)).toBeVisible();
   });
 });

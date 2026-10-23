@@ -12,14 +12,15 @@ use tpv_application::{
     CashRepository, CashService, CatalogRepository, CatalogService, CloseCashRequest,
     ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, MasterDataRepository,
     MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
-    ProductService, QuarantinedEvent, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
-    SequenceRepository, SessionUser, StartSaleRequest, SyncContext, SyncOutboxRepository,
-    SyncService, SyncStatus, UpdateUserRequest, UpsertProductRequest, UserRepository,
+    ProductService, QuarantinedEvent, RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository,
+    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncContext,
+    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UpsertProductRequest,
+    UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
-use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
+use tpv_domain::ids::{CustomerId, InvoiceId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Role, UserAccount, UserProvision};
@@ -292,6 +293,31 @@ async fn issue_invoice(
             customer_id: state.demo.customer_id,
             series: "FAC".into(),
             year,
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn rectify_invoice(
+    state: State<'_, AppState>,
+    invoice_id: InvoiceId,
+    reason: String,
+) -> Result<Invoice, String> {
+    require_manager(state.inner())?;
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err("la rectificación requiere un motivo".into());
+    }
+    let year = u16::try_from(OffsetDateTime::now_utc().year()).unwrap_or(2026);
+    let state = state.inner().clone();
+    state
+        .invoices
+        .rectify_invoice(RectifyInvoiceRequest {
+            invoice_id,
+            series: "REC".into(),
+            year,
+            reason,
         })
         .await
         .map_err(|error| error.to_string())
@@ -965,6 +991,7 @@ fn main() {
             apply_payment,
             confirm_sale,
             issue_invoice,
+            rectify_invoice,
             open_cash,
             close_cash,
             cash_status,
@@ -1050,6 +1077,7 @@ mod e2e_tests {
                 apply_payment,
                 confirm_sale,
                 issue_invoice,
+                rectify_invoice,
                 open_cash,
                 close_cash,
                 cash_status,
@@ -1166,7 +1194,22 @@ mod e2e_tests {
         assert_eq!(print["success"], true);
         assert_eq!(print["file"], "null");
 
-        invoke(&webview, "issue_invoice", json!({ "saleId": sale_id })).expect("issue invoice");
+        let invoice =
+            invoke(&webview, "issue_invoice", json!({ "saleId": sale_id })).expect("issue invoice");
+        let invoice_id = invoice["id"].as_str().expect("invoice id").to_string();
+        assert_eq!(invoice["kind"]["type"], "standard");
+        let rectified = invoke(
+            &webview,
+            "rectify_invoice",
+            json!({
+                "invoiceId": invoice_id,
+                "reason": "Devolución de cliente"
+            }),
+        )
+        .expect("rectify invoice");
+        assert_eq!(rectified["kind"]["type"], "rectificative");
+        assert_eq!(rectified["kind"]["data"]["reason"], "Devolución de cliente");
+        assert_eq!(rectified["kind"]["data"]["original_invoice_id"], invoice_id);
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);
 
@@ -1262,6 +1305,21 @@ mod e2e_tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("gestionar usuarios")
+        );
+        let forbidden = invoke(
+            &webview,
+            "rectify_invoice",
+            json!({
+                "invoiceId": invoice_id,
+                "reason": "Intento de cajero"
+            }),
+        )
+        .expect_err("cashier cannot rectify invoices");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("responsable")
         );
 
         drop(webview);

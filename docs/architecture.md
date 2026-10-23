@@ -43,6 +43,8 @@ UI Svelte
 
 La venta confirmada es inmutable. Cualquier corrección posterior debe ser devolución o rectificativa.
 
+La UI permite rectificar una factura completa desde el histórico de ventas. La operación exige rol responsable o administrador, solicita un motivo y genera una nota de crédito con serie `REC`, importes negativos, evento `invoice.rectified` y auditoría. Las devoluciones parciales por línea todavía no están expuestas en la UI.
+
 ## 3. Dinero e IVA
 
 - `Money(i64)` en céntimos.
@@ -230,12 +232,14 @@ Implementado:
 - Consola backoffice de dispositivos y conflictos, con revocación y prueba Playwright.
 - Usuarios centrales con Argon2id, API de gestión, consola backoffice y provisioning `user.provisioned`.
 - Aplicación del provisioning en el pull del CLI y en el botón de sincronización de Tauri.
+- Rectificación total de facturas desde el histórico, con nota de crédito `REC`, motivo, evento y auditoría.
 - CI con tests Rust, PostgreSQL, comandos Tauri, E2E de UI y auditoría de dependencias.
 - Release multi-plataforma con SBOM SPDX, checksums SHA-256 y borrador de GitHub Release.
 - Dependabot semanal para Cargo, npm y GitHub Actions.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
+- Devoluciones parciales por línea y su integración con la caja.
 - Ejecución HIL en tienda piloto, certificación de impresoras y reglas udev/WinUSB.
 - Firma nativa de instaladores (Authenticode y notarización Apple) y publicación pública del release.
 
@@ -247,3 +251,4 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 1. Ejecución HIL en tienda piloto y ajuste de umbrales de carga.
 2. Firma nativa de instaladores y publicación de la primera release pública.
+3. Devoluciones parciales por línea con selección de cantidades y liquidación en caja.

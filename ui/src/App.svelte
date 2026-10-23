@@ -50,6 +50,7 @@
   let syncNowBusy = $state(false);
   let syncSummary = $state<SyncSummary | null>(null);
   let backupBusy = $state(false);
+  let rectifyBusy = $state(false);
   let usersOpen = $state(false);
   let users = $state<UserAccount[]>([]);
   let stores = $state<Store[]>([]);
@@ -554,12 +555,32 @@
     if (!sale || !sale.sale.ticket_number || busy) return;
     busy = true;
     try {
-      invoice = await api.issueInvoice(sale.sale.id);
-      message = `Factura ${invoice.series}-${String(invoice.number).padStart(6, '0')} emitida.`;
+      const issued = await api.issueInvoice(sale.sale.id);
+      invoice = issued;
+      sale.sale.invoice_id = issued.id;
+      await refreshSales();
+      message = `Factura ${issued.series}-${String(issued.number).padStart(6, '0')} emitida.`;
     } catch (error) {
       message = String(error);
     } finally {
       busy = false;
+    }
+  }
+
+  async function rectifyInvoice(invoiceId: string) {
+    if (rectifyBusy) return;
+    const reason = window.prompt('Motivo de la rectificación');
+    if (!reason?.trim()) return;
+    rectifyBusy = true;
+    try {
+      const rectified = await api.rectifyInvoice(invoiceId, reason.trim());
+      invoice = rectified;
+      await refreshSales();
+      message = `Rectificación ${rectified.series}-${String(rectified.number).padStart(6, '0')} emitida.`;
+    } catch (error) {
+      message = String(error);
+    } finally {
+      rectifyBusy = false;
     }
   }
 
@@ -975,6 +996,20 @@
               <span class="mono">#{item.sale.ticket_number ?? '—'}</span>
               <span>{stateLabel(item.sale.state)}</span>
               <strong>{formatMoney(item.totals.gross)}</strong>
+              {#if item.sale.invoice_id && (session?.user.role === 'admin' || session?.user.role === 'manager')}
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={rectifyBusy}
+                  onclick={() => {
+                    if (item.sale.invoice_id) void rectifyInvoice(item.sale.invoice_id);
+                  }}
+                >
+                  Rectificar
+                </button>
+              {:else}
+                <span></span>
+              {/if}
             </div>
           {:else}
             <p class="muted small">Todavía no hay ventas.</p>
@@ -1563,7 +1598,7 @@
 
   .sale-row {
     display: grid;
-    grid-template-columns: 48px 1fr auto;
+    grid-template-columns: 48px 1fr auto auto;
     gap: 10px;
     padding: 8px 0;
     border-bottom: 1px solid var(--line);
