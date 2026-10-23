@@ -17,7 +17,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
 | Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
-| Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
+| Backoffice SvelteKit | Implementado (eventos, dispositivos y conflictos; revocación) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
@@ -170,6 +170,8 @@ npm run dev
 
 Por defecto apunta a `http://localhost:8080`. Se puede cambiar con `VITE_CENTRAL_URL` y `VITE_CENTRAL_TOKEN`.
 
+El backoffice muestra salud, eventos, ventas, facturas, dispositivos registrados y conflictos de datos maestros. Desde la tabla de dispositivos se puede revocar un terminal con confirmación; la central deja de aceptar su token inmediatamente.
+
 Para servir el backoffice desde la central:
 
 ```bash
@@ -217,7 +219,7 @@ cargo test -p tpv-storage-sqlite --test load -- --ignored --nocapture
 
 cd apps/desktop/src-tauri && cargo test
 cd ui && npm run check && npm run build && npm run test:e2e
-cd backoffice && npm run check && npm run build
+cd backoffice && npm run check && npm run build && npm run test:e2e
 ```
 
 La prueba de comandos Tauri usa el runtime mock oficial y recorre login, caja, venta, cobro, ticket, factura, backup y RBAC. La prueba de UI usa Playwright con el Chrome instalado en el sistema y un puente IPC simulado; no descarga navegadores adicionales.

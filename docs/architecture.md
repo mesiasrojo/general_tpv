@@ -15,7 +15,7 @@ Este documento describe la primera rebanada vertical implementada del plan v2. E
 - `tpv-server`: central Axum.
 - `apps/desktop`: shell Tauri y comandos IPC.
 - `ui`: Svelte 5, sin lógica de negocio.
-- `backoffice`: SvelteKit, solo lectura de la central.
+- `backoffice`: SvelteKit, consola de lectura y gestión de dispositivos.
 
 ## 2. Flujo de venta
 
@@ -189,8 +189,10 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - `POST /api/v1/devices/enroll` emite un token por dispositivo; `GET /api/v1/devices` y `POST /api/v1/devices/{id}/revoke` requieren el token de administración.
 - `GET /api/v1/master-data/conflicts` lista los conflictos de maestros auditados.
 - Sirve el backoffice estático si existe `backoffice/build` o `TPV_BACKOFFICE_DIR`.
-- El backoffice muestra salud, cursor, ventas, facturas y últimos eventos.
-- No reescribe ventas ni documentos.
+- El backoffice muestra salud, cursor, ventas, facturas, últimos eventos, dispositivos registrados y conflictos de datos maestros.
+- Desde la consola de dispositivos se puede revocar un terminal; la central rechaza su token inmediatamente.
+- La consola no reescribe ventas ni documentos.
+- Las llamadas de gestión usan el token de administración configurado en la central.
 
 ## 7. Seguridad y límites actuales
 
@@ -218,10 +220,11 @@ Implementado:
 - Prueba Playwright de la UI con puente IPC simulado y Chrome del sistema.
 - Arnés HIL para impresoras de red, serie y USB, activable por variables de entorno.
 - Prueba de carga de ventas confirmadas y procesamiento de la cola de impresión.
+- Consola backoffice de dispositivos y conflictos, con revocación y prueba Playwright.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
-- Gestión de usuarios y dispositivos desde backoffice central.
+- Gestión de usuarios desde backoffice central y aprovisionamiento a terminales.
 - Ejecución HIL en tienda piloto, certificación de impresoras y reglas udev/WinUSB.
 - Firma de actualizaciones, SBOM y pipeline de release.
 
@@ -232,7 +235,6 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 ## 9. Siguiente iteración recomendada
 
 1. Ejecución HIL en tienda piloto y ajuste de umbrales de carga.
-2. Gestión de usuarios desde el backoffice central.
-3. Consola de dispositivos y conflictos de maestros en el backoffice.
-4. Edición de maestros desde la UI del TPV.
-5. Firma de actualizaciones, SBOM y pipeline de release.
+2. Gestión de usuarios desde el backoffice central y aprovisionamiento a terminales.
+3. Edición de maestros desde la UI del TPV.
+4. Firma de actualizaciones, SBOM y pipeline de release.

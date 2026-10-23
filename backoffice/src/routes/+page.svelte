@@ -23,18 +23,57 @@
     cursor: number;
   }
 
+  interface DeviceRecord {
+    device_id: string;
+    tenant_id: string;
+    store_id: string;
+    name: string;
+    status: 'active' | 'revoked';
+    enrolled_at: string;
+    last_seen_at: string | null;
+    revoked_at: string | null;
+  }
+
+  interface MasterDataChange {
+    kind: string;
+    entity_id: string;
+    version: number;
+    device_id: string;
+    occurred_at: string;
+    payload: Record<string, unknown>;
+    deleted: boolean;
+  }
+
+  interface MasterDataConflict {
+    id: string;
+    tenant_id: string;
+    store_id: string;
+    kind: string;
+    entity_id: string;
+    local_version: number;
+    incoming: MasterDataChange;
+    reason: string;
+    outcome: string;
+    detected_at: string;
+  }
+
   const base = (import.meta.env.VITE_CENTRAL_URL ?? 'http://localhost:8080').replace(/\/+$/, '');
   const token = import.meta.env.VITE_CENTRAL_TOKEN ?? '';
 
   let health = $state<Health | null>(null);
   let events = $state<StoredEvent[]>([]);
+  let devices = $state<DeviceRecord[]>([]);
+  let conflicts = $state<MasterDataConflict[]>([]);
   let error = $state('');
+  let actionError = $state('');
   let loading = $state(false);
+  let busyDeviceId = $state('');
   let lastUpdated = $state('');
 
   let sales = $derived(events.filter((item) => item.event.aggregate_type === 'sale'));
   let invoices = $derived(events.filter((item) => item.event.aggregate_type === 'invoice'));
   let lastSale = $derived(sales.at(-1) ?? null);
+  let activeDevices = $derived(devices.filter((device) => device.status === 'active').length);
 
   onMount(() => {
     void load();
@@ -43,17 +82,24 @@
   async function load() {
     loading = true;
     error = '';
+    actionError = '';
     const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
     try {
-      const [healthResponse, eventsResponse] = await Promise.all([
+      const [healthResponse, eventsResponse, devicesResponse, conflictsResponse] = await Promise.all([
         fetch(`${base}/health`),
-        fetch(`${base}/api/v1/events`, { headers })
+        fetch(`${base}/api/v1/events`, { headers }),
+        fetch(`${base}/api/v1/devices`, { headers }),
+        fetch(`${base}/api/v1/master-data/conflicts`, { headers })
       ]);
       if (!healthResponse.ok) throw new Error(`health HTTP ${healthResponse.status}`);
       if (!eventsResponse.ok) throw new Error(`events HTTP ${eventsResponse.status}`);
+      if (!devicesResponse.ok) throw new Error(`devices HTTP ${devicesResponse.status}`);
+      if (!conflictsResponse.ok) throw new Error(`conflicts HTTP ${conflictsResponse.status}`);
       health = (await healthResponse.json()) as Health;
       events = (await eventsResponse.json()) as StoredEvent[];
+      devices = (await devicesResponse.json()) as DeviceRecord[];
+      conflicts = (await conflictsResponse.json()) as MasterDataConflict[];
       lastUpdated = new Date().toLocaleString('es-ES');
     } catch (cause) {
       error = `No se pudo leer la central (${base}): ${String(cause)}`;
@@ -62,8 +108,45 @@
     }
   }
 
-  function formatDate(value: string): string {
-    return new Date(value).toLocaleString('es-ES');
+  async function revokeDevice(device: DeviceRecord) {
+    if (device.status === 'revoked' || busyDeviceId) return;
+    if (!window.confirm(`¿Revocar el dispositivo "${device.name}"? Dejará de poder sincronizar.`)) {
+      return;
+    }
+    busyDeviceId = device.device_id;
+    actionError = '';
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      const response = await fetch(`${base}/api/v1/devices/${device.device_id}/revoke`, {
+        method: 'POST',
+        headers
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const updated = (await response.json()) as DeviceRecord;
+      devices = devices.map((item) => (item.device_id === updated.device_id ? updated : item));
+    } catch (cause) {
+      actionError = `No se pudo revocar ${device.name}: ${String(cause)}`;
+    } finally {
+      busyDeviceId = '';
+    }
+  }
+
+  function formatDate(value: string | null): string {
+    return value ? new Date(value).toLocaleString('es-ES') : '—';
+  }
+
+  function shortId(value: string): string {
+    return value.length > 12 ? `${value.slice(0, 8)}…` : value;
+  }
+
+  function statusLabel(status: DeviceRecord['status']): string {
+    return status === 'active' ? 'Activo' : 'Revocado';
+  }
+
+  function conflictPayload(conflict: MasterDataConflict): string {
+    const value = JSON.stringify(conflict.incoming.payload);
+    return value.length > 90 ? `${value.slice(0, 90)}…` : value;
   }
 
   function money(value: unknown): string {
@@ -99,6 +182,9 @@
   {#if error}
     <p class="error" role="alert">{error}</p>
   {/if}
+  {#if actionError}
+    <p class="error" role="alert">{actionError}</p>
+  {/if}
 
   <section class="cards">
     <article>
@@ -117,10 +203,117 @@
       <span>eventos emitidos</span>
     </article>
     <article>
+      <p class="eyebrow">DISPOSITIVOS</p>
+      <strong>{activeDevices}</strong>
+      <span>{devices.length} registrados</span>
+    </article>
+    <article>
+      <p class="eyebrow">CONFLICTOS</p>
+      <strong>{conflicts.length}</strong>
+      <span>datos maestros</span>
+    </article>
+    <article>
       <p class="eyebrow">ÚLTIMA LECTURA</p>
       <strong class="small">{lastUpdated || '—'}</strong>
       <span>{base}</span>
     </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">TERMINALES</p>
+        <h2>Dispositivos registrados</h2>
+      </div>
+      <span class="muted small">{activeDevices} activos · {devices.length - activeDevices} revocados</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Nombre</th>
+            <th>Tienda</th>
+            <th>Dispositivo</th>
+            <th>Estado</th>
+            <th>Alta</th>
+            <th>Último contacto</th>
+            <th>Acción</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each devices as device (device.device_id)}
+            <tr>
+              <td class="strong">{device.name}</td>
+              <td class="mono">{shortId(device.store_id)}</td>
+              <td class="mono">{shortId(device.device_id)}</td>
+              <td>
+                <span class="pill" class:revoked={device.status === 'revoked'}>
+                  {statusLabel(device.status)}
+                </span>
+              </td>
+              <td>{formatDate(device.enrolled_at)}</td>
+              <td>{formatDate(device.last_seen_at)}</td>
+              <td>
+                <button
+                  class="danger"
+                  type="button"
+                  disabled={device.status === 'revoked' || busyDeviceId === device.device_id}
+                  onclick={() => void revokeDevice(device)}
+                >
+                  {busyDeviceId === device.device_id ? 'Revocando…' : 'Revocar'}
+                </button>
+              </td>
+            </tr>
+          {:else}
+            <tr>
+              <td colspan="7" class="empty">Todavía no hay dispositivos registrados.</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">DATOS MAESTROS</p>
+        <h2>Conflictos detectados</h2>
+      </div>
+      <span class="muted small">Misma versión con contenido divergente</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Detectado</th>
+            <th>Tipo</th>
+            <th>Entidad</th>
+            <th>Tienda</th>
+            <th>Versión</th>
+            <th>Resultado</th>
+            <th>Payload entrante</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each conflicts as conflict (conflict.id)}
+            <tr>
+              <td>{formatDate(conflict.detected_at)}</td>
+              <td><span class="pill">{conflict.kind}</span></td>
+              <td class="mono">{shortId(conflict.entity_id)}</td>
+              <td class="mono">{shortId(conflict.store_id)}</td>
+              <td class="mono">{conflict.local_version} → {conflict.incoming.version}</td>
+              <td>{conflict.outcome === 'accept_incoming' ? 'Entrante' : 'Local'}</td>
+              <td class="mono small" title={conflictPayload(conflict)}>{conflictPayload(conflict)}</td>
+            </tr>
+          {:else}
+            <tr>
+              <td colspan="7" class="empty">Sin conflictos de datos maestros.</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <section class="panel">
@@ -286,6 +479,13 @@
     cursor: not-allowed;
   }
 
+  button.danger {
+    background: #7a3f3f;
+    color: #ffecec;
+    padding: 7px 10px;
+    font-size: 0.8rem;
+  }
+
   .error {
     border: 1px solid #7a3f3f;
     background: #2a1515;
@@ -296,7 +496,7 @@
 
   .cards {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 14px;
     margin: 20px 0;
   }
@@ -386,6 +586,12 @@
     border-radius: 999px;
     padding: 3px 8px;
     font-size: 0.75rem;
+  }
+
+  .pill.revoked {
+    border-color: #6e4040;
+    background: #2a1515;
+    color: #ffb0b0;
   }
 
   .empty {
