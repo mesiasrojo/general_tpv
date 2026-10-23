@@ -60,6 +60,32 @@ pub struct PullResponse {
     pub next_cursor: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrollRequest {
+    pub tenant_id: Uuid,
+    pub store_id: Uuid,
+    pub device_id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CentralDevice {
+    pub device_id: Uuid,
+    pub tenant_id: Uuid,
+    pub store_id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub enrolled_at: time::OffsetDateTime,
+    pub last_seen_at: Option<time::OffsetDateTime>,
+    pub revoked_at: Option<time::OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnrollResponse {
+    pub device: CentralDevice,
+    pub token: String,
+}
+
 #[derive(Clone)]
 pub struct SyncClient {
     base_url: String,
@@ -74,6 +100,24 @@ impl SyncClient {
             token,
             client: Client::new(),
         }
+    }
+
+    /// Enrolls this terminal. `admin_token` is required when the central server
+    /// has a management token configured.
+    pub async fn enroll(
+        &self,
+        request: EnrollRequest,
+        admin_token: Option<&str>,
+    ) -> Result<EnrollResponse, SyncError> {
+        let mut builder = self
+            .client
+            .post(format!("{}/api/v1/devices/enroll", self.base_url))
+            .json(&request);
+        if let Some(token) = admin_token {
+            builder = builder.bearer_auth(token);
+        }
+        let response = builder.send().await?;
+        decode(response).await
     }
 
     pub async fn push(

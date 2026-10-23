@@ -138,7 +138,14 @@ Central
   └─ PostgresStore (DATABASE_URL)
        ├─ migraciones embebidas
        ├─ deduplicación por event_id (ON CONFLICT)
-       └─ cursor global por seq BIGSERIAL
+       ├─ cursor global por seq BIGSERIAL
+       └─ registro de dispositivos con token hasheado
+
+Enrolamiento
+  ├─ POST /api/v1/devices/enroll (admin) → token tpvdev_* (solo se devuelve una vez)
+  ├─ token guardado localmente en local_identity (base SQLCipher)
+  ├─ push/pull autentican el token del dispositivo
+  └─ POST /api/v1/devices/{id}/revoke → siguientes sync devuelven 403
 ```
 
 ```text
@@ -155,12 +162,15 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - El hash del sobre es integridad técnica, **no** una cadena fiscal.
 - La central usa PostgreSQL cuando existe `DATABASE_URL`; sin ella cae a un ledger en memoria para desarrollo y tests.
 - El tenant y el dispositivo se crean una vez y se guardan en `local_identity`, de modo que los eventos pendientes siguen siendo válidos tras reiniciar el terminal.
+- El CLI enrola automáticamente el terminal la primera vez y guarda el token en la base cifrada. `--enroll` rota el token y permite recuperar un dispositivo revocado.
+- El token de dispositivo solo puede empujar y leer su propio tenant/tienda. La revocación invalida el token de inmediato.
 - Un evento rechazado o agotado se marca en `sync_outbox` con `failed_at`, `attempts` y `last_error`; deja de bloquear la cola y aparece en la consola de cuarentena.
 - La UI del TPV y el CLI muestran el estado local y permiten reintentar la cuarentena sin reiniciar el terminal.
 
 ## 6. Central y backoffice
 
-- `tpv-server` expone salud, push, pull, eventos y ventas.
+- `tpv-server` expone salud, push, pull, eventos, ventas y gestión de dispositivos.
+- `POST /api/v1/devices/enroll` emite un token por dispositivo; `GET /api/v1/devices` y `POST /api/v1/devices/{id}/revoke` requieren el token de administración.
 - Sirve el backoffice estático si existe `backoffice/build` o `TPV_BACKOFFICE_DIR`.
 - El backoffice muestra salud, cursor, ventas, facturas y últimos eventos.
 - No reescribe ventas ni documentos.
@@ -181,13 +191,14 @@ Implementado:
 - Reintentos con backoff, cuarentena persistente y reintento manual.
 - SQLCipher con clave local de 256 bits y migración automática desde texto plano.
 - Backups cifrados consistentes desde CLI y UI, con la misma clave del terminal.
+- Enrolamiento de dispositivos con token aleatorio hasheado en la central.
+- Revocación inmediata y sync push/pull autenticados y limitados a tenant/tienda.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
 - Mover la clave local del fichero `0600` al keychain del sistema.
-- Gestión de usuarios desde backoffice central.
+- Gestión de usuarios y dispositivos desde backoffice central.
 - Adaptadores USB/serie nativos y perfiles de impresora certificados.
-- Enrolamiento y revocación de dispositivos en la central.
 - Resolución automática de conflictos de maestros.
 - Firma de actualizaciones, SBOM y pipeline de release.
 - Pruebas hardware-in-the-loop y de carga.
@@ -198,9 +209,9 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Enrolamiento/revocación de dispositivos.
-2. Resolución de conflictos de maestros.
-3. Clave local en keychain del sistema.
-4. Adaptadores USB/serie y hardware-in-the-loop.
-5. Pruebas E2E Tauri.
-6. Gestión de usuarios desde el backoffice central.
+1. Resolución de conflictos de maestros.
+2. Clave local en keychain del sistema.
+3. Adaptadores USB/serie y hardware-in-the-loop.
+4. Pruebas E2E Tauri.
+5. Gestión de usuarios desde el backoffice central.
+6. Consola de dispositivos en el backoffice.

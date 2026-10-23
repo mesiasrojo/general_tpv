@@ -96,6 +96,19 @@ async fn local_identity_is_created_once_and_stays_stable() {
     let second = services.store.sync_context().await.unwrap();
     assert_eq!(first.device_id.as_uuid(), second.device_id.as_uuid());
     assert_eq!(first.tenant_id.as_uuid(), second.tenant_id.as_uuid());
+
+    assert!(services.store.device_token().await.unwrap().is_none());
+    services
+        .store
+        .save_device_enrollment("tpvdev_test", "Caja 1")
+        .await
+        .unwrap();
+    assert_eq!(
+        services.store.device_token().await.unwrap().as_deref(),
+        Some("tpvdev_test")
+    );
+    services.store.clear_device_enrollment().await.unwrap();
+    assert!(services.store.device_token().await.unwrap().is_none());
 }
 
 #[tokio::test]

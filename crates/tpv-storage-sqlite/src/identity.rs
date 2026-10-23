@@ -47,4 +47,49 @@ impl SqliteStore {
             device_id: DeviceId::from_uuid(parse_uuid(&row.try_get::<String, _>("device_id")?)?),
         }))
     }
+
+    /// Returns the central device token stored during enrollment, if any.
+    pub async fn device_token(&self) -> StorageResult<Option<String>> {
+        let token = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT device_token FROM local_identity WHERE id = 1",
+        )
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(token.flatten())
+    }
+
+    pub async fn save_device_enrollment(
+        &self,
+        token: &str,
+        device_name: &str,
+    ) -> StorageResult<()> {
+        let enrolled_at = format_time(time::OffsetDateTime::now_utc())?;
+        let result = sqlx::query(
+            "UPDATE local_identity
+             SET device_token = ?, device_name = ?, enrolled_at = ?
+             WHERE id = 1",
+        )
+        .bind(token)
+        .bind(device_name)
+        .bind(enrolled_at)
+        .execute(self.pool())
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(crate::error::StorageError::NotFound(
+                "local identity is not initialized".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn clear_device_enrollment(&self) -> StorageResult<()> {
+        sqlx::query(
+            "UPDATE local_identity
+             SET device_token = NULL, device_name = NULL, enrolled_at = NULL
+             WHERE id = 1",
+        )
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
 }

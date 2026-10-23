@@ -10,12 +10,13 @@ mod store;
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -23,7 +24,8 @@ use tpv_domain::sync::SyncEvent;
 use uuid::Uuid;
 
 pub use store::{
-    CentralStore, MemoryStore, PostgresStore, PushStoreResult, StoreError, StoreHealth, StoredEvent,
+    CentralStore, DeviceRecord, DeviceStatus, EnrollDevice, MemoryStore, PostgresStore,
+    PushStoreResult, StoreError, StoreHealth, StoredEvent,
 };
 
 #[derive(Clone)]
@@ -64,6 +66,20 @@ pub struct PullResponse {
     pub next_cursor: u64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EnrollRequest {
+    pub tenant_id: Uuid,
+    pub store_id: Uuid,
+    pub device_id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnrollResponse {
+    pub device: DeviceRecord,
+    pub token: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
@@ -87,6 +103,20 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: "missing or invalid bearer token".into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
         }
     }
 
@@ -132,16 +162,53 @@ impl AppState {
         let Some(expected) = self.token.as_deref() else {
             return Ok(());
         };
-        let provided = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if provided == Some(expected) {
+        if bearer_token(headers) == Some(expected) {
             Ok(())
         } else {
             Err(ApiError::unauthorized())
         }
     }
+
+    /// Accepts the global admin token (unrestricted) or a valid device token
+    /// (scoped to that device).
+    async fn authenticate_device(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<DeviceRecord>, ApiError> {
+        let provided = bearer_token(headers).ok_or_else(ApiError::unauthorized)?;
+        if self.token.as_deref() == Some(provided) {
+            return Ok(None);
+        }
+        let token_hash = hash_device_token(provided);
+        let device = self
+            .store
+            .device_by_token_hash(&token_hash)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        match device {
+            Some(device) if device.status == DeviceStatus::Active => Ok(Some(device)),
+            Some(_) => Err(ApiError::forbidden("device revoked")),
+            None => Err(ApiError::unauthorized()),
+        }
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+fn generate_device_token() -> String {
+    let mut bytes = [0_u8; 32];
+    bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    format!("tpvdev_{}", hex::encode(bytes))
+}
+
+fn hash_device_token(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 pub fn app(state: AppState) -> Router {
@@ -154,6 +221,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/sync/pull", get(pull))
         .route("/api/v1/events", get(list_events))
         .route("/api/v1/sales", get(list_sales))
+        .route("/api/v1/devices", get(list_devices))
+        .route("/api/v1/devices/enroll", post(enroll_device))
+        .route("/api/v1/devices/{device_id}/revoke", post(revoke_device))
         .fallback_service(ServeDir::new(backoffice_dir).not_found_service(ServeFile::new(index)))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -178,7 +248,22 @@ async fn push(
     headers: HeaderMap,
     Json(request): Json<PushRequest>,
 ) -> Result<Json<PushResponse>, ApiError> {
-    state.authorize(&headers)?;
+    let device = state.authenticate_device(&headers).await?;
+    if let Some(device) = &device {
+        if request.device_id != device.device_id {
+            return Err(ApiError::forbidden(
+                "device token does not match the pushed device",
+            ));
+        }
+        if request.events.iter().any(|event| {
+            event.store_id.as_uuid() != device.store_id
+                || event.tenant_id.as_uuid() != device.tenant_id
+        }) {
+            return Err(ApiError::forbidden(
+                "event belongs to another tenant or store",
+            ));
+        }
+    }
     if request.events.len() > 100 {
         return Err(ApiError::bad_request("a batch is limited to 100 events"));
     }
@@ -208,6 +293,13 @@ async fn push(
         .push(valid)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(device) = device {
+        state
+            .store
+            .mark_device_seen(device.device_id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
     Ok(Json(PushResponse {
         accepted: result.accepted,
         duplicates: result.duplicates,
@@ -221,18 +313,92 @@ async fn pull(
     headers: HeaderMap,
     Query(query): Query<PullQuery>,
 ) -> Result<Json<PullResponse>, ApiError> {
-    state.authorize(&headers)?;
+    let device = state.authenticate_device(&headers).await?;
+    let store_id = match &device {
+        Some(device) => {
+            if query
+                .store_id
+                .is_some_and(|store_id| store_id != device.store_id)
+            {
+                return Err(ApiError::forbidden(
+                    "device token cannot pull another store",
+                ));
+            }
+            Some(device.store_id)
+        }
+        None => query.store_id,
+    };
     let cursor = query.cursor.unwrap_or(0);
     let events = state
         .store
-        .pull(cursor, query.store_id, 1000)
+        .pull(cursor, store_id, 1000)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let next_cursor = events.last().map_or(cursor, |stored| stored.seq);
+    if let Some(device) = device {
+        state
+            .store
+            .mark_device_seen(device.device_id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
     Ok(Json(PullResponse {
         events,
         next_cursor,
     }))
+}
+
+async fn enroll_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EnrollRequest>,
+) -> Result<Json<EnrollResponse>, ApiError> {
+    state.authorize(&headers)?;
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("device name is required"));
+    }
+    let token = generate_device_token();
+    let device = state
+        .store
+        .enroll_device(EnrollDevice {
+            device_id: request.device_id,
+            tenant_id: request.tenant_id,
+            store_id: request.store_id,
+            name: name.to_string(),
+            token_hash: hash_device_token(&token),
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(EnrollResponse { device, token }))
+}
+
+async fn list_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DeviceRecord>>, ApiError> {
+    state.authorize(&headers)?;
+    let devices = state
+        .store
+        .list_devices()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(devices))
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_id): Path<Uuid>,
+) -> Result<Json<DeviceRecord>, ApiError> {
+    state.authorize(&headers)?;
+    let device = state
+        .store
+        .revoke_device(device_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("device not found"))?;
+    Ok(Json(device))
 }
 
 async fn list_events(
@@ -269,10 +435,10 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    fn event(device_id: tpv_domain::ids::DeviceId) -> SyncEvent {
+    fn event(device_id: tpv_domain::ids::DeviceId, tenant_id: Uuid, store_id: Uuid) -> SyncEvent {
         SyncEvent::new(
-            tpv_domain::ids::TenantId::new(),
-            tpv_domain::ids::StoreId::new(),
+            tpv_domain::ids::TenantId::from_uuid(tenant_id),
+            tpv_domain::ids::StoreId::from_uuid(store_id),
             device_id,
             1,
             "sale",
@@ -285,29 +451,184 @@ mod tests {
         .unwrap()
     }
 
+    fn request(
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        match body {
+            Some(body) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        }
+    }
+
+    async fn enroll(
+        app: &Router,
+        device_id: Uuid,
+        store_id: Uuid,
+        admin_token: Option<&str>,
+    ) -> EnrollResponse {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/devices/enroll",
+                admin_token,
+                Some(json!({
+                    "tenant_id": Uuid::now_v7(),
+                    "store_id": store_id,
+                    "device_id": device_id,
+                    "name": "Caja test"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     #[tokio::test]
     async fn push_deduplicates_events() {
-        let state = AppState::new(None);
-        let app = app(state);
-        let device_id = tpv_domain::ids::DeviceId::new();
-        let event = event(device_id);
+        let app = app(AppState::new(None));
+        let device_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let enrollment = enroll(&app, device_id, store_id, None).await;
+        let event = event(
+            tpv_domain::ids::DeviceId::from_uuid(device_id),
+            enrollment.device.tenant_id,
+            store_id,
+        );
         let payload = json!({"device_id": device_id, "events": [event]});
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/sync/push")
-            .header("content-type", "application/json")
-            .body(Body::from(payload.to_string()))
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync/push",
+                Some(&enrollment.token),
+                Some(payload.clone()),
+            ))
+            .await
             .unwrap();
-        let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/sync/push")
-            .header("content-type", "application/json")
-            .body(Body::from(payload.to_string()))
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync/push",
+                Some(&enrollment.token),
+                Some(payload),
+            ))
+            .await
             .unwrap();
-        let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(request("GET", "/api/v1/devices", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let devices: Vec<DeviceRecord> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert!(devices[0].last_seen_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn revoked_device_cannot_push() {
+        let app = app(AppState::new(None));
+        let device_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let enrollment = enroll(&app, device_id, store_id, None).await;
+
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/v1/devices/{device_id}/revoke"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let event = event(
+            tpv_domain::ids::DeviceId::from_uuid(device_id),
+            enrollment.device.tenant_id,
+            store_id,
+        );
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync/push",
+                Some(&enrollment.token),
+                Some(json!({"device_id": device_id, "events": [event]})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn device_cannot_push_events_from_another_store() {
+        let app = app(AppState::new(None));
+        let device_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let enrollment = enroll(&app, device_id, store_id, None).await;
+        let event = event(
+            tpv_domain::ids::DeviceId::from_uuid(device_id),
+            enrollment.device.tenant_id,
+            Uuid::now_v7(),
+        );
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/api/v1/sync/push",
+                Some(&enrollment.token),
+                Some(json!({"device_id": device_id, "events": [event]})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn device_management_requires_admin_token_when_configured() {
+        let app = app(AppState::new(Some("secret".into())));
+        let device_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/devices/enroll",
+                None,
+                Some(json!({
+                    "tenant_id": Uuid::now_v7(),
+                    "store_id": store_id,
+                    "device_id": device_id,
+                    "name": "Caja test"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let enrollment = enroll(&app, device_id, store_id, Some("secret")).await;
+        assert_eq!(enrollment.device.device_id, device_id);
     }
 
     #[tokio::test]

@@ -29,6 +29,54 @@ pub struct StoreHealth {
     pub cursor: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceStatus {
+    Active,
+    Revoked,
+}
+
+impl DeviceStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "active" => Ok(Self::Active),
+            "revoked" => Ok(Self::Revoked),
+            other => Err(StoreError::Database(format!(
+                "invalid central device status: {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub device_id: Uuid,
+    pub tenant_id: Uuid,
+    pub store_id: Uuid,
+    pub name: String,
+    pub status: DeviceStatus,
+    pub enrolled_at: time::OffsetDateTime,
+    pub last_seen_at: Option<time::OffsetDateTime>,
+    pub revoked_at: Option<time::OffsetDateTime>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnrollDevice {
+    pub device_id: Uuid,
+    pub tenant_id: Uuid,
+    pub store_id: Uuid,
+    pub name: String,
+    pub token_hash: String,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("central database error: {0}")]
@@ -53,12 +101,27 @@ pub trait CentralStore: Send + Sync {
     async fn list_events(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError>;
     async fn list_sales(&self, limit: u32) -> Result<Vec<StoredEvent>, StoreError>;
     async fn health(&self) -> Result<StoreHealth, StoreError>;
+    async fn enroll_device(&self, device: EnrollDevice) -> Result<DeviceRecord, StoreError>;
+    async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StoreError>;
+    async fn revoke_device(&self, device_id: Uuid) -> Result<Option<DeviceRecord>, StoreError>;
+    async fn device_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<DeviceRecord>, StoreError>;
+    async fn mark_device_seen(&self, device_id: Uuid) -> Result<(), StoreError>;
 }
 
 #[derive(Default)]
 struct MemoryLedger {
     events: Vec<StoredEvent>,
+    devices: Vec<MemoryDevice>,
     next_seq: u64,
+}
+
+#[derive(Clone)]
+struct MemoryDevice {
+    record: DeviceRecord,
+    token_hash: String,
 }
 
 #[derive(Default)]
@@ -146,6 +209,90 @@ impl CentralStore for MemoryStore {
             cursor: ledger.next_seq as i64,
         })
     }
+
+    async fn enroll_device(&self, device: EnrollDevice) -> Result<DeviceRecord, StoreError> {
+        let mut ledger = self.inner.write().await;
+        let now = time::OffsetDateTime::now_utc();
+        let existing = ledger
+            .devices
+            .iter()
+            .find(|entry| entry.record.device_id == device.device_id)
+            .cloned();
+        let record = DeviceRecord {
+            device_id: device.device_id,
+            tenant_id: device.tenant_id,
+            store_id: device.store_id,
+            name: device.name,
+            status: DeviceStatus::Active,
+            enrolled_at: now,
+            last_seen_at: existing.and_then(|entry| entry.record.last_seen_at),
+            revoked_at: None,
+        };
+        let entry = MemoryDevice {
+            record: record.clone(),
+            token_hash: device.token_hash,
+        };
+        if let Some(index) = ledger
+            .devices
+            .iter()
+            .position(|existing| existing.record.device_id == record.device_id)
+        {
+            ledger.devices[index] = entry;
+        } else {
+            ledger.devices.push(entry);
+        }
+        Ok(record)
+    }
+
+    async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StoreError> {
+        let ledger = self.inner.read().await;
+        let mut devices = ledger
+            .devices
+            .iter()
+            .map(|entry| entry.record.clone())
+            .collect::<Vec<_>>();
+        devices.sort_by_key(|device| std::cmp::Reverse(device.enrolled_at));
+        Ok(devices)
+    }
+
+    async fn revoke_device(&self, device_id: Uuid) -> Result<Option<DeviceRecord>, StoreError> {
+        let mut ledger = self.inner.write().await;
+        let now = time::OffsetDateTime::now_utc();
+        let Some(entry) = ledger
+            .devices
+            .iter_mut()
+            .find(|entry| entry.record.device_id == device_id)
+        else {
+            return Ok(None);
+        };
+        entry.record.status = DeviceStatus::Revoked;
+        entry.record.revoked_at = Some(now);
+        Ok(Some(entry.record.clone()))
+    }
+
+    async fn device_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<DeviceRecord>, StoreError> {
+        let ledger = self.inner.read().await;
+        Ok(ledger
+            .devices
+            .iter()
+            .find(|entry| entry.token_hash == token_hash)
+            .map(|entry| entry.record.clone()))
+    }
+
+    async fn mark_device_seen(&self, device_id: Uuid) -> Result<(), StoreError> {
+        let mut ledger = self.inner.write().await;
+        if let Some(entry) = ledger
+            .devices
+            .iter_mut()
+            .find(|entry| entry.record.device_id == device_id)
+        {
+            entry.record.last_seen_at = Some(time::OffsetDateTime::now_utc());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -205,6 +352,19 @@ fn row_to_event(row: &sqlx::postgres::PgRow) -> Result<StoredEvent, StoreError> 
             .map_err(|_| StoreError::Database("negative event sequence".into()))?,
         event,
         received_at: row.try_get("received_at")?,
+    })
+}
+
+fn row_to_device(row: &sqlx::postgres::PgRow) -> Result<DeviceRecord, StoreError> {
+    Ok(DeviceRecord {
+        device_id: row.try_get("device_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        store_id: row.try_get("store_id")?,
+        name: row.try_get("name")?,
+        status: DeviceStatus::parse(&row.try_get::<String, _>("status")?)?,
+        enrolled_at: row.try_get("enrolled_at")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+        revoked_at: row.try_get("revoked_at")?,
     })
 }
 
@@ -295,6 +455,81 @@ impl CentralStore for PostgresStore {
             cursor: row.try_get("cursor")?,
         })
     }
+
+    async fn enroll_device(&self, device: EnrollDevice) -> Result<DeviceRecord, StoreError> {
+        let row = sqlx::query(
+            "INSERT INTO central_devices
+                (device_id, tenant_id, store_id, name, token_hash, status, enrolled_at)
+             VALUES ($1, $2, $3, $4, $5, 'active', NOW())
+             ON CONFLICT (device_id) DO UPDATE SET
+                tenant_id = EXCLUDED.tenant_id,
+                store_id = EXCLUDED.store_id,
+                name = EXCLUDED.name,
+                token_hash = EXCLUDED.token_hash,
+                status = 'active',
+                enrolled_at = NOW(),
+                revoked_at = NULL
+             RETURNING device_id, tenant_id, store_id, name, status,
+                       enrolled_at, last_seen_at, revoked_at",
+        )
+        .bind(device.device_id)
+        .bind(device.tenant_id)
+        .bind(device.store_id)
+        .bind(&device.name)
+        .bind(&device.token_hash)
+        .fetch_one(&self.pool)
+        .await?;
+        row_to_device(&row)
+    }
+
+    async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT device_id, tenant_id, store_id, name, status,
+                    enrolled_at, last_seen_at, revoked_at
+             FROM central_devices
+             ORDER BY enrolled_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_device).collect()
+    }
+
+    async fn revoke_device(&self, device_id: Uuid) -> Result<Option<DeviceRecord>, StoreError> {
+        let row = sqlx::query(
+            "UPDATE central_devices
+             SET status = 'revoked', revoked_at = NOW()
+             WHERE device_id = $1
+             RETURNING device_id, tenant_id, store_id, name, status,
+                       enrolled_at, last_seen_at, revoked_at",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_device).transpose()
+    }
+
+    async fn device_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<DeviceRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT device_id, tenant_id, store_id, name, status,
+                    enrolled_at, last_seen_at, revoked_at
+             FROM central_devices WHERE token_hash = $1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_device).transpose()
+    }
+
+    async fn mark_device_seen(&self, device_id: Uuid) -> Result<(), StoreError> {
+        sqlx::query("UPDATE central_devices SET last_seen_at = NOW() WHERE device_id = $1")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -339,5 +574,59 @@ mod tests {
                 .any(|stored| stored.event.event_id == event_id)
         );
         assert!(store.health().await.unwrap().events >= 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a PostgreSQL database"]
+    async fn postgres_device_registry_roundtrip() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let store = PostgresStore::connect(&url).await.unwrap();
+        let device_id = Uuid::now_v7();
+        let tenant_id = Uuid::now_v7();
+        let store_id = Uuid::now_v7();
+        let first_hash = format!("hash-{}", Uuid::now_v7());
+        let device = store
+            .enroll_device(EnrollDevice {
+                device_id,
+                tenant_id,
+                store_id,
+                name: "Caja Postgres".into(),
+                token_hash: first_hash.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(device.status, DeviceStatus::Active);
+
+        let found = store
+            .device_by_token_hash(&first_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.device_id, device_id);
+        store.mark_device_seen(device_id).await.unwrap();
+        let seen = store
+            .device_by_token_hash(&first_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(seen.last_seen_at.is_some());
+
+        let revoked = store.revoke_device(device_id).await.unwrap().unwrap();
+        assert_eq!(revoked.status, DeviceStatus::Revoked);
+        assert!(revoked.revoked_at.is_some());
+
+        let reactivated = store
+            .enroll_device(EnrollDevice {
+                device_id,
+                tenant_id,
+                store_id,
+                name: "Caja Postgres 2".into(),
+                token_hash: format!("hash-{}", Uuid::now_v7()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reactivated.status, DeviceStatus::Active);
+        assert!(reactivated.revoked_at.is_none());
+        assert_eq!(reactivated.name, "Caja Postgres 2");
     }
 }

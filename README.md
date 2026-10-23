@@ -19,7 +19,8 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
-| USB/serie nativo y clave en keychain | Pendiente de siguiente iteración |
+| Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
+| USB/serie nativo, clave en keychain y conflictos de maestros | Pendiente de siguiente iteración |
 
 ## Arranque rápido
 
@@ -50,10 +51,17 @@ Terminal B:
 cargo run -p tpv-cli -- --memory --sync-url http://127.0.0.1:8080
 ```
 
-El CLI empuja los eventos del outbox con reintentos, muestra el estado local de la cola y hace un pull de verificación. Si algún evento queda en cuarentena, `--retry-failed` lo devuelve a la cola antes de sincronizar:
+La primera sincronización enrola el terminal automáticamente contra `/api/v1/devices/enroll` y guarda el token del dispositivo en la base cifrada. Si la central tiene configurado `TPV_CENTRAL_TOKEN`, expórtalo para autorizar el alta:
 
 ```bash
-cargo run -p tpv-cli -- --memory --sync-url http://127.0.0.1:8080 --retry-failed
+TPV_CENTRAL_TOKEN=secreto cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 --device-name "Caja 1"
+```
+
+Si el dispositivo ha sido revocado o se ha perdido el token, `--enroll` fuerza un nuevo alta y rota el token. `--retry-failed` devuelve antes a la cola los eventos en cuarentena:
+
+```bash
+cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 \
+  --device-name "Caja 1" --enroll --retry-failed
 ```
 
 La base local se cifra con SQLCipher. En modo fichero, la clave se genera una sola vez en `<base>.key` con permisos `0600`; si la base ya existía en texto plano, se migra automáticamente. Para crear un backup cifrado consistente:
@@ -69,6 +77,9 @@ El servidor expone:
 - `GET /api/v1/sync/pull?cursor=0`
 - `GET /api/v1/events`
 - `GET /api/v1/sales`
+- `POST /api/v1/devices/enroll`
+- `GET /api/v1/devices`
+- `POST /api/v1/devices/{device_id}/revoke`
 
 ### 3. UI del TPV
 

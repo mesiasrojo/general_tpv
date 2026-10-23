@@ -15,7 +15,7 @@ use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::{DatabaseKey, SqliteStore};
-use tpv_sync::{RetryPolicy, SyncClient, SyncWorker};
+use tpv_sync::{EnrollRequest, RetryPolicy, SyncClient, SyncWorker};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,16 +29,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut in_memory = false;
     let mut retry_failed = false;
+    let mut force_enroll = false;
     let mut sync_url = None;
     let mut backup_path = None;
+    let mut device_name = "TPV CLI".to_string();
     let mut path = None;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--memory" => in_memory = true,
             "--retry-failed" => retry_failed = true,
+            "--enroll" => force_enroll = true,
             "--sync-url" => sync_url = iter.next().cloned(),
             "--backup" => backup_path = iter.next().cloned(),
+            "--device-name" => {
+                device_name = iter
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| "TPV CLI".to_string());
+            }
             other if other.starts_with("--") => {}
             other => {
                 if path.is_none() {
@@ -285,7 +294,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(url) = sync_url {
-        let client = SyncClient::new(url, std::env::var("TPV_CENTRAL_TOKEN").ok());
+        let admin_token = std::env::var("TPV_CENTRAL_TOKEN").ok();
+        let stored_token = if force_enroll {
+            None
+        } else {
+            store.device_token().await?
+        };
+        let device_token = match stored_token {
+            Some(token) => token,
+            None => {
+                let enrollment_client = SyncClient::new(url.clone(), None);
+                let enrollment = enrollment_client
+                    .enroll(
+                        EnrollRequest {
+                            tenant_id: sync.tenant_id.as_uuid(),
+                            store_id: demo.store_id.as_uuid(),
+                            device_id: sync.device_id.as_uuid(),
+                            name: device_name.clone(),
+                        },
+                        admin_token.as_deref(),
+                    )
+                    .await?;
+                store
+                    .save_device_enrollment(&enrollment.token, &device_name)
+                    .await?;
+                println!(
+                    "\nDispositivo enrolado: {} · {} · {}",
+                    enrollment.device.device_id, enrollment.device.name, enrollment.device.status
+                );
+                enrollment.token
+            }
+        };
+        let client = SyncClient::new(url, Some(device_token));
         let worker = SyncWorker::new(client.clone(), RetryPolicy::default());
         let report = worker
             .push_pending(sync_repo.as_ref(), sync.device_id, 100)
