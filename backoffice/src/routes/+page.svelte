@@ -714,6 +714,12 @@
 </main>
 
 <style>
+  :global(*),
+  :global(*::before),
+  :global(*::after) {
+    box-sizing: border-box;
+  }
+
   :global(body) {
     margin: 0;
     background:
@@ -768,6 +774,7 @@
   .actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
   }
 
@@ -817,15 +824,22 @@
 
   .user-form {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
     margin-bottom: 16px;
     align-items: end;
   }
 
+  .form-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: flex-end;
+  }
+
   .field {
     display: grid;
     gap: 5px;
+    min-width: 0;
   }
 
   .field span {
@@ -838,6 +852,8 @@
 
   .field input,
   .field select {
+    width: 100%;
+    min-width: 0;
     background: var(--panel-2);
     border: 1px solid var(--line);
     border-radius: 9px;
@@ -848,6 +864,7 @@
 
   .row-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
   }
 
@@ -900,6 +917,7 @@
   .panel-heading {
     display: flex;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 16px;
     align-items: flex-end;
     margin-bottom: 12px;
@@ -965,6 +983,12 @@
     padding: 28px;
   }
 
+  @media (max-width: 1050px) {
+    .user-form {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
   @media (max-width: 900px) {
     .cards {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -972,6 +996,21 @@
 
     .topbar {
       flex-direction: column;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .shell {
+      padding: 20px 16px 40px;
+    }
+
+    .user-form,
+    .cards {
+      grid-template-columns: 1fr;
+    }
+
+    .form-actions button {
+      width: 100%;
     }
   }
 </style>

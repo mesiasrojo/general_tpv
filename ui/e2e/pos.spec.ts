@@ -167,6 +167,12 @@ test.describe('TPV desktop UI', () => {
         async list_customers() {
           return customerRecords;
         },
+        async list_users() {
+          return [user()];
+        },
+        async list_stores() {
+          return [{ id: storeId, name: 'Caja 1' }];
+        },
         async save_customer(request: any) {
           const existing = request.customer_id
             ? customerRecords.find((customer) => customer.id === request.customer_id)
@@ -400,6 +406,10 @@ test.describe('TPV desktop UI', () => {
               return api.bootstrap();
             case 'list_customers':
               return api.list_customers();
+            case 'list_users':
+              return api.list_users();
+            case 'list_stores':
+              return api.list_stores();
             case 'save_customer':
               return api.save_customer(args.request);
             case 'open_cash':
@@ -500,6 +510,7 @@ test.describe('TPV desktop UI', () => {
 
   test('login, add a product, take payment and print', async ({ page }) => {
     page.on('dialog', (dialog) => void dialog.accept('Devolución E2E'));
+    await page.setViewportSize({ width: 1100, height: 700 });
     await page.goto('/');
 
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
@@ -555,6 +566,33 @@ test.describe('TPV desktop UI', () => {
     await page.getByRole('button', { name: 'Guardar producto' }).click();
     await expect(page.locator('.product-row', { hasText: 'Producto E2E editado' })).toBeVisible();
     await page.getByRole('dialog', { name: 'Catálogo' }).getByRole('button', { name: 'Esc' }).click();
+    await page.getByRole('button', { name: 'Usuarios' }).click();
+    const usersDialog = page.getByRole('dialog', { name: 'Gestión de usuarios' });
+    await expect(usersDialog).toBeVisible();
+    await expect(usersDialog.getByText('admin', { exact: true })).toBeVisible();
+    const userFormOverflow = await usersDialog.evaluate((dialog) => {
+      const form = dialog.querySelector('.user-create');
+      if (!form) return true;
+      const button = form.querySelector('button');
+      if (!button) return true;
+      const bounds = dialog.getBoundingClientRect();
+      const buttonRect = button.getBoundingClientRect();
+      return [...form.querySelectorAll('input, select')].some((element) => {
+        const rect = element.getBoundingClientRect();
+        return (
+          rect.left < bounds.left ||
+          rect.right > bounds.right ||
+          !(
+            rect.right <= buttonRect.left ||
+            rect.left >= buttonRect.right ||
+            rect.bottom <= buttonRect.top ||
+            rect.top >= buttonRect.bottom
+          )
+        );
+      });
+    });
+    expect(userFormOverflow).toBe(false);
+    await usersDialog.getByRole('button', { name: 'Esc' }).click();
 
     const search = page.getByRole('textbox', { name: 'Buscar artículo' });
     await search.fill('café');

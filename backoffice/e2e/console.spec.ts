@@ -144,6 +144,7 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
     }
   });
 
+  await page.setViewportSize({ width: 1100, height: 700 });
   await page.goto('/');
 
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
@@ -155,6 +156,29 @@ test('shows devices and conflicts, and revokes a device', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light_theme');
 
   await expect(page.getByRole('heading', { name: 'Usuarios centrales' })).toBeVisible();
+  const userFormOverflow = await page.evaluate(() => {
+    const form = document.querySelector('.user-form');
+    if (!form) return true;
+    const button = form.querySelector('button');
+    if (!button) return true;
+    const bounds = form.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return [...form.querySelectorAll('input, select')].some((element) => {
+      const rect = element.getBoundingClientRect();
+      return (
+        rect.left < bounds.left ||
+        rect.right > bounds.right ||
+        !(
+          rect.right <= buttonRect.left ||
+          rect.left >= buttonRect.right ||
+          rect.bottom <= buttonRect.top ||
+          rect.top >= buttonRect.bottom
+        )
+      );
+    });
+  });
+  expect(userFormOverflow).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await expect(page.getByRole('heading', { name: 'Dispositivos registrados' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Conflictos detectados' })).toBeVisible();
   await expect(page.getByRole('row', { name: /supervisor/ })).toBeVisible();
