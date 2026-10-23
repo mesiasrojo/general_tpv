@@ -9,6 +9,7 @@
     type CashSession,
     type Invoice,
     type LineKind,
+    type MasterDataConflict,
     type PaymentMethod,
     type Product,
     type ProductSearchResult,
@@ -60,9 +61,34 @@
   let newStoreId = $state('');
   let newPassword = $state('');
   let resetPasswordDrafts = $state<Record<string, string>>({});
+  let catalogOpen = $state(false);
+  let catalogItems = $state<Product[]>([]);
+  let catalogConflicts = $state<MasterDataConflict[]>([]);
+  let catalogError = $state('');
+  let catalogBusy = $state(false);
+  let catalogFilter = $state('');
+  let editingProductId = $state<string | null>(null);
+  let productSku = $state('');
+  let productBarcode = $state('');
+  let productName = $state('');
+  let productFamily = $state('');
+  let productPrice = $state('0.00');
+  let productTaxCode = $state('IVA21');
+  let productTaxPercentBp = $state(2100);
+  let productActive = $state(true);
 
   let change = $derived(Math.max(0, receivedCents - amountCents));
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
+  let filteredCatalog = $derived(
+    catalogItems.filter((product) => {
+      const needle = catalogFilter.trim().toLowerCase();
+      return (
+        !needle ||
+        product.name.toLowerCase().includes(needle) ||
+        product.sku.toLowerCase().includes(needle)
+      );
+    })
+  );
 
   onMount(() => {
     void restoreSession();
@@ -132,6 +158,10 @@
       default:
         return role;
     }
+  }
+
+  function shortId(value: string): string {
+    return value.length > 12 ? `${value.slice(0, 8)}…` : value;
   }
 
   async function load() {
@@ -236,6 +266,92 @@
       }
     } catch (error) {
       userError = String(error);
+    }
+  }
+
+  async function openCatalog() {
+    catalogError = '';
+    catalogOpen = true;
+    await refreshCatalog();
+  }
+
+  async function refreshCatalog() {
+    catalogBusy = true;
+    catalogError = '';
+    try {
+      const [items, conflicts] = await Promise.all([
+        api.listProducts(),
+        api.listMasterDataConflicts()
+      ]);
+      catalogItems = items;
+      catalogConflicts = conflicts;
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
+    }
+  }
+
+  function resetProductForm() {
+    editingProductId = null;
+    productSku = '';
+    productBarcode = '';
+    productName = '';
+    productFamily = '';
+    productPrice = '0.00';
+    productTaxCode = 'IVA21';
+    productTaxPercentBp = 2100;
+    productActive = true;
+    catalogError = '';
+  }
+
+  function editProduct(product: Product) {
+    editingProductId = product.id;
+    productSku = product.sku;
+    productBarcode = product.barcode ?? '';
+    productName = product.name;
+    productFamily = product.family_code ?? '';
+    productPrice = product.unit_price;
+    productTaxCode = product.tax_rate.code;
+    productTaxPercentBp = product.tax_rate.percent_bp;
+    productActive = product.active;
+    catalogError = '';
+  }
+
+  async function saveProduct() {
+    if (catalogBusy) return;
+    catalogError = '';
+    if (!productSku.trim() || !productName.trim()) {
+      catalogError = 'SKU y nombre son obligatorios.';
+      return;
+    }
+    const price = Number.parseFloat(productPrice.replace(',', '.'));
+    if (!Number.isFinite(price) || price < 0) {
+      catalogError = 'El precio debe ser un número no negativo.';
+      return;
+    }
+    catalogBusy = true;
+    try {
+      const saved = await api.saveProduct({
+        product_id: editingProductId,
+        sku: productSku.trim(),
+        barcode: productBarcode.trim() || null,
+        name: productName.trim(),
+        family_code: productFamily.trim() || null,
+        unit_price: productPrice.trim().replace(',', '.'),
+        tax_code: productTaxCode.trim(),
+        tax_percent_bp: productTaxPercentBp,
+        active: productActive
+      });
+      catalogItems = catalogItems.some((item) => item.id === saved.id)
+        ? catalogItems.map((item) => (item.id === saved.id ? saved : item))
+        : [...catalogItems, saved];
+      message = `Producto guardado: ${saved.sku} · ${saved.name}`;
+      resetProductForm();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
     }
   }
 
@@ -557,6 +673,7 @@
       <span class="badge">{session.user.display_name} · {roleLabel(session.user.role)}</span>
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
       {#if session.user.role === 'admin' || session.user.role === 'manager'}
+        <button class="icon" type="button" onclick={() => void openCatalog()}>Catálogo</button>
         <button
           class="icon"
           type="button"
@@ -1049,6 +1166,126 @@
       </div>
     </div>
   {/if}
+
+  {#if catalogOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal catalog-modal" role="dialog" aria-modal="true" aria-label="Catálogo">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">DATOS MAESTROS</p>
+            <h2>Catálogo</h2>
+          </div>
+          <button class="icon" type="button" onclick={() => (catalogOpen = false)}>Esc</button>
+        </div>
+
+        {#if catalogError}
+          <p class="error" role="alert">{catalogError}</p>
+        {/if}
+
+        <form
+          class="product-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveProduct();
+          }}
+        >
+          <label class="field">
+            <span>SKU</span>
+            <input bind:value={productSku} autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Nombre</span>
+            <input bind:value={productName} />
+          </label>
+          <label class="field">
+            <span>Código de barras</span>
+            <input bind:value={productBarcode} inputmode="numeric" />
+          </label>
+          <label class="field">
+            <span>Familia</span>
+            <input bind:value={productFamily} />
+          </label>
+          <label class="field">
+            <span>Precio</span>
+            <input bind:value={productPrice} inputmode="decimal" />
+          </label>
+          <label class="field">
+            <span>Código fiscal</span>
+            <input bind:value={productTaxCode} />
+          </label>
+          <label class="field">
+            <span>% IVA</span>
+            <input bind:value={productTaxPercentBp} type="number" min="0" max="10000" step="1" />
+          </label>
+          <div class="field">
+            <span>Estado</span>
+            <label class="inline">
+              <input type="checkbox" bind:checked={productActive} />
+              Activo
+            </label>
+          </div>
+          <div class="product-actions">
+            <button class="primary" type="submit" disabled={catalogBusy}>
+              {catalogBusy ? 'Guardando…' : 'Guardar producto'}
+            </button>
+            <button class="secondary" type="button" onclick={resetProductForm}>
+              Nuevo producto
+            </button>
+          </div>
+        </form>
+
+        <div class="catalog-toolbar">
+          <input
+            class="catalog-filter"
+            placeholder="Buscar producto"
+            bind:value={catalogFilter}
+            aria-label="Buscar producto"
+          />
+          <span class="muted small">{filteredCatalog.length} producto(s)</span>
+        </div>
+
+        <div class="product-list">
+          {#each filteredCatalog as product (product.id)}
+            <div class="product-row">
+              <div>
+                <strong>{product.name}</strong>
+                <span class="muted small mono">
+                  {product.sku} · {product.unit_price} € · {product.tax_rate.percent_bp / 100}% IVA
+                </span>
+              </div>
+              <div class="product-row-actions">
+                <span class="badge" class:inactive={!product.active}>
+                  {product.active ? 'ACTIVO' : 'INACTIVO'}
+                </span>
+                <button class="secondary" type="button" onclick={() => editProduct(product)}>
+                  Editar
+                </button>
+              </div>
+            </div>
+          {:else}
+            <p class="muted small">No hay productos que coincidan.</p>
+          {/each}
+        </div>
+
+        <div class="conflict-summary">
+          <p class="eyebrow">CONFLICTOS</p>
+          {#if catalogConflicts.length === 0}
+            <p class="muted small">Sin conflictos de maestros.</p>
+          {:else}
+            {#each catalogConflicts as conflict (conflict.id)}
+              <div class="conflict-row">
+                <span>
+                  {conflict.kind} · {shortId(conflict.entity_id)} · v{conflict.local_version} →
+                  v{conflict.incoming.version}
+                </span>
+                <span class="badge warn">{conflict.reason}</span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>
 {/if}
 
@@ -1498,6 +1735,90 @@
   .inline input {
     width: auto;
     padding: 0;
+  }
+
+  .catalog-modal {
+    width: min(900px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .product-form {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    align-items: end;
+    padding-bottom: 14px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .product-form .field {
+    margin: 0;
+  }
+
+  .product-actions {
+    grid-column: span 2;
+    display: flex;
+    gap: 8px;
+    align-items: end;
+  }
+
+  .catalog-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .catalog-filter {
+    flex: 1;
+  }
+
+  .product-list {
+    display: grid;
+    gap: 8px;
+    max-height: 280px;
+    overflow: auto;
+  }
+
+  .product-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .product-row > div:first-child {
+    display: grid;
+    gap: 3px;
+  }
+
+  .product-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .badge.inactive {
+    background: #4b2c2c;
+    color: #ffd8d8;
+  }
+
+  .conflict-summary {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+
+  .conflict-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 0;
   }
 
   .modal-heading {

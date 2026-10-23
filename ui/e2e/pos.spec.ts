@@ -44,6 +44,7 @@ test.describe('TPV desktop UI', () => {
         active: true
       });
 
+      const catalogItems: Array<Record<string, unknown>> = [];
       const api = {
         async current_user() {
           return session;
@@ -229,6 +230,33 @@ test.describe('TPV desktop UI', () => {
               return api.list_failed_sync_events();
             case 'search_products':
               return api.search_products(String(args.query));
+            case 'list_products':
+              return catalogItems;
+            case 'list_master_data_conflicts':
+              return [];
+            case 'save_product': {
+              const request = args.request as Record<string, unknown>;
+              const saved = {
+                id: request.product_id ?? crypto.randomUUID(),
+                sku: request.sku,
+                barcode: request.barcode ?? null,
+                name: request.name,
+                family_code: request.family_code ?? null,
+                unit_price: request.unit_price,
+                tax_rate: {
+                  code: request.tax_code,
+                  percent_bp: request.tax_percent_bp
+                },
+                active: request.active
+              };
+              const index = catalogItems.findIndex((item) => item.id === saved.id);
+              if (index >= 0) {
+                catalogItems[index] = saved;
+              } else {
+                catalogItems.push(saved);
+              }
+              return saved;
+            }
             case 'start_sale':
               return api.start_sale();
             case 'add_line':
@@ -267,6 +295,21 @@ test.describe('TPV desktop UI', () => {
 
     await page.getByRole('button', { name: 'Sincronizar ahora' }).click();
     await expect(page.getByText(/Sincronizado: 1 aceptados, 1 usuario/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Catálogo' }).click();
+    await expect(page.getByRole('dialog', { name: 'Catálogo' })).toBeVisible();
+    await expect(page.getByText('Sin conflictos de maestros.')).toBeVisible();
+    await page.getByLabel('SKU').fill('UI-E2E-1');
+    await page.getByLabel('Nombre').fill('Producto E2E');
+    await page.getByLabel('Precio').fill('7.50');
+    await page.getByRole('button', { name: 'Guardar producto' }).click();
+    const productRow = page.locator('.product-row', { hasText: 'Producto E2E' });
+    await expect(productRow).toBeVisible();
+    await productRow.getByRole('button', { name: 'Editar' }).click();
+    await page.getByLabel('Nombre').fill('Producto E2E editado');
+    await page.getByRole('button', { name: 'Guardar producto' }).click();
+    await expect(page.locator('.product-row', { hasText: 'Producto E2E editado' })).toBeVisible();
+    await page.getByRole('dialog', { name: 'Catálogo' }).getByRole('button', { name: 'Esc' }).click();
 
     const search = page.getByRole('textbox', { name: 'Buscar artículo' });
     await search.fill('café');

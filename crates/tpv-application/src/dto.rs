@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::cash::CashCount;
-use tpv_domain::ids::{CustomerId, RegisterId, SaleId, SellerId, StoreId, UserId};
+use tpv_domain::ids::{CustomerId, ProductId, RegisterId, SaleId, SellerId, StoreId, UserId};
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
@@ -24,6 +24,27 @@ pub struct PublishMasterDataRequest {
     pub payload: serde_json::Value,
     pub deleted: bool,
     pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertProductRequest {
+    #[serde(default)]
+    pub product_id: Option<ProductId>,
+    pub sku: String,
+    #[serde(default)]
+    pub barcode: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub family_code: Option<String>,
+    pub unit_price: String,
+    pub tax_code: String,
+    pub tax_percent_bp: u32,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+fn default_active() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

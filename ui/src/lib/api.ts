@@ -39,6 +39,41 @@ export interface Product {
   active: boolean;
 }
 
+export interface SaveProductRequest {
+  product_id?: string | null;
+  sku: string;
+  barcode: string | null;
+  name: string;
+  family_code: string | null;
+  unit_price: string;
+  tax_code: string;
+  tax_percent_bp: number;
+  active: boolean;
+}
+
+export interface MasterDataChange {
+  kind: string;
+  entity_id: string;
+  version: number;
+  device_id: string;
+  occurred_at: string;
+  payload: unknown;
+  deleted: boolean;
+}
+
+export interface MasterDataConflict {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  kind: string;
+  entity_id: string;
+  local_version: number;
+  incoming: MasterDataChange;
+  reason: string;
+  outcome: string;
+  detected_at: string;
+}
+
 export interface ProductSearchResult {
   sku: string;
   name: string;
@@ -238,6 +273,10 @@ export const api = {
   currentUser: () => invoke<SessionUser | null>('current_user'),
   bootstrap: () => invoke<AppInfo>('bootstrap'),
   searchProducts: (query: string) => invoke<ProductSearchResult[]>('search_products', { query }),
+  listProducts: () => invoke<Product[]>('list_products'),
+  saveProduct: (request: SaveProductRequest) => invoke<Product>('save_product', { request }),
+  listMasterDataConflicts: (limit = 100) =>
+    invoke<MasterDataConflict[]>('list_master_data_conflicts', { limit }),
   startSale: () => invoke<SaleView>('start_sale'),
   addLine: (saleId: string, sku: string, quantity: string, kind: LineKind) =>
     invoke<SaleView>('add_line', { saleId, sku, quantity, kind }),

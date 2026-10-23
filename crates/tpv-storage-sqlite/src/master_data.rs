@@ -2,6 +2,7 @@ use sqlx::{Row, Sqlite, Transaction};
 use tpv_application::{
     ApplicationError, MasterDataRepository, PublishMasterDataRequest, Result as AppResult,
 };
+use tpv_domain::catalog::Product;
 use tpv_domain::ids::{StoreId, TenantId};
 use tpv_domain::master_data::{
     MasterDataApplyResult, MasterDataChange, MasterDataConflict, MasterDataKind, resolve_change,
@@ -132,6 +133,14 @@ impl MasterDataRepository for SqliteStore {
                 upsert_master_change_tx(&mut tx, tenant_id, store_id, change, now).await?;
             }
             tx.commit().await?;
+            if resolution.applied() && change.kind == MasterDataKind::Product {
+                if let Ok(mut product) = serde_json::from_value::<Product>(change.payload.clone()) {
+                    if change.deleted {
+                        product.active = false;
+                    }
+                    self.persist_product(&product).await?;
+                }
+            }
             Ok(MasterDataApplyResult {
                 applied: resolution.applied(),
                 conflict,
@@ -190,6 +199,14 @@ impl MasterDataRepository for SqliteStore {
             )?;
             enqueue_event_tx(&mut tx, &event).await?;
             tx.commit().await?;
+            if kind == MasterDataKind::Product {
+                if let Ok(mut product) = serde_json::from_value::<Product>(change.payload.clone()) {
+                    if deleted {
+                        product.active = false;
+                    }
+                    self.persist_product(&product).await?;
+                }
+            }
             Ok(event)
         }
         .await;

@@ -206,6 +206,7 @@ Implementado:
 - Login local con Argon2id, bloqueo por intentos, roles y auditoría.
 - RBAC por comando: venta, caja, impresión, sync y gestión de usuarios.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
+- Catálogo de productos editable desde la UI con versión maestra, evento en outbox y visualización de conflictos.
 - Protección del último administrador activo y de la propia cuenta.
 - Validación de NIF/NIE/CIF.
 - Transacciones atómicas para venta + outbox + auditoría.
@@ -240,5 +241,4 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 ## 9. Siguiente iteración recomendada
 
 1. Ejecución HIL en tienda piloto y ajuste de umbrales de carga.
-2. Edición de maestros desde la UI del TPV.
-3. Firma de actualizaciones, SBOM y pipeline de release.
+2. Firma de actualizaciones, SBOM y pipeline de release.

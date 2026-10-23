@@ -11,16 +11,16 @@ use tpv_application::{
     CashRepository, CashService, CatalogRepository, CatalogService, CloseCashRequest,
     ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, MasterDataRepository,
     MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
-    QuarantinedEvent, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
+    ProductService, QuarantinedEvent, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
     SequenceRepository, SessionUser, StartSaleRequest, SyncContext, SyncOutboxRepository,
-    SyncService, SyncStatus, UpdateUserRequest, UserRepository,
+    SyncService, SyncStatus, UpdateUserRequest, UpsertProductRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::Product;
 use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
-use tpv_domain::master_data::MasterDataChange;
+use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Role, UserAccount, UserProvision};
 use tpv_domain::sale::PaymentMethod;
 use tpv_print::{
@@ -49,6 +49,7 @@ struct AppState {
     sync_repo: Arc<dyn SyncOutboxRepository>,
     users: Arc<dyn UserRepository>,
     master_data: MasterDataService,
+    products: ProductService,
 }
 
 #[derive(Debug, Serialize)]
@@ -595,6 +596,45 @@ async fn list_stores(state: State<'_, AppState>) -> Result<Vec<tpv_domain::peopl
 }
 
 #[tauri::command]
+async fn list_products(state: State<'_, AppState>) -> Result<Vec<Product>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .products
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_product(
+    state: State<'_, AppState>,
+    request: UpsertProductRequest,
+) -> Result<Product, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .products
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_master_data_conflicts(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<MasterDataConflict>, String> {
+    require_manager(state.inner())?;
+    state
+        .inner()
+        .master_data
+        .list_conflicts(limit.unwrap_or(100))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn backup_now(state: State<'_, AppState>) -> Result<BackupSummary, String> {
     require_manager(state.inner())?;
     let state = state.inner().clone();
@@ -754,7 +794,7 @@ async fn build_app_state(
     );
     let print = PrintService::new(
         sale_repo,
-        catalog_repo,
+        catalog_repo.clone(),
         print_repo,
         Arc::new(renderer),
         clock.clone(),
@@ -762,6 +802,7 @@ async fn build_app_state(
     let sync_service = SyncService::new(sync_repo.clone());
     let backup_service = BackupService::new(backup_repo);
     let master_data = MasterDataService::new(master_data_repo, clock.clone());
+    let products = ProductService::new(catalog_repo, master_data.clone());
     let auth = AuthService::new(
         user_repo.clone(),
         Arc::new(Argon2PasswordHasher),
@@ -788,6 +829,7 @@ async fn build_app_state(
         sync_repo,
         users: user_repo,
         master_data,
+        products,
     })
 }
 
@@ -868,6 +910,9 @@ fn main() {
             update_user,
             reset_password,
             list_stores,
+            list_products,
+            save_product,
+            list_master_data_conflicts,
             backup_now,
             sync_now
         ])
@@ -935,6 +980,9 @@ mod e2e_tests {
                 update_user,
                 reset_password,
                 list_stores,
+                list_products,
+                save_product,
+                list_master_data_conflicts,
                 backup_now,
                 sync_now
             ])
@@ -1039,6 +1087,62 @@ mod e2e_tests {
         let cash = invoke(&webview, "cash_status", json!({})).expect("cash status");
         assert!(cash.is_object());
         assert_eq!(cash["state"], "open");
+
+        let conflicts =
+            invoke(&webview, "list_master_data_conflicts", json!({})).expect("conflicts");
+        assert_eq!(conflicts.as_array().expect("conflicts array").len(), 0);
+
+        let product = invoke(
+            &webview,
+            "save_product",
+            json!({
+                "request": {
+                    "sku": "UI-1",
+                    "barcode": "8412345678901",
+                    "name": "Producto UI",
+                    "family_code": "UI",
+                    "unit_price": "9.95",
+                    "tax_code": "IVA21",
+                    "tax_percent_bp": 2100,
+                    "active": true
+                }
+            }),
+        )
+        .expect("save product");
+        assert_eq!(product["sku"], "UI-1");
+        assert_eq!(product["name"], "Producto UI");
+        assert_eq!(product["unit_price"], "9.95");
+        let product_id = product["id"].as_str().expect("product id").to_string();
+
+        let products = invoke(&webview, "list_products", json!({})).expect("list products");
+        assert!(
+            products
+                .as_array()
+                .expect("products array")
+                .iter()
+                .any(|item| item["id"] == product_id)
+        );
+
+        let updated = invoke(
+            &webview,
+            "save_product",
+            json!({
+                "request": {
+                    "product_id": product_id,
+                    "sku": "UI-1",
+                    "barcode": "8412345678901",
+                    "name": "Producto UI actualizado",
+                    "family_code": "UI",
+                    "unit_price": "10.95",
+                    "tax_code": "IVA21",
+                    "tax_percent_bp": 2100,
+                    "active": true
+                }
+            }),
+        )
+        .expect("update product");
+        assert_eq!(updated["name"], "Producto UI actualizado");
+        assert_eq!(updated["unit_price"], "10.95");
 
         let backup = invoke(&webview, "backup_now", json!({})).expect("backup");
         assert!(backup["bytes"].as_u64().unwrap_or(0) > 0);

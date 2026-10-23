@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod invoice;
 pub mod master_data;
 pub mod print;
+pub mod products;
 pub mod sale;
 pub mod sync;
 
@@ -15,5 +16,6 @@ pub use catalog::CatalogService;
 pub use invoice::InvoiceService;
 pub use master_data::MasterDataService;
 pub use print::PrintService;
+pub use products::ProductService;
 pub use sale::SaleService;
 pub use sync::SyncService;

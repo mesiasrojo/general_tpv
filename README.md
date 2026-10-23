@@ -22,6 +22,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
+| Edición de maestros en el TPV | Implementado (catálogo de productos, versión maestra y outbox) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
 | Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
@@ -170,7 +171,9 @@ npm install
 npm run dev
 ```
 
-Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`). El contenedor de desarrollo actual no las tiene instaladas, por lo que el crate `apps/desktop` está excluido del workspace y no se compila en CI todavía.
+Para empaquetar con Tauri hacen falta las dependencias nativas de Tauri (en Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` y el resto de paquetes indicados en la sección de arranque). El crate `apps/desktop` está excluido del workspace principal, pero se compila y prueba desde `apps/desktop/src-tauri`.
+
+Los roles administrador y responsable disponen del botón **Catálogo** en la barra superior. Permite buscar productos, crear o editar SKU, código de barras, nombre, familia, precio, IVA y estado. Cada guardado persiste el producto local, incrementa su versión maestra y encola un evento `master_data.upsert`; el modal también muestra los conflictos de maestros detectados.
 
 ### 4. Backoffice
 
