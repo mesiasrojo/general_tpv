@@ -32,7 +32,7 @@ use tpv_print::{
     EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
 };
 use tpv_storage_sqlite::{DemoData, KeyStore, SqliteStore};
-use tpv_sync::{RetryPolicy, SyncClient, SyncWorker};
+use tpv_sync::{EnrollRequest, RetryPolicy, SyncClient, SyncWorker};
 
 #[derive(Clone)]
 struct AppState {
@@ -845,14 +845,50 @@ async fn sync_now(state: State<'_, AppState>) -> Result<SyncSummary, String> {
     perform_sync(state.inner(), &url).await
 }
 
-async fn perform_sync(state: &AppState, url: &str) -> Result<SyncSummary, String> {
-    let _guard = state.sync_lock.lock().await;
-    let token = state
+async fn ensure_enrolled(state: &AppState, url: &str) -> Result<String, String> {
+    if let Some(token) = state
         .store
         .device_token()
         .await
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "terminal no enrolado; ejecuta la CLI con --sync-url".to_string())?;
+    {
+        return Ok(token);
+    }
+    let admin_token = std::env::var("TPV_CENTRAL_TOKEN").ok();
+    let device_name = std::env::var("TPV_DEVICE_NAME").unwrap_or_else(|_| "Caja Tauri".to_string());
+    let client = SyncClient::new(url.to_string(), None);
+    let enrollment = client
+        .enroll(
+            EnrollRequest {
+                tenant_id: state.sync_ctx.tenant_id.as_uuid(),
+                store_id: state.demo.store_id.as_uuid(),
+                device_id: state.sync_ctx.device_id.as_uuid(),
+                name: device_name,
+            },
+            admin_token.as_deref(),
+        )
+        .await
+        .map_err(|error| format!("no se pudo enrolar el terminal: {error}"))?;
+    state
+        .store
+        .save_device_enrollment(&enrollment.token, &enrollment.device.name)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .store
+        .save_pull_cursor(0)
+        .await
+        .map_err(|error| error.to_string())?;
+    println!(
+        "Dispositivo enrolado automáticamente: {} · {}",
+        enrollment.device.device_id, enrollment.device.status
+    );
+    Ok(enrollment.token)
+}
+
+async fn perform_sync(state: &AppState, url: &str) -> Result<SyncSummary, String> {
+    let _guard = state.sync_lock.lock().await;
+    let token = ensure_enrolled(state, url).await?;
     let client = SyncClient::new(url.to_string(), Some(token));
     let worker = SyncWorker::new(client.clone(), RetryPolicy::default());
     let report = worker
@@ -963,14 +999,8 @@ async fn sync_loop(state: AppState) {
     let interval = sync_interval_secs(std::env::var("TPV_SYNC_INTERVAL_SECS").ok().as_deref());
     println!("Sincronización automática cada {interval}s contra {url}");
     loop {
-        match state.store.device_token().await {
-            Ok(Some(_)) => {
-                if let Err(error) = perform_sync(&state, &url).await {
-                    eprintln!("Sync automático: {error}");
-                }
-            }
-            Ok(None) => {}
-            Err(error) => eprintln!("Sync automático: no se pudo leer el token: {error}"),
+        if let Err(error) = perform_sync(&state, &url).await {
+            eprintln!("Sync automático: {error}");
         }
         tokio::time::sleep(Duration::from_secs(interval)).await;
     }

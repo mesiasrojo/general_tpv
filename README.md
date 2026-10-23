@@ -80,6 +80,12 @@ Los usuarios centrales se crean desde el backoffice o con `POST /api/v1/users`. 
 
 El cursor de pull se guarda en la base cifrada (`local_identity.pull_cursor`), por lo que los reinicios no vuelven a descargar todo el histórico.
 
+La app Tauri se enrola automáticamente la primera vez que sincroniza si todavía no tiene token. El nombre del terminal se configura con `TPV_DEVICE_NAME` (por defecto `Caja Tauri`) y, si la central exige token de administración, se pasa con `TPV_CENTRAL_TOKEN`. Para inspeccionar las cuentas locales sin ejecutar la demo:
+
+```bash
+cargo run -p tpv-cli -- data/tpv.db --list-users
+```
+
 ```bash
 TPV_LOGIN_PASSWORD=tuClave cargo run -p tpv-cli -- data/tpv.db \
   --sync-url http://127.0.0.1:8080 --login-user central.cashier

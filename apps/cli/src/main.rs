@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut retry_failed = false;
     let mut force_enroll = false;
     let mut master_data_demo = false;
+    let mut list_users = false;
     let mut sync_url = None;
     let mut backup_path = None;
     let mut key_file = None;
@@ -52,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--retry-failed" => retry_failed = true,
             "--enroll" => force_enroll = true,
             "--master-data-demo" => master_data_demo = true,
+            "--list-users" => list_users = true,
             "--sync-url" => sync_url = iter.next().cloned(),
             "--backup" => backup_path = iter.next().cloned(),
             "--key-file" => key_file = iter.next().cloned(),
@@ -119,6 +121,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         SqliteStore::connect(&path, &key).await?
     };
+    if list_users {
+        let users = UserRepository::list_users(&store).await?;
+        println!("Usuarios locales: {}", users.len());
+        for user in users {
+            println!(
+                "{} · {} · {} · {:?} · {}",
+                user.id,
+                user.username,
+                user.display_name,
+                user.role,
+                if user.active { "activo" } else { "inactivo" }
+            );
+        }
+        return Ok(());
+    }
     let demo = store.seed_demo().await?;
     let store = Arc::new(store);
 

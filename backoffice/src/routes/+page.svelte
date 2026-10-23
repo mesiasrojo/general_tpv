@@ -294,8 +294,19 @@
     }
   }
 
-  function formatDate(value: string | null): string {
-    return value ? new Date(value).toLocaleString('es-ES') : '—';
+  function formatDate(value: unknown): string {
+    if (!value) return '—';
+    if (Array.isArray(value) && value.length >= 6) {
+      const [year, ordinal, hour, minute, second, nanosecond, offsetHours = 0, offsetMinutes = 0] =
+        value as [number, number, number, number, number, number, number?, number?];
+      const utc = Date.UTC(year, 0, 1);
+      const local = utc + (ordinal - 1) * 86_400_000;
+      const offset = (offsetHours * 60 + offsetMinutes) * 60_000;
+      const date = new Date(local + hour * 3_600_000 + minute * 60_000 + second * 1_000 + Math.floor(nanosecond / 1_000_000) - offset);
+      return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('es-ES');
+    }
+    const date = new Date(String(value));
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('es-ES');
   }
 
   function shortId(value: string): string {
@@ -313,6 +324,21 @@
 
   function money(value: unknown): string {
     return typeof value === 'number' ? `${(value / 100).toFixed(2)} €` : '—';
+  }
+
+  function saleTotal(event: SyncEvent): string {
+    if (typeof event.payload.total_cents === 'number') {
+      return money(event.payload.total_cents);
+    }
+    const payments = event.payload.payments;
+    if (Array.isArray(payments)) {
+      const cents = payments.reduce((sum, payment) => {
+        const amount = (payment as { amount?: unknown }).amount;
+        return sum + (typeof amount === 'number' ? amount : 0);
+      }, 0);
+      return money(cents);
+    }
+    return '—';
   }
 
   function payloadValue(event: SyncEvent, key: string): string {
@@ -624,7 +650,7 @@
               <td class="mono">{item.event.store_id.slice(0, 8)}…</td>
               <td class="mono">{item.event.device_id.slice(0, 8)}…</td>
               <td>{formatDate(item.event.occurred_at)}</td>
-              <td class="num strong">{money(item.event.payload.total_cents)}</td>
+              <td class="num strong">{saleTotal(item.event)}</td>
             </tr>
           {:else}
             <tr>

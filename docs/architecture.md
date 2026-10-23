@@ -184,6 +184,7 @@ central → GET /api/v1/sync/pull?cursor=N → eventos posteriores al cursor
 - El token de dispositivo solo puede empujar y leer su propio tenant/tienda. La revocación invalida el token de inmediato.
 - El cursor de pull se persiste en `local_identity.pull_cursor`; el pull pagina de 1000 en 1000 y no vuelve a descargar el histórico tras reiniciar.
 - Con `TPV_SYNC_URL` definida, la app Tauri sincroniza al arrancar y cada `TPV_SYNC_INTERVAL_SECS` (60 segundos por defecto, mínimo 5), serializando el trabajo con el botón manual.
+- Si no existe token local, la app Tauri se enrola automáticamente usando `TPV_DEVICE_NAME` y, cuando la central lo exige, `TPV_CENTRAL_TOKEN`.
 - Los maestros se publican con versión monotónica por entidad y viajan en el outbox como `master_data.upsert` / `master_data.deleted`.
 - La central mantiene `central_master_data` por tenant/tienda/tipo/entidad; las versiones antiguas se ignoran y las divergencias con la misma versión se registran en `central_master_conflicts`.
 - La copia local aplica la misma política; `GET /api/v1/master-data/conflicts` expone los conflictos auditados.

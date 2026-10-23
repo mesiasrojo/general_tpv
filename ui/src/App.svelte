@@ -231,6 +231,27 @@
       .join(' ');
   }
 
+  function formatDateTime(value: unknown): string {
+    if (!value) return '—';
+    if (Array.isArray(value) && value.length >= 6) {
+      const [year, ordinal, hour, minute, second, nanosecond, offsetHours = 0, offsetMinutes = 0] =
+        value as [number, number, number, number, number, number, number?, number?];
+      const local = Date.UTC(year, 0, 1) + (ordinal - 1) * 86_400_000;
+      const offset = (offsetHours * 60 + offsetMinutes) * 60_000;
+      const date = new Date(
+        local +
+          hour * 3_600_000 +
+          minute * 60_000 +
+          second * 1_000 +
+          Math.floor(nanosecond / 1_000_000) -
+          offset
+      );
+      return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('es-ES');
+    }
+    const date = new Date(String(value));
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('es-ES');
+  }
+
   function movementLabel(kind: CashMovementKind): string {
     switch (kind) {
       case 'expense':
@@ -1244,7 +1265,7 @@
           {/if}
           {#if syncStatus.oldest_pending_at}
             <p class="muted small">
-              Pendiente desde {new Date(syncStatus.oldest_pending_at).toLocaleString('es-ES')}
+              Pendiente desde {formatDateTime(syncStatus.oldest_pending_at)}
             </p>
           {/if}
           {#if syncStatus.last_error}
@@ -1344,7 +1365,7 @@
           <p class="eyebrow">FACTURA</p>
           <h2>{invoice.series}-{String(invoice.number).padStart(6, '0')}</h2>
           <p class="muted small">Total {formatMoney(invoice.totals.gross)} · IVA {formatMoney(invoice.totals.tax)}</p>
-          <p class="muted small">Emitida {new Date(invoice.issued_at).toLocaleString('es-ES')}</p>
+          <p class="muted small">Emitida {formatDateTime(invoice.issued_at)}</p>
         </section>
       {/if}
     </aside>
