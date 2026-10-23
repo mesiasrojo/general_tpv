@@ -92,4 +92,28 @@ impl SqliteStore {
         .await?;
         Ok(())
     }
+
+    /// Cursor of the last central event applied locally.
+    pub async fn pull_cursor(&self) -> StorageResult<u64> {
+        let cursor =
+            sqlx::query_scalar::<_, i64>("SELECT pull_cursor FROM local_identity WHERE id = 1")
+                .fetch_optional(self.pool())
+                .await?;
+        Ok(cursor
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(0))
+    }
+
+    pub async fn save_pull_cursor(&self, cursor: u64) -> StorageResult<()> {
+        let result = sqlx::query("UPDATE local_identity SET pull_cursor = ? WHERE id = 1")
+            .bind(i64::try_from(cursor).unwrap_or(i64::MAX))
+            .execute(self.pool())
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(crate::error::StorageError::NotFound(
+                "local identity is not initialized".into(),
+            ));
+        }
+        Ok(())
+    }
 }

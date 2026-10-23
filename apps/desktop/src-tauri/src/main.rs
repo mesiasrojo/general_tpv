@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -50,6 +51,7 @@ struct AppState {
     users: Arc<dyn UserRepository>,
     master_data: MasterDataService,
     products: ProductService,
+    sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -657,74 +659,140 @@ async fn backup_now(state: State<'_, AppState>) -> Result<BackupSummary, String>
 #[tauri::command]
 async fn sync_now(state: State<'_, AppState>) -> Result<SyncSummary, String> {
     require_manager(state.inner())?;
-    let state = state.inner().clone();
     let url = std::env::var("TPV_SYNC_URL")
         .map_err(|_| "TPV_SYNC_URL no configurada en el terminal".to_string())?;
+    perform_sync(state.inner(), &url).await
+}
+
+async fn perform_sync(state: &AppState, url: &str) -> Result<SyncSummary, String> {
+    let _guard = state.sync_lock.lock().await;
     let token = state
         .store
         .device_token()
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "terminal no enrolado; ejecuta la CLI con --sync-url".to_string())?;
-    let client = SyncClient::new(url, Some(token));
+    let client = SyncClient::new(url.to_string(), Some(token));
     let worker = SyncWorker::new(client.clone(), RetryPolicy::default());
     let report = worker
         .push_pending(state.sync_repo.as_ref(), state.sync_ctx.device_id, 100)
         .await
         .map_err(|error| error.to_string())?;
-    let pulled = client
-        .pull(0, Some(state.demo.store_id.as_uuid()))
+
+    let mut cursor = state
+        .store
+        .pull_cursor()
         .await
         .map_err(|error| error.to_string())?;
-
+    let mut pulled_events = 0;
     let mut users_applied = 0;
     let mut master_applied = 0;
     let mut master_conflicts = 0;
-    for stored in &pulled.events {
-        match stored.event.aggregate_type.as_str() {
-            "user" if stored.event.event_type == "user.provisioned" => {
-                if let Ok(provision) =
-                    serde_json::from_value::<UserProvision>(stored.event.payload.clone())
-                {
-                    if state
-                        .users
-                        .upsert_provisioned(&provision)
-                        .await
-                        .map_err(|error| error.to_string())?
+    loop {
+        let pulled = client
+            .pull(cursor, Some(state.demo.store_id.as_uuid()))
+            .await
+            .map_err(|error| error.to_string())?;
+        let count = pulled.events.len();
+        for stored in &pulled.events {
+            match stored.event.aggregate_type.as_str() {
+                "user" if stored.event.event_type == "user.provisioned" => {
+                    if let Ok(provision) =
+                        serde_json::from_value::<UserProvision>(stored.event.payload.clone())
                     {
-                        users_applied += 1;
+                        if state
+                            .users
+                            .upsert_provisioned(&provision)
+                            .await
+                            .map_err(|error| error.to_string())?
+                        {
+                            users_applied += 1;
+                        }
+                        let invalidate_session = state.session.read().is_ok_and(|session| {
+                            session.as_ref().is_some_and(|current| {
+                                current.user.id == provision.user.id
+                                    && (current.user.role != provision.user.role
+                                        || current.user.active != provision.user.active
+                                        || current.user.store_ids != provision.user.store_ids
+                                        || current.user.username != provision.user.username)
+                            })
+                        });
+                        if invalidate_session {
+                            if let Ok(mut session) = state.session.write() {
+                                *session = None;
+                            }
+                        }
                     }
                 }
-            }
-            "master_data" => {
-                if let Ok(change) =
-                    serde_json::from_value::<MasterDataChange>(stored.event.payload.clone())
-                {
-                    let result = state
-                        .master_data
-                        .apply_change(stored.event.tenant_id, stored.event.store_id, &change)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    if result.applied {
-                        master_applied += 1;
-                    }
-                    if result.conflict.is_some() {
-                        master_conflicts += 1;
+                "master_data" => {
+                    if let Ok(change) =
+                        serde_json::from_value::<MasterDataChange>(stored.event.payload.clone())
+                    {
+                        let result = state
+                            .master_data
+                            .apply_change(stored.event.tenant_id, stored.event.store_id, &change)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if result.applied {
+                            master_applied += 1;
+                        }
+                        if result.conflict.is_some() {
+                            master_conflicts += 1;
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
+        state
+            .store
+            .save_pull_cursor(pulled.next_cursor)
+            .await
+            .map_err(|error| error.to_string())?;
+        pulled_events += count;
+        if count < 1000 || pulled.next_cursor == cursor {
+            break;
+        }
+        cursor = pulled.next_cursor;
     }
+
     Ok(SyncSummary {
         accepted: report.accepted,
         duplicates: report.duplicates,
         rejected: report.rejected,
-        pulled: pulled.events.len(),
+        pulled: pulled_events,
         users_applied,
         master_applied,
         master_conflicts,
     })
+}
+
+fn sync_interval_secs(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(60)
+        .max(5)
+}
+
+async fn sync_loop(state: AppState) {
+    let Ok(url) = std::env::var("TPV_SYNC_URL") else {
+        return;
+    };
+    let interval = sync_interval_secs(std::env::var("TPV_SYNC_INTERVAL_SECS").ok().as_deref());
+    println!("Sincronización automática cada {interval}s contra {url}");
+    loop {
+        match state.store.device_token().await {
+            Ok(Some(_)) => {
+                if let Err(error) = perform_sync(&state, &url).await {
+                    eprintln!("Sync automático: {error}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("Sync automático: no se pudo leer el token: {error}"),
+        }
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+    }
 }
 
 struct PrinterSettings {
@@ -830,6 +898,7 @@ async fn build_app_state(
         users: user_repo,
         master_data,
         products,
+        sync_lock: Arc::new(tokio::sync::Mutex::new(())),
     })
 }
 
@@ -880,6 +949,8 @@ fn main() {
                     profile: selected_profile,
                 },
             ))?;
+            let sync_state = state.clone();
+            tauri::async_runtime::spawn(sync_loop(sync_state));
             app.manage(state);
             Ok(())
         })
@@ -918,6 +989,21 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running General TPV");
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::sync_interval_secs;
+
+    #[test]
+    fn sync_interval_uses_default_and_minimum() {
+        assert_eq!(sync_interval_secs(None), 60);
+        assert_eq!(sync_interval_secs(Some("")), 60);
+        assert_eq!(sync_interval_secs(Some("invalid")), 60);
+        assert_eq!(sync_interval_secs(Some("0")), 60);
+        assert_eq!(sync_interval_secs(Some("1")), 5);
+        assert_eq!(sync_interval_secs(Some("120")), 120);
+    }
 }
 
 #[cfg(test)]

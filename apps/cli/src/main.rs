@@ -404,6 +404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 store
                     .save_device_enrollment(&enrollment.token, &device_name)
                     .await?;
+                store.save_pull_cursor(0).await?;
                 println!(
                     "\nDispositivo enrolado: {} · {} · {}",
                     enrollment.device.device_id, enrollment.device.name, enrollment.device.status
@@ -424,7 +425,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 report.accepted, report.duplicates, report.rejected, report.attempts
             );
         }
-        let pulled = client.pull(0, Some(demo.store_id.as_uuid())).await?;
+        let pull_cursor = store.pull_cursor().await?;
+        let pulled = client
+            .pull(pull_cursor, Some(demo.store_id.as_uuid()))
+            .await?;
         println!("Pull: {} eventos en la central.", pulled.events.len());
         let mut master_applied = 0;
         let mut master_conflicts = 0;
@@ -479,6 +483,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Maestros: {master_applied} aplicados, {master_conflicts} conflicto(s) registrados."
             );
         }
+        store.save_pull_cursor(pulled.next_cursor).await?;
         sync_status = sync_service.status().await?;
         print_sync_status(&sync_status);
     }

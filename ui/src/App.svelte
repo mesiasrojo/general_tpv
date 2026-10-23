@@ -92,6 +92,23 @@
 
   onMount(() => {
     void restoreSession();
+    const timer = window.setInterval(() => {
+      if (!session) return;
+      void (async () => {
+        try {
+          const current = await api.currentUser();
+          if (!current) {
+            session = null;
+            loginError = 'Sesión cerrada por un cambio de permisos en la central.';
+            return;
+          }
+          await refreshSync();
+        } catch {
+          await refreshSync();
+        }
+      })();
+    }, 30_000);
+    return () => window.clearInterval(timer);
   });
 
   async function restoreSession() {

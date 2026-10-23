@@ -18,7 +18,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (eventos, usuarios, dispositivos y conflictos) |
-| Usuarios centrales y aprovisionamiento | Implementado (API, backoffice, pull del CLI y botón Tauri) |
+| Usuarios centrales y aprovisionamiento | Implementado (API, backoffice, pull del CLI y sync automática Tauri) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
 | Enrolamiento y revocación de dispositivos | Implementado (token por dispositivo, auto-enrolamiento del CLI) |
 | Conflictos de datos maestros | Implementado (versiones, LWW determinista y registro de conflictos) |
@@ -72,7 +72,9 @@ cargo run -p tpv-cli -- data/tpv.db --sync-url http://127.0.0.1:8080 \
   --device-name "Caja 1" --enroll --retry-failed
 ```
 
-Los usuarios centrales se crean desde el backoffice o con `POST /api/v1/users`. Cada alta, actualización o restablecimiento de contraseña genera un evento `user.provisioned` por tienda. El CLI aplica estos eventos en el pull y la app Tauri con el botón “Sincronizar ahora” (`TPV_SYNC_URL`). Una desactivación central también se propaga y bloquea el login local. Para probar una cuenta aprovisionada:
+Los usuarios centrales se crean desde el backoffice o con `POST /api/v1/users`. Cada alta, actualización o restablecimiento de contraseña genera un evento `user.provisioned` por tienda. El CLI aplica estos eventos en el pull y la app Tauri los aplica automáticamente si `TPV_SYNC_URL` está definida, además del botón “Sincronizar ahora”. El intervalo se controla con `TPV_SYNC_INTERVAL_SECS` (60 segundos por defecto, mínimo 5). Una desactivación central también se propaga y bloquea el login local. Para probar una cuenta aprovisionada:
+
+El cursor de pull se guarda en la base cifrada (`local_identity.pull_cursor`), por lo que los reinicios no vuelven a descargar todo el histórico.
 
 ```bash
 TPV_LOGIN_PASSWORD=tuClave cargo run -p tpv-cli -- data/tpv.db \

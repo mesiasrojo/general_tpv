@@ -58,3 +58,14 @@ async fn provisioned_users_are_applied_by_revision() {
     let users = user_repo.list_users().await.unwrap();
     assert!(users.iter().any(|user| user.id == user_id));
 }
+
+#[tokio::test]
+async fn pull_cursor_roundtrip() {
+    let store = SqliteStore::in_memory_with_key(&DatabaseKey::generate())
+        .await
+        .unwrap();
+    store.sync_context().await.unwrap();
+    assert_eq!(store.pull_cursor().await.unwrap(), 0);
+    store.save_pull_cursor(42).await.unwrap();
+    assert_eq!(store.pull_cursor().await.unwrap(), 42);
+}

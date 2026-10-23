@@ -1,0 +1,1 @@
+ALTER TABLE local_identity ADD COLUMN pull_cursor INTEGER NOT NULL DEFAULT 0;
