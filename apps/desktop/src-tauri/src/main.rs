@@ -10,9 +10,9 @@ use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
     CashRepository, CashService, CatalogRepository, CatalogService, CloseCashRequest,
     ConfirmSaleRequest, CreateUserRequest, InvoiceRepository, InvoiceService, OpenCashRequest,
-    PrintQueueRepository, PrintService, QuarantinedEvent, ResetPasswordRequest, SaleRepository,
-    SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest, SyncOutboxRepository,
-    SyncService, SyncStatus, UpdateUserRequest, UserRepository,
+    PrintQueueRepository, PrintService, PrinterPort, QuarantinedEvent, ResetPasswordRequest,
+    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
+    SyncOutboxRepository, SyncService, SyncStatus, UpdateUserRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashSession};
@@ -21,7 +21,7 @@ use tpv_domain::ids::{CustomerId, RegisterId, SellerId, StoreId, UserId};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::people::{Role, UserAccount};
 use tpv_domain::sale::PaymentMethod;
-use tpv_print::{DirectoryPrinter, EscPosRenderer};
+use tpv_print::{EscPosRenderer, apply_profile_defaults, build_printer, printer_profile};
 use tpv_storage_sqlite::{DemoData, KeyStore, SqliteStore};
 
 #[derive(Clone)]
@@ -33,7 +33,8 @@ struct AppState {
     print: PrintService,
     sync: SyncService,
     backup: BackupService,
-    print_dir: PathBuf,
+    printer: Arc<dyn PrinterPort>,
+    printer_label: String,
     backup_dir: PathBuf,
     auth: AuthService,
     session: Arc<RwLock<Option<SessionUser>>>,
@@ -370,19 +371,14 @@ async fn print_ticket(
         .enqueue_ticket(sale_id, reprint)
         .await
         .map_err(|error| error.to_string())?;
-    let printer = DirectoryPrinter::new(state.print_dir.clone());
     let results = state
         .print
-        .process_pending(&printer, 10)
+        .process_pending(state.printer.as_ref(), 10)
         .await
         .map_err(|error| error.to_string())?;
     Ok(PrintSummary {
         job_id: job.id.to_string(),
-        file: state
-            .print_dir
-            .join(format!("{}.escpos", job.id))
-            .display()
-            .to_string(),
+        file: state.printer_label.clone(),
         bytes: job.bytes.len(),
         success: results.iter().all(|result| result.success),
     })
@@ -394,10 +390,9 @@ async fn print_pending(
 ) -> Result<Vec<tpv_application::PrintResult>, String> {
     require_sell(state.inner())?;
     let state = state.inner().clone();
-    let printer = DirectoryPrinter::new(state.print_dir.clone());
     state
         .print
-        .process_pending(&printer, 20)
+        .process_pending(state.printer.as_ref(), 20)
         .await
         .map_err(|error| error.to_string())
 }
@@ -638,6 +633,29 @@ fn main() {
             let backup_dir = data_dir.join("backups");
             std::fs::create_dir_all(&tickets_dir)?;
             std::fs::create_dir_all(&backup_dir)?;
+            let selected_profile = match std::env::var("TPV_PRINTER_PROFILE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(name) => Some(printer_profile(&name).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("perfil de impresora desconocido: {name}"),
+                    )
+                })?),
+                None => None,
+            };
+            let renderer =
+                selected_profile.map_or_else(EscPosRenderer::default, EscPosRenderer::for_profile);
+            let printer_spec = std::env::var("TPV_PRINTER")
+                .unwrap_or_else(|_| format!("dir:{}", tickets_dir.display()));
+            let printer_spec = if let Some(profile) = selected_profile {
+                apply_profile_defaults(&printer_spec, profile)
+            } else {
+                printer_spec
+            };
+            let printer = build_printer(&printer_spec)?;
+            let printer_label = printer_spec;
             let clock: Arc<dyn tpv_application::Clock> = Arc::new(tpv_application::SystemClock);
             let sync = tauri::async_runtime::block_on(store.sync_context())?;
             let catalog = CatalogService::new(catalog_repo.clone());
@@ -662,7 +680,7 @@ fn main() {
                 sale_repo,
                 catalog_repo,
                 print_repo,
-                Arc::new(EscPosRenderer::default()),
+                Arc::new(renderer),
                 clock.clone(),
             );
             let sync_service = SyncService::new(sync_repo);
@@ -678,7 +696,8 @@ fn main() {
                 print,
                 sync: sync_service,
                 backup: backup_service,
-                print_dir: tickets_dir,
+                printer,
+                printer_label,
                 backup_dir,
                 auth,
                 session: Arc::new(RwLock::new(None)),

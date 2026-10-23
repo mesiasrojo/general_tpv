@@ -77,7 +77,7 @@ El CLI permite exportar la clave (`--export-key`), abrir una base con una clave 
 confirm_sale
   └─ PrintService::enqueue_ticket
        ├─ TicketDocument::from_sale
-       ├─ EscPosRenderer::render_ticket (Windows-1252, 42 columnas)
+       ├─ EscPosRenderer::render_ticket (Windows-1252, ancho según perfil)
        └─ PrintQueueRepository::enqueue (SQLite print_jobs)
 
 PrintService::process_pending
@@ -85,11 +85,15 @@ PrintService::process_pending
   ├─ PrinterPort::print
   │    ├─ FilePrinter
   │    ├─ DirectoryPrinter
-  │    └─ NetworkPrinter (TCP 9100)
+  │    ├─ NetworkPrinter (TCP 9100)
+  │    ├─ SerialPrinter (tokio-serial, 8N1 configurable)
+  │    └─ UsbPrinter (nusb, bulk OUT autodetectado o explícito)
   └─ mark_printed / mark_failed
 ```
 
-El ticket incluye cabecera de tienda, vendedor, cliente, líneas, desglose de IVA, total, entregado, cambio, pie legal, corte y pulso de cajón. La reimpresión se marca como "COPIA". La cola es persistente: si la impresora falla, el trabajo queda en estado `failed` y puede reintentarse.
+`build_printer` acepta especificaciones `file:`, `dir:`, `network:`, `serial:`, `usb:` y `null`. Los perfiles `generic-58`, `generic-80`, `epson-tm-t20` y `bixolon-srp-350` fijan ancho, corte, cajón y velocidad serie por defecto. La impresión USB abre el dispositivo por VID/PID, selecciona el primer endpoint bulk OUT compatible (o el indicado), reclama la interfaz y, en Linux, puede desacoplar el driver del kernel si es necesario.
+
+El ticket incluye cabecera de tienda, vendedor, cliente, líneas, desglose de IVA, total, entregado, cambio, pie legal, corte y pulso de cajón. La reimpresión se marca como "COPIA". La cola es persistente: si la impresora falla, el trabajo queda en estado `failed` y puede reintentarse. La validación con impresoras físicas queda pendiente de hardware-in-the-loop.
 
 ## 4.2 Autenticación y RBAC
 
@@ -209,11 +213,12 @@ Implementado:
 - Datos maestros versionados con resolución determinista y registro de conflictos.
 - Clave SQLCipher en el keychain del sistema con migración desde fichero y fallback headless.
 - Exportación, importación y uso de claves externas para backups y recuperación.
+- Adaptadores serie y USB nativos, con detección de endpoint y perfiles de impresora.
 - Sin cálculo de negocio en la UI.
 
 Pendiente para producción:
 - Gestión de usuarios y dispositivos desde backoffice central.
-- Adaptadores USB/serie nativos y perfiles de impresora certificados.
+- Certificación con impresoras físicas y despliegue de reglas udev/WinUSB.
 - Firma de actualizaciones, SBOM y pipeline de release.
 - Pruebas hardware-in-the-loop y de carga.
 
@@ -223,9 +228,8 @@ No implementado por decisión expresa: el destinatario está exento. No hay modo
 
 ## 9. Siguiente iteración recomendada
 
-1. Adaptadores USB/serie y hardware-in-the-loop.
-2. Pruebas E2E Tauri.
-3. Gestión de usuarios desde el backoffice central.
-4. Consola de dispositivos y conflictos de maestros en el backoffice.
-5. Edición de maestros desde la UI del TPV.
-6. Firma de actualizaciones, SBOM y pipeline de release.
+1. Pruebas E2E Tauri y hardware-in-the-loop con impresoras reales.
+2. Gestión de usuarios desde el backoffice central.
+3. Consola de dispositivos y conflictos de maestros en el backoffice.
+4. Edición de maestros desde la UI del TPV.
+5. Firma de actualizaciones, SBOM y pipeline de release.

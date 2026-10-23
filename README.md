@@ -15,7 +15,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Cliente HTTP + worker de sync con backoff | Implementado (backoff, cuarentena y reintento manual) |
 | CLI de demostración end-to-end | Implementado |
 | Cliente Tauri + UI Svelte 5 | Implementado (requiere libs nativas de Tauri para compilar) |
-| Impresión ESC/POS + cola persistente | Implementado (renderer, fichero, directorio y red TCP) |
+| Impresión ESC/POS + cola persistente | Implementado (fichero, directorio, red TCP, serie y USB nativo) |
 | Autenticación Argon2id + RBAC local | Implementado (login, bloqueo, roles, gestión de usuarios y auditoría) |
 | Backoffice SvelteKit | Implementado (consume `/api/v1/events`) |
 | Backups cifrados | Implementado (CLI y botón Backup de la UI) |
@@ -100,6 +100,26 @@ El servidor expone:
 - `POST /api/v1/devices/enroll`
 - `GET /api/v1/devices`
 - `POST /api/v1/devices/{device_id}/revoke`
+
+### Impresión nativa
+
+El CLI acepta `--printer` y `--printer-profile`; la app Tauri usa las variables `TPV_PRINTER` y `TPV_PRINTER_PROFILE`.
+
+```bash
+# Serie 8N1 a 9600 baudios
+cargo run -p tpv-cli -- data/tpv.db \
+  --printer 'serial:/dev/ttyUSB0;baud=9600;data=8;parity=none;stop=1;flow=none'
+
+# USB directo por VID/PID, con detección automática del endpoint bulk OUT
+cargo run -p tpv-cli -- data/tpv.db \
+  --printer 'usb:0x04b8:0x0e15;interface=0;endpoint=0x02;packet=512'
+
+# Perfil de 58 mm y salida a directorio para pruebas
+cargo run -p tpv-cli -- data/tpv.db \
+  --printer dir:data/tickets --printer-profile generic-58
+```
+
+Especificaciones disponibles: `file:...`, `dir:...`, `network:host:puerto`, `serial:...`, `usb:...` y `null`. Perfiles incluidos: `generic-58`, `generic-80`, `epson-tm-t20` y `bixolon-srp-350`. En Linux, el acceso USB directo requiere reglas udev adecuadas; en Windows puede requerir WinUSB. La validación con impresoras físicas queda pendiente de hardware-in-the-loop.
 
 ### 3. UI del TPV
 

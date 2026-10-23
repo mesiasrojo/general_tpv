@@ -14,7 +14,7 @@ use tpv_domain::cash::CashCount;
 use tpv_domain::master_data::{MasterDataChange, MasterDataKind};
 use tpv_domain::money::Money;
 use tpv_domain::sale::PaymentMethod;
-use tpv_print::{EscPosRenderer, FilePrinter};
+use tpv_print::{EscPosRenderer, apply_profile_defaults, build_printer, printer_profile};
 use tpv_storage_sqlite::{DatabaseKey, KeyStore, SqliteStore};
 use tpv_sync::{EnrollRequest, RetryPolicy, SyncClient, SyncWorker};
 
@@ -37,6 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut key_file = None;
     let mut export_key_path = None;
     let mut import_key_path = None;
+    let mut printer_spec = None;
+    let mut printer_profile_name = None;
     let mut device_name = "TPV CLI".to_string();
     let mut path = None;
     let mut iter = args.iter().skip(1);
@@ -51,6 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--key-file" => key_file = iter.next().cloned(),
             "--export-key" => export_key_path = iter.next().cloned(),
             "--import-key" => import_key_path = iter.next().cloned(),
+            "--printer" => printer_spec = iter.next().cloned(),
+            "--printer-profile" => printer_profile_name = iter.next().cloned(),
             "--device-name" => {
                 device_name = iter
                     .next()
@@ -157,11 +161,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync.clone(),
     );
     let cash_service = CashService::new(cash_repo, sale_repo.clone(), clock.clone(), sync.clone());
+    let selected_profile = match &printer_profile_name {
+        Some(name) => Some(printer_profile(name).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("perfil de impresora desconocido: {name}"),
+            )
+        })?),
+        None => None,
+    };
+    let renderer =
+        selected_profile.map_or_else(EscPosRenderer::default, EscPosRenderer::for_profile);
     let print_service = PrintService::new(
         sale_repo.clone(),
         catalog_repo.clone(),
         print_repo,
-        Arc::new(EscPosRenderer::default()),
+        Arc::new(renderer),
         clock,
     );
     let sync_service = SyncService::new(sync_repo.clone());
@@ -264,14 +279,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "data/ticket-{:06}.escpos",
         sale.ticket_number.unwrap_or_default()
     );
-    let printer = FilePrinter::new(&ticket_path);
-    let results = print_service.process_pending(&printer, 10).await?;
+    let printer_spec = printer_spec
+        .or_else(|| std::env::var("TPV_PRINTER").ok())
+        .unwrap_or_else(|| format!("file:{ticket_path}"));
+    let printer_spec = if let Some(profile) = selected_profile {
+        apply_profile_defaults(&printer_spec, profile)
+    } else {
+        printer_spec
+    };
+    let printer = build_printer(&printer_spec)?;
+    let results = print_service.process_pending(printer.as_ref(), 10).await?;
     println!(
         "Ticket ESC/POS: {} bytes · {} trabajo(s) procesado(s) · {}",
         job.bytes.len(),
         results.len(),
-        ticket_path
+        printer_spec
     );
+    for result in &results {
+        if !result.success {
+            println!(
+                "  Error de impresión: {}",
+                result.error.as_deref().unwrap_or("desconocido")
+            );
+        }
+    }
 
     let invoice = invoice_service
         .issue_invoice(tpv_application::IssueInvoiceRequest {

@@ -8,8 +8,13 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 encoding_rs = "0.8"
+nusb = { version = "0.2", features = ["tokio"] }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-serial = "5"
 tpv-application = { path = "../tpv-application" }
 tpv-domain = { path = "../tpv-domain" }
+
+[dev-dependencies]
+serialport = { version = "4", default-features = false }

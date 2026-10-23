@@ -2,6 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+mod native;
+
+pub use native::{
+    PrinterProfile, SerialDataBits, SerialFlowControl, SerialParity, SerialPrinter, SerialStopBits,
+    UsbPrinter, apply_profile_defaults, build_printer, printer_profile,
+};
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -47,6 +54,11 @@ impl EscPosRenderer {
             open_drawer,
             cut,
         }
+    }
+
+    #[must_use]
+    pub fn for_profile(profile: PrinterProfile) -> Self {
+        Self::new(profile.width, profile.drawer, profile.cut)
     }
 
     fn text(&self, out: &mut Vec<u8>, value: &str) -> AppResult<()> {
@@ -339,6 +351,15 @@ mod tests {
             reprint,
             footer: vec!["IVA INCLUIDO".into(), "GRACIAS POR SU COMPRA".into()],
         }
+    }
+
+    #[test]
+    fn renderer_uses_the_selected_printer_profile() {
+        let profile = printer_profile("generic-58").unwrap();
+        let renderer = EscPosRenderer::for_profile(profile);
+        assert_eq!(renderer.width, 32);
+        assert!(renderer.open_drawer);
+        assert!(renderer.cut);
     }
 
     #[test]
