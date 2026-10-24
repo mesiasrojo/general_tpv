@@ -59,6 +59,18 @@ test.describe('TPV desktop UI', () => {
       });
 
       const catalogItems: Array<Record<string, unknown>> = [];
+      const sellerItems: Array<Record<string, unknown>> = [];
+      const storeItems: Array<Record<string, unknown>> = [
+        {
+          id: storeId,
+          code: 'BEN01',
+          name: 'Caja 1',
+          tax_id: 'B12345674',
+          phone: null,
+          address: { street: '', number: '', locality: '', postal_code: '', province: '' },
+          active: true
+        }
+      ];
       const familyItems: Array<Record<string, unknown>> = [
         {
           id: '00000000-0000-7000-8000-000000000010',
@@ -221,7 +233,7 @@ test.describe('TPV desktop UI', () => {
           return [user()];
         },
         async list_stores() {
-          return [{ id: storeId, name: 'Caja 1' }];
+          return storeItems;
         },
         async save_customer(request: any) {
           const existing = request.customer_id
@@ -503,6 +515,8 @@ test.describe('TPV desktop UI', () => {
               return familyItems;
             case 'list_taxes':
               return taxItems;
+            case 'list_sellers':
+              return sellerItems;
             case 'list_master_data_conflicts':
               return [];
             case 'save_product': {
@@ -558,6 +572,49 @@ test.describe('TPV desktop UI', () => {
                 taxItems[index] = saved;
               } else {
                 taxItems.push(saved);
+              }
+              return saved;
+            }
+            case 'save_seller': {
+              const request = args.request as Record<string, unknown>;
+              const saved = {
+                id: request.seller_id ?? crypto.randomUUID(),
+                code: String(request.code).toUpperCase(),
+                name: request.name,
+                phone1: request.phone1 ?? null,
+                phone2: request.phone2 ?? null,
+                active: request.active
+              };
+              const index = sellerItems.findIndex((item) => item.id === saved.id);
+              if (index >= 0) {
+                sellerItems[index] = saved;
+              } else {
+                sellerItems.push(saved);
+              }
+              return saved;
+            }
+            case 'save_store': {
+              const request = args.request as Record<string, unknown>;
+              const saved = {
+                id: request.store_id ?? crypto.randomUUID(),
+                code: String(request.code).toUpperCase(),
+                name: request.name,
+                tax_id: String(request.tax_id).toUpperCase(),
+                phone: request.phone ?? null,
+                address: {
+                  street: request.street ?? '',
+                  number: request.number ?? '',
+                  locality: request.locality ?? '',
+                  postal_code: request.postal_code ?? '',
+                  province: request.province ?? ''
+                },
+                active: request.active
+              };
+              const index = storeItems.findIndex((item) => item.id === saved.id);
+              if (index >= 0) {
+                storeItems[index] = saved;
+              } else {
+                storeItems.push(saved);
               }
               return saved;
             }
@@ -704,6 +761,25 @@ test.describe('TPV desktop UI', () => {
     await page.getByLabel('% IVA').fill('5');
     await page.getByRole('button', { name: 'Guardar impuesto' }).click();
     await expect(page.locator('.product-row', { hasText: 'Especial E2E' })).toContainText('5% IVA');
+
+    await page.getByRole('tab', { name: 'Vendedores' }).click();
+    await page.getByLabel('Código').fill('E2E-S');
+    await page.getByLabel('Nombre').fill('Vendedor E2E');
+    await page.getByLabel('Teléfono 1').fill('600111222');
+    await page.getByRole('button', { name: 'Guardar vendedor' }).click();
+    await expect(page.locator('.product-row', { hasText: 'Vendedor E2E' })).toContainText('600111222');
+
+    await page.getByRole('tab', { name: 'Tiendas' }).click();
+    await page.getByLabel('Código', { exact: true }).fill('E2E-STORE');
+    await page.getByLabel('Nombre').fill('Tienda E2E');
+    await page.getByLabel('NIF').fill('B12345674');
+    await page.getByLabel('Calle').fill('Calle E2E');
+    await page.getByLabel('Número').fill('7');
+    await page.getByLabel('Localidad').fill('Benalmádena');
+    await page.getByLabel('Código postal').fill('29630');
+    await page.getByLabel('Provincia').fill('Málaga');
+    await page.getByRole('button', { name: 'Guardar tienda' }).click();
+    await expect(page.locator('.product-row', { hasText: 'Tienda E2E' })).toContainText('B12345674');
 
     await page.getByRole('tab', { name: 'Artículos' }).click();
     await page.getByLabel('SKU').fill('UI-E2E-1');

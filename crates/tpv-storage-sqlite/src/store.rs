@@ -376,7 +376,7 @@ impl SqliteStore {
     }
 
     async fn all_stores(&self) -> StorageResult<Vec<Store>> {
-        let rows = sqlx::query("SELECT * FROM stores WHERE active = 1 ORDER BY name")
+        let rows = sqlx::query("SELECT * FROM stores ORDER BY name")
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(row_to_store).collect()
@@ -385,6 +385,14 @@ impl SqliteStore {
     async fn get_store_by_id(&self, id: StoreId) -> StorageResult<Option<Store>> {
         let row = sqlx::query("SELECT * FROM stores WHERE id = ?")
             .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_store).transpose()
+    }
+
+    async fn get_store_by_code(&self, code: &str) -> StorageResult<Option<Store>> {
+        let row = sqlx::query("SELECT * FROM stores WHERE code = ?")
+            .bind(code)
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(row_to_store).transpose()
@@ -492,7 +500,7 @@ impl SqliteStore {
     }
 
     async fn all_sellers(&self) -> StorageResult<Vec<Seller>> {
-        let rows = sqlx::query("SELECT * FROM sellers WHERE active = 1 ORDER BY name")
+        let rows = sqlx::query("SELECT * FROM sellers ORDER BY name")
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(row_to_seller).collect()
@@ -501,6 +509,14 @@ impl SqliteStore {
     async fn get_seller_by_id(&self, id: SellerId) -> StorageResult<Option<Seller>> {
         let row = sqlx::query("SELECT * FROM sellers WHERE id = ?")
             .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_seller).transpose()
+    }
+
+    async fn get_seller_by_code(&self, code: &str) -> StorageResult<Option<Seller>> {
+        let row = sqlx::query("SELECT * FROM sellers WHERE code = ?")
+            .bind(code)
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(row_to_seller).transpose()
@@ -595,6 +611,10 @@ impl CatalogRepository for SqliteStore {
         Ok(self.get_store_by_id(id).await?)
     }
 
+    async fn find_store_by_code(&self, code: &str) -> AppResult<Option<Store>> {
+        Ok(self.get_store_by_code(code).await?)
+    }
+
     async fn save_store(&self, store: &Store) -> AppResult<()> {
         self.persist_store(store).await?;
         Ok(())
@@ -606,6 +626,10 @@ impl CatalogRepository for SqliteStore {
 
     async fn find_seller(&self, id: SellerId) -> AppResult<Option<Seller>> {
         Ok(self.get_seller_by_id(id).await?)
+    }
+
+    async fn find_seller_by_code(&self, code: &str) -> AppResult<Option<Seller>> {
+        Ok(self.get_seller_by_code(code).await?)
     }
 
     async fn save_seller(&self, seller: &Seller) -> AppResult<()> {

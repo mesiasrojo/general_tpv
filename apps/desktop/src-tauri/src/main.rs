@@ -15,10 +15,11 @@ use tpv_application::{
     MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
     ProductImportReport, ProductImportRepository, ProductImportService, ProductService,
     QuarantinedEvent, RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest,
-    SaleRepository, SaleService, SaleView, SequenceRepository, SessionUser, StartSaleRequest,
-    SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService, TimeClockRepository,
-    TimeClockService, TimeClockStatus, UpdateUserRequest, UpsertCustomerRequest,
-    UpsertFamilyRequest, UpsertProductRequest, UpsertTaxRequest, UserRepository,
+    SaleRepository, SaleService, SaleView, SellerService, SequenceRepository, SessionUser,
+    StartSaleRequest, StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus,
+    TaxService, TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
+    UpsertCustomerRequest, UpsertFamilyRequest, UpsertProductRequest, UpsertSellerRequest,
+    UpsertStoreRequest, UpsertTaxRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -28,7 +29,7 @@ use tpv_domain::ids::{
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
-use tpv_domain::people::{Customer, Role, UserAccount, UserProvision};
+use tpv_domain::people::{Customer, Role, Seller, Store, UserAccount, UserProvision};
 use tpv_domain::sale::PaymentMethod;
 use tpv_domain::tax::Tax;
 use tpv_print::{
@@ -61,6 +62,8 @@ struct AppState {
     products: ProductService,
     families: FamilyService,
     taxes: TaxService,
+    sellers: SellerService,
+    stores: StoreService,
     imports: ProductImportService,
     time_clock: TimeClockService,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
@@ -750,12 +753,51 @@ async fn reset_password(
 }
 
 #[tauri::command]
-async fn list_stores(state: State<'_, AppState>) -> Result<Vec<tpv_domain::people::Store>, String> {
-    require_manage_users(state.inner())?;
+async fn list_stores(state: State<'_, AppState>) -> Result<Vec<Store>, String> {
+    require_manager(state.inner())?;
     state
         .inner()
-        .catalog
-        .list_stores()
+        .stores
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_sellers(state: State<'_, AppState>) -> Result<Vec<Seller>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .sellers
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_seller(
+    state: State<'_, AppState>,
+    request: UpsertSellerRequest,
+) -> Result<Seller, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .sellers
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_store(
+    state: State<'_, AppState>,
+    request: UpsertStoreRequest,
+) -> Result<Store, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stores
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
         .await
         .map_err(|error| error.to_string())
 }
@@ -1226,6 +1268,8 @@ async fn build_app_state(
     let products = ProductService::new(catalog_repo.clone(), master_data.clone());
     let families = FamilyService::new(catalog_repo.clone(), master_data.clone());
     let taxes = TaxService::new(catalog_repo.clone(), master_data.clone());
+    let sellers = SellerService::new(catalog_repo.clone(), master_data.clone());
+    let stores = StoreService::new(catalog_repo.clone(), master_data.clone());
     let imports = ProductImportService::new(import_repo);
     let time_clock = TimeClockService::new(time_clock_repo, user_repo.clone(), clock.clone());
     let customers = CustomerService::new(catalog_repo, master_data.clone());
@@ -1259,6 +1303,8 @@ async fn build_app_state(
         products,
         families,
         taxes,
+        sellers,
+        stores,
         imports,
         time_clock,
         sync_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1348,6 +1394,9 @@ fn main() {
             update_user,
             reset_password,
             list_stores,
+            list_sellers,
+            save_seller,
+            save_store,
             list_products,
             save_product,
             list_families,
@@ -1448,6 +1497,9 @@ mod e2e_tests {
                 update_user,
                 reset_password,
                 list_stores,
+                list_sellers,
+                save_seller,
+                save_store,
                 list_products,
                 save_product,
                 list_families,
@@ -1720,6 +1772,66 @@ mod e2e_tests {
                 .expect("taxes array")
                 .iter()
                 .any(|item| item["code"] == "UI5")
+        );
+
+        let seller = invoke(
+            &webview,
+            "save_seller",
+            json!({
+                "request": {
+                    "code": "UI-S",
+                    "name": "Vendedor UI",
+                    "phone1": "600123123",
+                    "active": true
+                }
+            }),
+        )
+        .expect("save seller");
+        assert_eq!(seller["code"], "UI-S");
+        assert_eq!(seller["name"], "Vendedor UI");
+        assert_eq!(seller["phone1"], "600123123");
+        let sellers = invoke(&webview, "list_sellers", json!({})).expect("list sellers");
+        assert!(
+            sellers
+                .as_array()
+                .expect("sellers array")
+                .iter()
+                .any(|item| item["code"] == "UI-S")
+        );
+
+        let store_master = invoke(
+            &webview,
+            "save_store",
+            json!({
+                "request": {
+                    "code": "UI-STORE",
+                    "name": "Tienda UI",
+                    "tax_id": "B12345674",
+                    "phone": "952123123",
+                    "street": "Calle UI",
+                    "number": "7",
+                    "locality": "Benalmádena",
+                    "postal_code": "29630",
+                    "province": "Málaga",
+                    "active": true
+                }
+            }),
+        )
+        .expect("save store");
+        assert_eq!(store_master["code"], "UI-STORE");
+        assert_eq!(store_master["name"], "Tienda UI");
+        assert_eq!(store_master["tax_id"], "B12345674");
+        let store_master_id = store_master["id"]
+            .as_str()
+            .expect("store master id")
+            .to_string();
+        let store_list = invoke(&webview, "list_stores", json!({})).expect("list stores");
+        assert!(
+            store_list
+                .as_array()
+                .expect("stores array")
+                .iter()
+                .any(|item| item["id"] == store_master_id && item["code"] == "UI-STORE")
         );
 
         let product = invoke(

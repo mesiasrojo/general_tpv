@@ -226,7 +226,7 @@ Implementado:
 - Fichaje de entrada/salida por usuario y tienda, con auditoría atómica, histórico reciente y visibilidad limitada por rol.
 - Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC`, gasto de caja automático para efectivo y referencia obligatoria del justificante para tarjeta.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
-- Catálogo editable desde la UI mediante pestañas de artículos, familias e impuestos. Cada maestro persiste su versión, emite `master_data.upsert` y los formularios de artículo consumen las familias e IVA activos. También se muestran los conflictos detectados.
+- Catálogo editable desde la UI mediante pestañas de artículos, familias, impuestos, vendedores y tiendas. Cada maestro persiste su versión, emite `master_data.upsert` y los formularios de artículo consumen las familias e IVA activos. También se muestran los conflictos detectados.
 - Importación CSV de artículos con previsualización, informe de errores, commit transaccional e idempotencia por lote y por identificador de origen.
 - Clientes editables desde la UI, selector de cliente en la venta, validación de NIF y sincronización maestra.
 - Temas compartidos `light_theme` (por defecto, blanco y azul) y `dark_theme`, con selector persistido en `localStorage`.

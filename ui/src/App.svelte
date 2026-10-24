@@ -23,7 +23,10 @@
     type SaleView,
     type SaveCustomerRequest,
     type SaveFamilyRequest,
+    type SaveSellerRequest,
+    type SaveStoreRequest,
     type SaveTaxRequest,
+    type Seller,
     type SessionUser,
     type Store,
     type SyncStatus,
@@ -103,9 +106,10 @@
   let catalogError = $state('');
   let catalogBusy = $state(false);
   let catalogFilter = $state('');
-  let catalogSection = $state<'products' | 'families' | 'taxes'>('products');
+  let catalogSection = $state<'products' | 'families' | 'taxes' | 'sellers' | 'stores'>('products');
   let families = $state<Family[]>([]);
   let taxes = $state<Tax[]>([]);
+  let sellers = $state<Seller[]>([]);
   let editingFamilyId = $state<string | null>(null);
   let familyCode = $state('');
   let familyName = $state('');
@@ -115,6 +119,23 @@
   let taxName = $state('');
   let taxRatePercent = $state('21');
   let taxActive = $state(true);
+  let editingSellerId = $state<string | null>(null);
+  let sellerCode = $state('');
+  let sellerName = $state('');
+  let sellerPhone1 = $state('');
+  let sellerPhone2 = $state('');
+  let sellerActive = $state(true);
+  let editingStoreId = $state<string | null>(null);
+  let storeCode = $state('');
+  let storeName = $state('');
+  let storeTaxId = $state('');
+  let storePhone = $state('');
+  let storeStreet = $state('');
+  let storeNumber = $state('');
+  let storeLocality = $state('');
+  let storePostalCode = $state('');
+  let storeProvince = $state('');
+  let storeActive = $state(true);
   let editingProductId = $state<string | null>(null);
   let productSku = $state('');
   let productBarcode = $state('');
@@ -525,7 +546,7 @@
   async function refreshUsers() {
     try {
       users = await api.listUsers();
-      stores = await api.listStores();
+      stores = (await api.listStores()).filter((store) => store.active);
       const firstStore = stores[0];
       if (!newStoreId && firstStore) {
         newStoreId = firstStore.id;
@@ -545,16 +566,20 @@
     catalogBusy = true;
     catalogError = '';
     try {
-      const [items, conflicts, familyItems, taxItems] = await Promise.all([
+      const [items, conflicts, familyItems, taxItems, sellerItems, storeItems] = await Promise.all([
         api.listProducts(),
         api.listMasterDataConflicts(),
         api.listFamilies(),
-        api.listTaxes()
+        api.listTaxes(),
+        api.listSellers(),
+        api.listStores()
       ]);
       catalogItems = items;
       catalogConflicts = conflicts;
       families = familyItems;
       taxes = taxItems;
+      sellers = sellerItems;
+      stores = storeItems;
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -723,6 +748,122 @@
         : [...taxes, saved];
       message = `Impuesto guardado: ${saved.code} · ${saved.percent_bp / 100}%`;
       resetTaxForm();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
+    }
+  }
+
+
+  function resetSellerForm() {
+    editingSellerId = null;
+    sellerCode = '';
+    sellerName = '';
+    sellerPhone1 = '';
+    sellerPhone2 = '';
+    sellerActive = true;
+    catalogError = '';
+  }
+
+  function editSeller(seller: Seller) {
+    editingSellerId = seller.id;
+    sellerCode = seller.code;
+    sellerName = seller.name;
+    sellerPhone1 = seller.phone1 ?? '';
+    sellerPhone2 = seller.phone2 ?? '';
+    sellerActive = seller.active;
+    catalogError = '';
+  }
+
+  async function saveSeller() {
+    if (catalogBusy) return;
+    catalogError = '';
+    if (!sellerCode.trim() || !sellerName.trim()) {
+      catalogError = 'Código y nombre de vendedor son obligatorios.';
+      return;
+    }
+    const request: SaveSellerRequest = {
+      seller_id: editingSellerId,
+      code: sellerCode.trim(),
+      name: sellerName.trim(),
+      phone1: sellerPhone1.trim() || null,
+      phone2: sellerPhone2.trim() || null,
+      active: sellerActive
+    };
+    catalogBusy = true;
+    try {
+      const saved = await api.saveSeller(request);
+      sellers = sellers.some((seller) => seller.id === saved.id)
+        ? sellers.map((seller) => (seller.id === saved.id ? saved : seller))
+        : [...sellers, saved];
+      message = `Vendedor guardado: ${saved.code} · ${saved.name}`;
+      resetSellerForm();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
+    }
+  }
+
+  function resetStoreForm() {
+    editingStoreId = null;
+    storeCode = '';
+    storeName = '';
+    storeTaxId = '';
+    storePhone = '';
+    storeStreet = '';
+    storeNumber = '';
+    storeLocality = '';
+    storePostalCode = '';
+    storeProvince = '';
+    storeActive = true;
+    catalogError = '';
+  }
+
+  function editStore(store: Store) {
+    editingStoreId = store.id;
+    storeCode = store.code;
+    storeName = store.name;
+    storeTaxId = store.tax_id;
+    storePhone = store.phone ?? '';
+    storeStreet = store.address.street;
+    storeNumber = store.address.number;
+    storeLocality = store.address.locality;
+    storePostalCode = store.address.postal_code;
+    storeProvince = store.address.province;
+    storeActive = store.active;
+    catalogError = '';
+  }
+
+  async function saveStore() {
+    if (catalogBusy) return;
+    catalogError = '';
+    if (!storeCode.trim() || !storeName.trim() || !storeTaxId.trim()) {
+      catalogError = 'Código, nombre y NIF de tienda son obligatorios.';
+      return;
+    }
+    const request: SaveStoreRequest = {
+      store_id: editingStoreId,
+      code: storeCode.trim(),
+      name: storeName.trim(),
+      tax_id: storeTaxId.trim(),
+      phone: storePhone.trim() || null,
+      street: storeStreet.trim(),
+      number: storeNumber.trim(),
+      locality: storeLocality.trim(),
+      postal_code: storePostalCode.trim(),
+      province: storeProvince.trim(),
+      active: storeActive
+    };
+    catalogBusy = true;
+    try {
+      const saved = await api.saveStore(request);
+      stores = stores.some((store) => store.id === saved.id)
+        ? stores.map((store) => (store.id === saved.id ? saved : store))
+        : [...stores, saved];
+      message = `Tienda guardada: ${saved.code} · ${saved.name}`;
+      resetStoreForm();
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -1991,6 +2132,24 @@
           >
             Impuestos
           </button>
+          <button
+            type="button"
+            role="tab"
+            class:active={catalogSection === 'sellers'}
+            aria-selected={catalogSection === 'sellers'}
+            onclick={() => (catalogSection = 'sellers')}
+          >
+            Vendedores
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class:active={catalogSection === 'stores'}
+            aria-selected={catalogSection === 'stores'}
+            onclick={() => (catalogSection = 'stores')}
+          >
+            Tiendas
+          </button>
         </div>
 
         {#if catalogSection === 'products'}
@@ -2325,6 +2484,168 @@
               </div>
             {:else}
               <p class="muted small">No hay impuestos.</p>
+            {/each}
+          </div>
+        {/if}
+
+        {#if catalogSection === 'sellers'}
+          <form
+            class="product-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void saveSeller();
+            }}
+          >
+            <label class="field">
+              <span>Código</span>
+              <input bind:value={sellerCode} autocomplete="off" placeholder="V01" />
+            </label>
+            <label class="field">
+              <span>Nombre</span>
+              <input bind:value={sellerName} />
+            </label>
+            <label class="field">
+              <span>Teléfono 1</span>
+              <input bind:value={sellerPhone1} autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Teléfono 2</span>
+              <input bind:value={sellerPhone2} autocomplete="off" />
+            </label>
+            <div class="field">
+              <span>Estado</span>
+              <label class="inline">
+                <input type="checkbox" bind:checked={sellerActive} />
+                Activo
+              </label>
+            </div>
+            <div class="product-actions">
+              <button class="primary" type="submit" disabled={catalogBusy}>
+                {catalogBusy ? 'Guardando…' : 'Guardar vendedor'}
+              </button>
+              <button class="secondary" type="button" onclick={resetSellerForm}>
+                Nuevo vendedor
+              </button>
+            </div>
+          </form>
+
+          <div class="catalog-toolbar">
+            <span class="muted small">{sellers.length} vendedor(es)</span>
+          </div>
+
+          <div class="product-list">
+            {#each sellers as seller (seller.id)}
+              <div class="product-row">
+                <div>
+                  <strong>{seller.name}</strong>
+                  <span class="muted small mono">
+                    {seller.code}{seller.phone1 ? ` · ${seller.phone1}` : ''}
+                  </span>
+                </div>
+                <div class="product-row-actions">
+                  <span class="badge" class:inactive={!seller.active}>
+                    {seller.active ? 'ACTIVO' : 'INACTIVO'}
+                  </span>
+                  <button class="secondary" type="button" onclick={() => editSeller(seller)}>
+                    Editar
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <p class="muted small">No hay vendedores.</p>
+            {/each}
+          </div>
+        {/if}
+
+        {#if catalogSection === 'stores'}
+          <form
+            class="product-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void saveStore();
+            }}
+          >
+            <label class="field">
+              <span>Código</span>
+              <input bind:value={storeCode} autocomplete="off" placeholder="BEN01" />
+            </label>
+            <label class="field">
+              <span>Nombre</span>
+              <input bind:value={storeName} />
+            </label>
+            <label class="field">
+              <span>NIF</span>
+              <input bind:value={storeTaxId} autocomplete="off" placeholder="B12345674" />
+            </label>
+            <label class="field">
+              <span>Teléfono</span>
+              <input bind:value={storePhone} autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Calle</span>
+              <input bind:value={storeStreet} />
+            </label>
+            <label class="field">
+              <span>Número</span>
+              <input bind:value={storeNumber} />
+            </label>
+            <label class="field">
+              <span>Localidad</span>
+              <input bind:value={storeLocality} />
+            </label>
+            <label class="field">
+              <span>Código postal</span>
+              <input bind:value={storePostalCode} />
+            </label>
+            <label class="field">
+              <span>Provincia</span>
+              <input bind:value={storeProvince} />
+            </label>
+            <div class="field">
+              <span>Estado</span>
+              <label class="inline">
+                <input type="checkbox" bind:checked={storeActive} />
+                Activa
+              </label>
+            </div>
+            <div class="product-actions">
+              <button class="primary" type="submit" disabled={catalogBusy}>
+                {catalogBusy ? 'Guardando…' : 'Guardar tienda'}
+              </button>
+              <button class="secondary" type="button" onclick={resetStoreForm}>
+                Nueva tienda
+              </button>
+            </div>
+          </form>
+
+          <div class="catalog-toolbar">
+            <span class="muted small">{stores.length} tienda(s)</span>
+          </div>
+
+          <div class="product-list">
+            {#each stores as store (store.id)}
+              <div class="product-row">
+                <div>
+                  <strong>{store.name}</strong>
+                  <span class="muted small mono">
+                    {store.code} · {store.tax_id}{store.phone ? ` · ${store.phone}` : ''}
+                  </span>
+                  <span class="muted small">
+                    {store.address.street} {store.address.number}, {store.address.postal_code}{' '}
+                    {store.address.locality} ({store.address.province})
+                  </span>
+                </div>
+                <div class="product-row-actions">
+                  <span class="badge" class:inactive={!store.active}>
+                    {store.active ? 'ACTIVA' : 'INACTIVA'}
+                  </span>
+                  <button class="secondary" type="button" onclick={() => editStore(store)}>
+                    Editar
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <p class="muted small">No hay tiendas.</p>
             {/each}
           </div>
         {/if}

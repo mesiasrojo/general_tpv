@@ -326,6 +326,45 @@ export interface Store {
   name: string;
   tax_id: string;
   phone: string | null;
+  address: {
+    street: string;
+    number: string;
+    locality: string;
+    postal_code: string;
+    province: string;
+  };
+  active: boolean;
+}
+
+export interface Seller {
+  id: string;
+  code: string;
+  name: string;
+  phone1: string | null;
+  phone2: string | null;
+  active: boolean;
+}
+
+export interface SaveSellerRequest {
+  seller_id?: string | null;
+  code: string;
+  name: string;
+  phone1?: string | null;
+  phone2?: string | null;
+  active: boolean;
+}
+
+export interface SaveStoreRequest {
+  store_id?: string | null;
+  code: string;
+  name: string;
+  tax_id: string;
+  phone?: string | null;
+  street?: string | null;
+  number?: string | null;
+  locality?: string | null;
+  postal_code?: string | null;
+  province?: string | null;
   active: boolean;
 }
 
@@ -415,6 +454,9 @@ export const api = {
   saveFamily: (request: SaveFamilyRequest) => invoke<Family>('save_family', { request }),
   listTaxes: () => invoke<Tax[]>('list_taxes'),
   saveTax: (request: SaveTaxRequest) => invoke<Tax>('save_tax', { request }),
+  listSellers: () => invoke<Seller[]>('list_sellers'),
+  saveSeller: (request: SaveSellerRequest) => invoke<Seller>('save_seller', { request }),
+  saveStore: (request: SaveStoreRequest) => invoke<Store>('save_store', { request }),
   previewProductImport: (sourceSystem: string, batchId: string | null, csv: string) =>
     invoke<ProductImportReport>('preview_product_import', { sourceSystem, batchId, csv }),
   commitProductImport: (sourceSystem: string, batchId: string | null, csv: string) =>

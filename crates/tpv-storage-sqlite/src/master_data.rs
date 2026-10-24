@@ -7,7 +7,7 @@ use tpv_domain::ids::{StoreId, TenantId};
 use tpv_domain::master_data::{
     MasterDataApplyResult, MasterDataChange, MasterDataConflict, MasterDataKind, resolve_change,
 };
-use tpv_domain::people::Customer;
+use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
 use uuid::Uuid;
@@ -175,7 +175,26 @@ impl MasterDataRepository for SqliteStore {
                             self.persist_tax(&tax).await?;
                         }
                     }
-                    MasterDataKind::Seller | MasterDataKind::Store => {}
+                    MasterDataKind::Seller => {
+                        if let Ok(mut seller) =
+                            serde_json::from_value::<Seller>(change.payload.clone())
+                        {
+                            if change.deleted {
+                                seller.active = false;
+                            }
+                            self.persist_seller(&seller).await?;
+                        }
+                    }
+                    MasterDataKind::Store => {
+                        if let Ok(mut store) =
+                            serde_json::from_value::<Store>(change.payload.clone())
+                        {
+                            if change.deleted {
+                                store.active = false;
+                            }
+                            self.persist_store(&store).await?;
+                        }
+                    }
                 }
             }
             Ok(MasterDataApplyResult {
@@ -274,7 +293,23 @@ impl MasterDataRepository for SqliteStore {
                         self.persist_tax(&tax).await?;
                     }
                 }
-                MasterDataKind::Seller | MasterDataKind::Store => {}
+                MasterDataKind::Seller => {
+                    if let Ok(mut seller) = serde_json::from_value::<Seller>(change.payload.clone())
+                    {
+                        if deleted {
+                            seller.active = false;
+                        }
+                        self.persist_seller(&seller).await?;
+                    }
+                }
+                MasterDataKind::Store => {
+                    if let Ok(mut store) = serde_json::from_value::<Store>(change.payload.clone()) {
+                        if deleted {
+                            store.active = false;
+                        }
+                        self.persist_store(&store).await?;
+                    }
+                }
             }
             Ok(event)
         }

@@ -52,10 +52,12 @@ pub trait CatalogRepository: Send + Sync {
 
     async fn list_stores(&self) -> Result<Vec<Store>>;
     async fn find_store(&self, id: StoreId) -> Result<Option<Store>>;
+    async fn find_store_by_code(&self, code: &str) -> Result<Option<Store>>;
     async fn save_store(&self, store: &Store) -> Result<()>;
 
     async fn list_sellers(&self) -> Result<Vec<Seller>>;
     async fn find_seller(&self, id: tpv_domain::ids::SellerId) -> Result<Option<Seller>>;
+    async fn find_seller_by_code(&self, code: &str) -> Result<Option<Seller>>;
     async fn save_seller(&self, seller: &Seller) -> Result<()>;
 }
 

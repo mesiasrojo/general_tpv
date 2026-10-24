@@ -69,6 +69,43 @@ pub struct UpsertTaxRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertSellerRequest {
+    #[serde(default)]
+    pub seller_id: Option<SellerId>,
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub phone1: Option<String>,
+    #[serde(default)]
+    pub phone2: Option<String>,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertStoreRequest {
+    #[serde(default)]
+    pub store_id: Option<StoreId>,
+    pub code: String,
+    pub name: String,
+    pub tax_id: String,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub street: Option<String>,
+    #[serde(default)]
+    pub number: Option<String>,
+    #[serde(default)]
+    pub locality: Option<String>,
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    #[serde(default)]
+    pub province: Option<String>,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertCustomerRequest {
     #[serde(default)]
     pub customer_id: Option<CustomerId>,
