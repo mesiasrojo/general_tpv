@@ -12,6 +12,7 @@ mod identity;
 mod import;
 mod key_store;
 mod master_data;
+mod notes;
 mod persistence;
 mod prints;
 mod sales;

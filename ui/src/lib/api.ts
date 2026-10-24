@@ -393,6 +393,46 @@ export interface TimeClockStatus {
   recent: TimeEntryView[];
 }
 
+export interface Note {
+  id: string;
+  store_id: string;
+  author_id: string;
+  title: string;
+  body: string;
+  created_at: string;
+}
+
+export interface NoteRecipientOption {
+  user_id: string;
+  user_name: string;
+}
+
+export interface NoteRecipientView {
+  user_id: string;
+  user_name: string;
+  read_at: string | null;
+}
+
+export interface NoteView {
+  note: Note;
+  author_name: string;
+  recipients: NoteRecipientView[];
+  viewer_read_at: string | null;
+  is_author: boolean;
+}
+
+export interface NoteInbox {
+  notes: NoteView[];
+  unread: number;
+  recipients: NoteRecipientOption[];
+}
+
+export interface CreateNoteRequest {
+  title: string;
+  body: string;
+  recipient_ids: string[];
+}
+
 export interface BackupSummary {
   path: string;
   bytes: number;
@@ -526,6 +566,9 @@ export const api = {
   timeClockStatus: () => invoke<TimeClockStatus>('time_clock_status'),
   timeClockIn: () => invoke<TimeClockStatus>('time_clock_in'),
   timeClockOut: () => invoke<TimeClockStatus>('time_clock_out'),
+  noteList: () => invoke<NoteInbox>('note_list'),
+  noteCreate: (request: CreateNoteRequest) => invoke<NoteInbox>('note_create', { request }),
+  noteRead: (noteId: string) => invoke<NoteInbox>('note_read', { noteId }),
   printTicket: (saleId: string, reprint = false) =>
     invoke<PrintSummary>('print_ticket', { saleId, reprint }),
   printPending: () => invoke<unknown[]>('print_pending'),

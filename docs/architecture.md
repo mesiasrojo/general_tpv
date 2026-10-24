@@ -63,6 +63,7 @@ Base local **SQLCipher** (SQLite + AES-256) con WAL y migraciones embebidas:
 - `stores`, `registers`, `users`, `sellers`, `customers`, `products`.
 - `families` y `taxes` como maestros editables del catálogo.
 - `time_entries` para fichaje, con índice único parcial que impide dos entradas abiertas por usuario y tienda.
+- `notes` y `note_recipients` para notas internas, con acuse de lectura por destinatario.
 - `sales`, `sale_lines`, `payments`.
 - `invoices`, `invoice_lines`.
 - `document_sequences` para numeración atómica.
@@ -224,6 +225,7 @@ Implementado:
 - RBAC por comando: venta, caja, impresión, sync y gestión de usuarios.
 - Movimientos de caja de gasto, retirada e ingreso con importe, motivo, evento `cash.movement` y auditoría.
 - Fichaje de entrada/salida por usuario y tienda, con auditoría atómica, histórico reciente y visibilidad limitada por rol.
+- Notas internas con destinatarios, acuse de lectura individual y auditoría de creación; los cajeros solo ven las notas dirigidas a ellos.
 - Devoluciones parciales por línea con prorrateo de importe/IVA, nota de crédito `REC`, gasto de caja automático para efectivo y referencia obligatoria del justificante para tarjeta.
 - Alta, edición y restablecimiento de contraseñas de usuarios desde la UI de escritorio.
 - Catálogo editable desde la UI mediante pestañas de artículos, familias, impuestos, vendedores y tiendas. Cada maestro persiste su versión, emite `master_data.upsert` y los formularios de artículo consumen las familias e IVA activos. También se muestran los conflictos detectados.

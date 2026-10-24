@@ -10,22 +10,23 @@ use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
     CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
-    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, CustomerService, FamilyService,
-    InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataRepository,
-    MasterDataService, OpenCashRequest, PrintQueueRepository, PrintService, PrinterPort,
-    ProductImportReport, ProductImportRepository, ProductImportService, ProductService,
-    QuarantinedEvent, RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest,
-    SaleRepository, SaleService, SaleView, SellerService, SequenceRepository, SessionUser,
-    StartSaleRequest, StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus,
-    TaxService, TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
-    UpsertCustomerRequest, UpsertFamilyRequest, UpsertProductRequest, UpsertSellerRequest,
-    UpsertStoreRequest, UpsertTaxRequest, UserRepository,
+    CloseCashRequest, ConfirmSaleRequest, CreateNoteRequest, CreateUserRequest, CustomerService,
+    FamilyService, InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataRepository,
+    MasterDataService, NoteInbox, NoteRepository, NoteService, OpenCashRequest,
+    PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
+    ProductImportService, ProductService, QuarantinedEvent, RectifyInvoiceLinesRequest,
+    RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
+    SellerService, SequenceRepository, SessionUser, StartSaleRequest, StoreService, SyncContext,
+    SyncOutboxRepository, SyncService, SyncStatus, TaxService, TimeClockRepository,
+    TimeClockService, TimeClockStatus, UpdateUserRequest, UpsertCustomerRequest,
+    UpsertFamilyRequest, UpsertProductRequest, UpsertSellerRequest, UpsertStoreRequest,
+    UpsertTaxRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
 use tpv_domain::catalog::{Family, Product};
 use tpv_domain::ids::{
-    CashSessionId, CustomerId, InvoiceId, RegisterId, SellerId, StoreId, UserId,
+    CashSessionId, CustomerId, InvoiceId, NoteId, RegisterId, SellerId, StoreId, UserId,
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
@@ -65,6 +66,7 @@ struct AppState {
     sellers: SellerService,
     stores: StoreService,
     imports: ProductImportService,
+    notes: NoteService,
     time_clock: TimeClockService,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -946,6 +948,56 @@ async fn load_time_clock_status(
 }
 
 #[tauri::command]
+async fn note_list(state: State<'_, AppState>) -> Result<NoteInbox, String> {
+    let session = require_session(state.inner())?;
+    load_note_inbox(state.inner(), &session).await
+}
+
+#[tauri::command]
+async fn note_create(
+    state: State<'_, AppState>,
+    request: CreateNoteRequest,
+) -> Result<NoteInbox, String> {
+    let session = require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .notes
+        .create(state.demo.store_id, session.user.id, request)
+        .await
+        .map_err(|error| error.to_string())?;
+    load_note_inbox(&state, &session).await
+}
+
+#[tauri::command]
+async fn note_read(state: State<'_, AppState>, note_id: NoteId) -> Result<NoteInbox, String> {
+    let session = require_session(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .notes
+        .read(
+            note_id,
+            state.demo.store_id,
+            session.user.id,
+            session.user.role.can_manage_master_data(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn load_note_inbox(state: &AppState, session: &SessionUser) -> Result<NoteInbox, String> {
+    state
+        .notes
+        .inbox(
+            state.demo.store_id,
+            session.user.id,
+            session.user.role.can_manage_master_data(),
+            100,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn preview_product_import(
     state: State<'_, AppState>,
     source_system: String,
@@ -1212,6 +1264,7 @@ async fn build_app_state(
     let master_data_repo: Arc<dyn MasterDataRepository> = store.clone();
     let import_repo: Arc<dyn ProductImportRepository> = store.clone();
     let time_clock_repo: Arc<dyn TimeClockRepository> = store.clone();
+    let note_repo: Arc<dyn NoteRepository> = store.clone();
     let tickets_dir = data_dir.join("tickets");
     let backup_dir = data_dir.join("backups");
     std::fs::create_dir_all(&tickets_dir)?;
@@ -1272,6 +1325,7 @@ async fn build_app_state(
     let stores = StoreService::new(catalog_repo.clone(), master_data.clone());
     let imports = ProductImportService::new(import_repo);
     let time_clock = TimeClockService::new(time_clock_repo, user_repo.clone(), clock.clone());
+    let notes = NoteService::new(note_repo, user_repo.clone(), clock.clone());
     let customers = CustomerService::new(catalog_repo, master_data.clone());
     let auth = AuthService::new(
         user_repo.clone(),
@@ -1306,6 +1360,7 @@ async fn build_app_state(
         sellers,
         stores,
         imports,
+        notes,
         time_clock,
         sync_lock: Arc::new(tokio::sync::Mutex::new(())),
     })
@@ -1406,6 +1461,9 @@ fn main() {
             time_clock_status,
             time_clock_in,
             time_clock_out,
+            note_list,
+            note_create,
+            note_read,
             preview_product_import,
             commit_product_import,
             list_customers,
@@ -1509,6 +1567,9 @@ mod e2e_tests {
                 time_clock_status,
                 time_clock_in,
                 time_clock_out,
+                note_list,
+                note_create,
+                note_read,
                 preview_product_import,
                 commit_product_import,
                 list_customers,
@@ -1987,6 +2048,46 @@ mod e2e_tests {
         )
         .expect("create cashier");
         assert_eq!(cashier["role"], "cashier");
+        let cashier_id = cashier["id"].as_str().expect("cashier id").to_string();
+
+        let empty_notes = invoke(&webview, "note_list", json!({})).expect("empty notes");
+        assert_eq!(
+            empty_notes["notes"].as_array().expect("notes array").len(),
+            0
+        );
+        assert_eq!(empty_notes["unread"], 0);
+        assert!(
+            empty_notes["recipients"]
+                .as_array()
+                .expect("note recipients")
+                .iter()
+                .any(|recipient| recipient["user_name"] == "Cajero Uno")
+        );
+
+        let created_notes = invoke(
+            &webview,
+            "note_create",
+            json!({
+                "request": {
+                    "title": "Cambio de turno",
+                    "body": "Abrir caja a las 08:30.",
+                    "recipient_ids": [cashier_id]
+                }
+            }),
+        )
+        .expect("create note");
+        assert_eq!(
+            created_notes["notes"]
+                .as_array()
+                .expect("created notes")
+                .len(),
+            1
+        );
+        let note_id = created_notes["notes"][0]["note"]["id"]
+            .as_str()
+            .expect("note id")
+            .to_string();
+        assert_eq!(created_notes["notes"][0]["author_name"], "Administrador");
 
         invoke(&webview, "logout", json!({})).expect("logout admin");
         invoke(
@@ -1995,6 +2096,39 @@ mod e2e_tests {
             json!({ "username": "cajero1", "password": "cajero123" }),
         )
         .expect("cashier login");
+        let cashier_notes = invoke(&webview, "note_list", json!({})).expect("cashier notes");
+        assert_eq!(cashier_notes["unread"], 1);
+        assert_eq!(cashier_notes["notes"][0]["note"]["id"], note_id);
+        assert!(cashier_notes["notes"][0]["viewer_read_at"].is_null());
+        assert_eq!(
+            cashier_notes["recipients"]
+                .as_array()
+                .expect("cashier note recipients")
+                .len(),
+            0
+        );
+        let read_notes =
+            invoke(&webview, "note_read", json!({ "noteId": note_id })).expect("read note");
+        assert_eq!(read_notes["unread"], 0);
+        assert!(!read_notes["notes"][0]["viewer_read_at"].is_null());
+        let forbidden = invoke(
+            &webview,
+            "note_create",
+            json!({
+                "request": {
+                    "title": "No permitido",
+                    "body": "El cajero no puede crear notas.",
+                    "recipient_ids": [cashier_id]
+                }
+            }),
+        )
+        .expect_err("cashier cannot create notes");
+        assert!(
+            forbidden
+                .as_str()
+                .unwrap_or_default()
+                .contains("responsable")
+        );
         let forbidden =
             invoke(&webview, "list_users", json!({})).expect_err("cashier cannot list users");
         assert!(

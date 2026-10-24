@@ -7,6 +7,7 @@ use tpv_domain::ids::{
     UserId,
 };
 use tpv_domain::master_data::MasterDataKind;
+use tpv_domain::notes::Note;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
 use tpv_domain::sync::SyncEvent;
@@ -146,6 +147,44 @@ pub struct TimeClockStatus {
     pub active: Option<TimeEntryView>,
     /// Recent entries for the store. Cashiers only see their own entries.
     pub recent: Vec<TimeEntryView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateNoteRequest {
+    pub title: String,
+    pub body: String,
+    pub recipient_ids: Vec<UserId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteRecipientOption {
+    pub user_id: UserId,
+    pub user_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteRecipientView {
+    pub user_id: UserId,
+    pub user_name: String,
+    pub read_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteView {
+    pub note: Note,
+    pub author_name: String,
+    pub recipients: Vec<NoteRecipientView>,
+    pub viewer_read_at: Option<OffsetDateTime>,
+    pub is_author: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteInbox {
+    pub notes: Vec<NoteView>,
+    /// Notes addressed to the viewer that have not been read yet.
+    pub unread: u32,
+    /// Active users available as recipients. Empty for non-managers.
+    pub recipients: Vec<NoteRecipientOption>,
 }
 
 fn default_active() -> bool {

@@ -5,9 +5,12 @@ use tpv_domain::audit::AuditEvent;
 use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::{Family, Product};
 use tpv_domain::document::DocumentType;
-use tpv_domain::ids::{CashSessionId, CustomerId, InvoiceId, RegisterId, SaleId, StoreId, UserId};
+use tpv_domain::ids::{
+    CashSessionId, CustomerId, InvoiceId, NoteId, RegisterId, SaleId, StoreId, UserId,
+};
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDataConflict};
+use tpv_domain::notes::{Note, NoteRecipient};
 use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::sale::Sale;
 use tpv_domain::sync::SyncEvent;
@@ -133,6 +136,39 @@ pub trait TimeClockRepository: Send + Sync {
         user_id: Option<UserId>,
         limit: u32,
     ) -> Result<Vec<TimeEntry>>;
+}
+
+/// A note plus its recipient read receipts.
+#[derive(Debug, Clone)]
+pub struct StoredNote {
+    pub note: Note,
+    pub recipients: Vec<NoteRecipient>,
+}
+
+#[async_trait]
+pub trait NoteRepository: Send + Sync {
+    /// Persists the note, its recipients and the audit event atomically.
+    async fn create(&self, note: &Note, recipient_ids: &[UserId], audit: &AuditEvent)
+    -> Result<()>;
+
+    /// Lists notes newest first. When `all_users` is false only notes addressed
+    /// to `viewer_id` are returned.
+    async fn list(
+        &self,
+        store_id: StoreId,
+        viewer_id: UserId,
+        all_users: bool,
+        limit: u32,
+    ) -> Result<Vec<StoredNote>>;
+
+    /// Records the first read of a note by one of its recipients. Returns
+    /// `false` when the user is not a recipient.
+    async fn mark_read(
+        &self,
+        note_id: NoteId,
+        user_id: UserId,
+        read_at: time::OffsetDateTime,
+    ) -> Result<bool>;
 }
 
 #[async_trait]

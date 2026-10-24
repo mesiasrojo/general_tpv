@@ -28,6 +28,7 @@ TPV de escritorio **local-first** para comercio minorista, construido con Rust y
 | Importación CSV de artículos | Implementado (validación, previsualización, commit atómico e idempotencia) |
 | Clientes en el TPV | Implementado (alta/edición, NIF, selector de venta y sync maestro) |
 | Control de presencia | Implementado (fichaje de entrada/salida, auditoría e histórico por rol) |
+| Notas internas | Implementado (destinatarios, acuses de lectura y auditoría) |
 | Clave SQLCipher en keychain | Implementado (migración automática y fallback `0600`) |
 | Pruebas E2E de comandos Tauri y UI | Implementado (mock IPC + Playwright con Chrome) |
 | Arnés HIL y prueba de carga | Implementado (red/serie/USB y throughput de ventas/impresión) |
@@ -224,6 +225,8 @@ Los roles administrador y responsable disponen del botón **Catálogo** en la ba
 El botón **Clientes** permite dar de alta y editar clientes con nombre, apellidos, NIF, teléfono, email y estado. Cada cambio se publica como maestro `customer`. En la venta actual hay un selector de cliente; el cliente elegido se asigna al iniciar la venta y es el que se usa al emitir la factura.
 
 El botón **Fichar** de la barra superior abre el control de presencia. Cada usuario puede fichar una entrada y una salida; solo puede existir un fichaje abierto por usuario y tienda. Cada operación se guarda en `time_entries` con su evento de auditoría. Los cajeros ven únicamente sus fichajes recientes, mientras que responsables y administradores ven el histórico de toda la tienda con nombre, horas de entrada/salida y duración.
+
+El botón **Notas** abre la bandeja interna del equipo. Administradores y responsables pueden publicar una nota con título, contenido y uno o varios destinatarios; cada destinatario dispone de su propio acuse de lectura. La creación guarda la nota, sus destinatarios y el evento de auditoría en una sola transacción. Los cajeros solo ven las notas dirigidas a ellos y el contador de no leídas es personal; los responsables ven además todas las notas de la tienda y el estado de lectura de cada destinatario.
 
 La apariencia del TPV y del backoffice se define en `themes.css`. El tema por defecto es `light_theme`, con fondo blanco y tonos azulados; el tema oscuro anterior se conserva como `dark_theme`. El botón **Claro/Oscuro** permite cambiar el tema y la selección se recuerda en `localStorage`.
 

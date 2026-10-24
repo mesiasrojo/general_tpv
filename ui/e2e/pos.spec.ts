@@ -99,6 +99,12 @@ test.describe('TPV desktop UI', () => {
             .map((entry) => ({ entry, user_name: 'Administrador' }))
         };
       };
+      const noteViews: any[] = [];
+      const noteInbox = () => ({
+        notes: [...noteViews].reverse(),
+        unread: noteViews.filter((view) => !view.is_author && !view.viewer_read_at).length,
+        recipients: [{ user_id: userId, user_name: 'Administrador' }]
+      });
       let invoiceRecord: any = null;
       const api = {
         async current_user() {
@@ -194,6 +200,37 @@ test.describe('TPV desktop UI', () => {
           if (!active) throw 'No hay ningún fichaje abierto.';
           active.clock_out = now();
           return timeClockStatus();
+        },
+        async note_list() {
+          return noteInbox();
+        },
+        async note_create(request: any) {
+          const note = {
+            id: crypto.randomUUID(),
+            store_id: storeId,
+            author_id: userId,
+            title: request.title,
+            body: request.body,
+            created_at: now()
+          };
+          noteViews.push({
+            note,
+            author_name: 'Administrador',
+            recipients: (request.recipient_ids as string[]).map((id) => ({
+              user_id: id,
+              user_name: 'Administrador',
+              read_at: null
+            })),
+            viewer_read_at: null,
+            is_author: true
+          });
+          return noteInbox();
+        },
+        async note_read(noteId: string) {
+          const view = noteViews.find((item) => item.note.id === noteId);
+          if (!view) throw 'Nota no encontrada.';
+          view.viewer_read_at = now();
+          return noteInbox();
         },
         async list_sales() {
           return sale && sale.ticket_number ? [saleView()] : [];
@@ -507,6 +544,12 @@ test.describe('TPV desktop UI', () => {
               return api.time_clock_in();
             case 'time_clock_out':
               return api.time_clock_out();
+            case 'note_list':
+              return api.note_list();
+            case 'note_create':
+              return api.note_create(args.request);
+            case 'note_read':
+              return api.note_read(String(args.noteId));
             case 'search_products':
               return api.search_products(String(args.query));
             case 'list_products':
@@ -723,6 +766,19 @@ test.describe('TPV desktop UI', () => {
     await expect(timeClockDialog.locator('.timeclock-row')).toHaveCount(1);
     await expect(timeClockDialog.locator('.timeclock-row')).toContainText('Administrador');
     await timeClockDialog.getByRole('button', { name: 'Esc' }).click();
+
+    await page.getByRole('button', { name: 'Notas', exact: true }).click();
+    const notesDialog = page.getByRole('dialog', { name: 'Notas internas' });
+    await expect(notesDialog).toBeVisible();
+    await expect(notesDialog.getByText('No hay notas en la bandeja.')).toBeVisible();
+    await notesDialog.getByLabel('Título').fill('Aviso E2E');
+    await notesDialog.getByLabel('Contenido').fill('Revisar la caja antes de cerrar.');
+    await notesDialog.getByRole('checkbox', { name: 'Administrador' }).check();
+    await notesDialog.getByRole('button', { name: 'Publicar nota' }).click();
+    await expect(notesDialog.locator('.note-card')).toHaveCount(1);
+    await expect(notesDialog.locator('.note-card')).toContainText('Aviso E2E');
+    await expect(notesDialog.locator('.note-card')).toContainText('Para: Administrador');
+    await notesDialog.getByRole('button', { name: 'Esc' }).click();
 
     await page.getByRole('button', { name: 'Clientes' }).click();
     const customers = page.getByRole('dialog', { name: 'Clientes' });

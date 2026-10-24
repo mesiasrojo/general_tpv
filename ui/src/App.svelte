@@ -14,6 +14,7 @@
     type Invoice,
     type LineKind,
     type MasterDataConflict,
+    type NoteInbox,
     type PaymentMethod,
     type Product,
     type ProductImportReport,
@@ -158,10 +159,21 @@
   let timeClockBusy = $state(false);
   let timeClockError = $state('');
   let timeClockTick = $state(Date.now());
+  let notesOpen = $state(false);
+  let noteInbox = $state<NoteInbox | null>(null);
+  let noteBusy = $state(false);
+  let noteError = $state('');
+  let noteTitle = $state('');
+  let noteBody = $state('');
+  let noteRecipientIds = $state<string[]>([]);
 
   let change = $derived(Math.max(0, receivedCents - amountCents));
   let lastClose = $derived(cash?.close_history.at(-1) ?? null);
   let activeTimeClock = $derived(timeClock?.active ?? null);
+  let unreadNotes = $derived(noteInbox?.unread ?? 0);
+  let canManageNotes = $derived(
+    session?.user.role === 'admin' || session?.user.role === 'manager'
+  );
   let timeClockButtonLabel = $derived.by(() => {
     const active = activeTimeClock;
     const tick = timeClockTick;
@@ -244,6 +256,7 @@
           await refreshSync();
           timeClockTick = Date.now();
           await refreshTimeClock();
+          await refreshNotes();
         } catch {
           await refreshSync();
         }
@@ -299,6 +312,11 @@
     usersOpen = false;
     timeClockOpen = false;
     timeClock = null;
+    notesOpen = false;
+    noteInbox = null;
+    noteTitle = '';
+    noteBody = '';
+    noteRecipientIds = [];
     users = [];
     stores = [];
     resetPasswordDrafts = {};
@@ -388,6 +406,7 @@
       await refreshSales();
       await refreshSync();
       await refreshTimeClock();
+      await refreshNotes();
       message = `Caja lista · ${info.store_name}`;
     } catch (error) {
       message = `No se pudo conectar con el núcleo TPV: ${String(error)}`;
@@ -996,6 +1015,62 @@
     }
   }
 
+  async function refreshNotes() {
+    try {
+      noteInbox = await api.noteList();
+    } catch {
+      // Notas no debe interrumpir la venta si el canal falla.
+    }
+  }
+
+  async function openNotes() {
+    notesOpen = true;
+    noteError = '';
+    await refreshNotes();
+  }
+
+  async function createNote() {
+    if (noteBusy) return;
+    noteError = '';
+    if (!noteTitle.trim() || !noteBody.trim()) {
+      noteError = 'Título y contenido son obligatorios.';
+      return;
+    }
+    if (noteRecipientIds.length === 0) {
+      noteError = 'Selecciona al menos un destinatario.';
+      return;
+    }
+    noteBusy = true;
+    try {
+      noteInbox = await api.noteCreate({
+        title: noteTitle.trim(),
+        body: noteBody.trim(),
+        recipient_ids: noteRecipientIds
+      });
+      noteTitle = '';
+      noteBody = '';
+      noteRecipientIds = [];
+      message = 'Nota publicada.';
+    } catch (error) {
+      noteError = String(error);
+    } finally {
+      noteBusy = false;
+    }
+  }
+
+  async function markNoteRead(noteId: string) {
+    if (!noteId || noteBusy) return;
+    noteBusy = true;
+    noteError = '';
+    try {
+      noteInbox = await api.noteRead(noteId);
+    } catch (error) {
+      noteError = String(error);
+    } finally {
+      noteBusy = false;
+    }
+  }
+
   async function createUser() {
     if (userBusy) return;
     userError = '';
@@ -1448,6 +1523,10 @@
       <span class="clock">{new Date().toLocaleTimeString('es-ES')}</span>
       <button class="icon" type="button" onclick={() => void openTimeClock()}>
         {timeClockButtonLabel}
+      </button>
+      <button class="icon notes-button" type="button" onclick={() => void openNotes()}>
+        Notas
+        {#if unreadNotes > 0}<span class="note-badge">{unreadNotes}</span>{/if}
       </button>
       {#if session.user.role === 'admin' || session.user.role === 'manager'}
         <button class="icon" type="button" onclick={() => void openCatalog()}>Catálogo</button>
@@ -2026,6 +2105,94 @@
             <p class="muted small">No hay usuarios.</p>
           {/each}
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if notesOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal notes-modal" role="dialog" aria-modal="true" aria-label="Notas internas">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">COMUNICACIÓN DEL EQUIPO</p>
+            <h2>Notas internas</h2>
+          </div>
+          <button class="icon" type="button" onclick={() => (notesOpen = false)}>Esc</button>
+        </div>
+
+        {#if noteError}
+          <p class="error" role="alert">{noteError}</p>
+        {/if}
+
+        {#if canManageNotes}
+          <section class="note-compose">
+            <p class="eyebrow">NUEVA NOTA</p>
+            <label class="field">
+              <span>Título</span>
+              <input bind:value={noteTitle} maxlength="120" placeholder="Cambio de turno" />
+            </label>
+            <label class="field">
+              <span>Contenido</span>
+              <textarea bind:value={noteBody} maxlength="4000" rows="4" placeholder="Instrucciones para el equipo"></textarea>
+            </label>
+            <fieldset class="note-recipients">
+              <legend>Destinatarios</legend>
+              {#each noteInbox?.recipients ?? [] as recipient (recipient.user_id)}
+                <label class="note-recipient">
+                  <input
+                    type="checkbox"
+                    bind:group={noteRecipientIds}
+                    value={recipient.user_id}
+                  />
+                  {recipient.user_name}
+                </label>
+              {:else}
+                <p class="muted small">No hay usuarios disponibles para esta tienda.</p>
+              {/each}
+            </fieldset>
+            <button class="primary" type="button" disabled={noteBusy} onclick={() => void createNote()}>
+              {noteBusy ? 'Publicando…' : 'Publicar nota'}
+            </button>
+          </section>
+        {/if}
+
+        <section class="note-list">
+          <p class="eyebrow">BANDEJA</p>
+          {#if noteInbox && noteInbox.notes.length > 0}
+            {#each noteInbox.notes as view (view.note.id)}
+              <article class="note-card" class:unread={!view.is_author && !view.viewer_read_at}>
+                <div class="note-head">
+                  <strong>{view.note.title}</strong>
+                  {#if !view.is_author && !view.viewer_read_at}
+                    <span class="badge note-unread">Sin leer</span>
+                  {/if}
+                </div>
+                <p>{view.note.body}</p>
+                <p class="muted small">
+                  {view.author_name} · {formatDateTime(view.note.created_at)}
+                </p>
+                {#if view.recipients.length > 0}
+                  <p class="muted small">
+                    Para: {view.recipients.map((recipient) => recipient.user_name).join(', ')}
+                    · {view.recipients.filter((recipient) => recipient.read_at).length}/{view.recipients.length} leídas
+                  </p>
+                {/if}
+                {#if !view.is_author && !view.viewer_read_at}
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={noteBusy}
+                    onclick={() => void markNoteRead(view.note.id)}
+                  >
+                    Marcar leída
+                  </button>
+                {/if}
+              </article>
+            {/each}
+          {:else}
+            <p class="muted small">No hay notas en la bandeja.</p>
+          {/if}
+        </section>
       </div>
     </div>
   {/if}
@@ -3282,6 +3449,110 @@
 
   .timeclock-row:last-child {
     border-bottom: 0;
+  }
+
+  .notes-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .note-badge {
+    min-width: 18px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: var(--danger-text);
+    color: var(--on-accent);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .notes-modal {
+    width: min(760px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .note-compose {
+    display: grid;
+    gap: 4px;
+    padding: 16px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .note-compose .field {
+    margin: 6px 0;
+  }
+
+  .note-compose textarea {
+    width: 100%;
+    min-width: 0;
+    resize: vertical;
+    font: inherit;
+  }
+
+  .note-recipients {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin: 8px 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .note-recipients legend {
+    padding: 0 4px;
+    color: var(--muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .note-recipient {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9rem;
+  }
+
+  .note-list {
+    margin-top: 18px;
+  }
+
+  .note-card {
+    display: grid;
+    gap: 6px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .note-card:last-child {
+    border-bottom: 0;
+  }
+
+  .note-card p {
+    margin: 0;
+  }
+
+  .note-card.unread {
+    padding-left: 12px;
+    border-left: 3px solid var(--accent);
+  }
+
+  .note-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .note-card button {
+    justify-self: start;
+    padding: 6px 10px;
   }
 
   .refund-modal {

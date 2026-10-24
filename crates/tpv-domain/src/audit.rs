@@ -28,6 +28,7 @@ pub enum AuditAction {
     Reprint,
     TimeClockIn,
     TimeClockOut,
+    NoteCreated,
     MasterDataChanged,
     SyncFailed,
     SettingsChanged,
