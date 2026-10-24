@@ -342,6 +342,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             register_id: demo.register_id,
             seller_id: demo.seller_id,
             customer_id: Some(demo.customer_id),
+            price_list_id: None,
         })
         .await?;
     sale = sale_service

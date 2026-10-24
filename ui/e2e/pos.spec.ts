@@ -88,6 +88,17 @@ test.describe('TPV desktop UI', () => {
           active: true
         }
       ];
+      const priceListItems: Array<Record<string, unknown>> = [
+        {
+          price_list: {
+            id: '00000000-0000-7000-8000-000000000012',
+            code: 'EMPLEADOS',
+            name: 'Tarifa empleados',
+            active: true
+          },
+          items: []
+        }
+      ];
       let cashSession: any = null;
       const timeEntries: any[] = [];
       const timeClockStatus = () => {
@@ -288,6 +299,29 @@ test.describe('TPV desktop UI', () => {
         async list_stores() {
           return storeItems;
         },
+        async list_price_lists() {
+          return priceListItems;
+        },
+        async save_price_list(request: any) {
+          const existing = request.price_list_id
+            ? priceListItems.find((item) => item.price_list.id === request.price_list_id)
+            : null;
+          const snapshot = {
+            price_list: {
+              id: existing?.price_list.id ?? crypto.randomUUID(),
+              code: String(request.code).toUpperCase(),
+              name: request.name,
+              active: request.active
+            },
+            items: request.items ?? []
+          };
+          if (existing) {
+            Object.assign(existing, snapshot);
+          } else {
+            priceListItems.push(snapshot);
+          }
+          return snapshot;
+        },
         async save_customer(request: any) {
           const existing = request.customer_id
             ? customerRecords.find((customer) => customer.id === request.customer_id)
@@ -316,13 +350,14 @@ test.describe('TPV desktop UI', () => {
           }
           return record;
         },
-        async start_sale(customerIdArg?: string) {
+        async start_sale(customerIdArg?: string, priceListIdArg?: string) {
           sale = {
             id: crypto.randomUUID(),
             store_id: storeId,
             register_id: registerId,
             seller_id: sellerId,
             customer_id: customerIdArg ?? customerId,
+            price_list_id: priceListIdArg ?? null,
             lines: [],
             payments: [],
             state: 'draft',
@@ -578,6 +613,10 @@ test.describe('TPV desktop UI', () => {
               return taxItems;
             case 'list_sellers':
               return sellerItems;
+            case 'list_price_lists':
+              return api.list_price_lists();
+            case 'save_price_list':
+              return api.save_price_list(args.request);
             case 'list_master_data_conflicts':
               return [];
             case 'save_product': {
@@ -710,7 +749,10 @@ test.describe('TPV desktop UI', () => {
                 errors: []
               };
             case 'start_sale':
-              return api.start_sale(args.customerId ? String(args.customerId) : undefined);
+              return api.start_sale(
+                args.customerId ? String(args.customerId) : undefined,
+                args.priceListId ? String(args.priceListId) : undefined
+              );
             case 'add_line':
               return api.add_line(String(args.saleId), String(args.sku));
             case 'apply_payment':
@@ -860,7 +902,7 @@ test.describe('TPV desktop UI', () => {
     await page.getByLabel('Nombre').fill('Producto E2E');
     await page.getByLabel('Familia').selectOption('E2E');
     await page.getByLabel('Código fiscal').selectOption('E2E5');
-    await page.getByLabel('Precio').fill('7.50');
+    await page.getByLabel('Precio', { exact: true }).fill('7.50');
     await page.getByRole('button', { name: 'Guardar producto' }).click();
     const productRow = page.locator('.product-row', { hasText: 'Producto E2E' });
     await expect(productRow).toBeVisible();
@@ -870,6 +912,23 @@ test.describe('TPV desktop UI', () => {
     await page.getByRole('button', { name: 'Guardar producto' }).click();
     await expect(page.locator('.product-row', { hasText: 'Producto E2E editado' })).toBeVisible();
 
+    await page.getByRole('tab', { name: 'Tarifas' }).click();
+    await page.getByLabel('Código', { exact: true }).fill('E2E-PL');
+    await page.getByLabel('Nombre').fill('Tarifa E2E');
+    await page
+      .locator('.price-list-item-form select')
+      .selectOption({ label: 'UI-E2E-1 · Producto E2E editado' });
+    await page.getByLabel('Precio', { exact: true }).fill('6,50');
+    await page.getByRole('button', { name: 'Añadir precio' }).click();
+    await expect(page.getByText('1 precio(s)')).toBeVisible();
+    await expect(page.locator('.product-row', { hasText: '6.50 €' })).toBeVisible();
+    await page.getByRole('button', { name: 'Guardar tarifa' }).click();
+    const priceListRow = page.locator('.product-row', { hasText: 'Tarifa E2E' });
+    await expect(priceListRow).toBeVisible();
+    await expect(priceListRow).toContainText('E2E-PL');
+    await expect(priceListRow).toContainText('ACTIVA');
+
+    await page.getByRole('tab', { name: 'Artículos' }).click();
     await page.getByLabel('Fichero CSV').setInputFiles({
       name: 'productos.csv',
       mimeType: 'text/csv',
@@ -912,6 +971,8 @@ test.describe('TPV desktop UI', () => {
     });
     expect(userFormOverflow).toBe(false);
     await usersDialog.getByRole('button', { name: 'Esc' }).click();
+
+    await page.getByLabel('Tarifa').selectOption({ label: 'Tarifa E2E (E2E-PL)' });
 
     const search = page.getByRole('textbox', { name: 'Buscar artículo' });
     await search.fill('café');

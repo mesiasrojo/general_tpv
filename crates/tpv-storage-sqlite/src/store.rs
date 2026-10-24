@@ -3,12 +3,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 use tpv_application::{CatalogRepository, Result as AppResult};
 use tpv_domain::catalog::{Family, Product};
-use tpv_domain::ids::{CustomerId, FamilyId, ProductId, SellerId, StoreId, TaxId};
+use tpv_domain::ids::{CustomerId, FamilyId, PriceListId, ProductId, SellerId, StoreId, TaxId};
 use tpv_domain::people::{Address, Customer, Seller, Sex, Store};
+use tpv_domain::pricing::{PriceList, PriceListSnapshot};
 use tpv_domain::tax::Tax;
 use tpv_domain::{Sku, TaxRate};
 use uuid::Uuid;
@@ -635,5 +637,30 @@ impl CatalogRepository for SqliteStore {
     async fn save_seller(&self, seller: &Seller) -> AppResult<()> {
         self.persist_seller(seller).await?;
         Ok(())
+    }
+
+    async fn list_price_lists(&self) -> AppResult<Vec<PriceListSnapshot>> {
+        Ok(self.all_price_lists().await?)
+    }
+
+    async fn find_price_list(&self, id: PriceListId) -> AppResult<Option<PriceListSnapshot>> {
+        Ok(self.get_price_list(id).await?)
+    }
+
+    async fn find_price_list_by_code(&self, code: &str) -> AppResult<Option<PriceList>> {
+        Ok(self.get_price_list_by_code(code).await?)
+    }
+
+    async fn save_price_list(&self, snapshot: &PriceListSnapshot) -> AppResult<()> {
+        self.persist_price_list(snapshot).await?;
+        Ok(())
+    }
+
+    async fn price_list_price(
+        &self,
+        price_list_id: PriceListId,
+        product_id: ProductId,
+    ) -> AppResult<Option<Decimal>> {
+        Ok(self.get_price_list_price(price_list_id, product_id).await?)
     }
 }

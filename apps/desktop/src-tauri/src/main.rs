@@ -12,25 +12,27 @@ use tpv_application::{
     CashMovementRequest, CashRepository, CashService, CatalogRepository, CatalogService,
     CloseCashRequest, ConfirmSaleRequest, CreateNoteRequest, CreateUserRequest, CustomerService,
     FamilyService, InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataRepository,
-    MasterDataService, NoteInbox, NoteRepository, NoteService, OpenCashRequest,
+    MasterDataService, NoteInbox, NoteRepository, NoteService, OpenCashRequest, PriceListService,
     PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
     ProductImportService, ProductService, QuarantinedEvent, RectifyInvoiceLinesRequest,
     RectifyInvoiceRequest, ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository,
     SaleService, SaleView, SellerService, SequenceRepository, SessionUser, StartSaleRequest,
     StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService,
     TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
-    UpsertCustomerRequest, UpsertFamilyRequest, UpsertProductRequest, UpsertSellerRequest,
-    UpsertStoreRequest, UpsertTaxRequest, UserRepository,
+    UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest,
+    UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
 use tpv_domain::catalog::{Family, Product};
 use tpv_domain::ids::{
-    CashSessionId, CustomerId, InvoiceId, NoteId, RegisterId, SellerId, StoreId, UserId,
+    CashSessionId, CustomerId, InvoiceId, NoteId, PriceListId, RegisterId, SellerId, StoreId,
+    UserId,
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Customer, Role, Seller, Store, UserAccount, UserProvision};
+use tpv_domain::pricing::PriceListSnapshot;
 use tpv_domain::sale::{PaymentMethod, SaleState};
 use tpv_domain::tax::Tax;
 use tpv_print::{
@@ -63,6 +65,7 @@ struct AppState {
     products: ProductService,
     families: FamilyService,
     taxes: TaxService,
+    price_lists: PriceListService,
     sellers: SellerService,
     stores: StoreService,
     imports: ProductImportService,
@@ -209,6 +212,7 @@ async fn search_products(
 async fn start_sale(
     state: State<'_, AppState>,
     customer_id: Option<CustomerId>,
+    price_list_id: Option<PriceListId>,
 ) -> Result<SaleView, String> {
     require_sell(state.inner())?;
     let state = state.inner().clone();
@@ -219,6 +223,7 @@ async fn start_sale(
             register_id: state.demo.register_id,
             seller_id: state.demo.seller_id,
             customer_id: customer_id.or(Some(state.demo.customer_id)),
+            price_list_id,
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -961,6 +966,31 @@ async fn save_tax(state: State<'_, AppState>, request: UpsertTaxRequest) -> Resu
 }
 
 #[tauri::command]
+async fn list_price_lists(state: State<'_, AppState>) -> Result<Vec<PriceListSnapshot>, String> {
+    require_session(state.inner())?;
+    state
+        .inner()
+        .price_lists
+        .list()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_price_list(
+    state: State<'_, AppState>,
+    request: UpsertPriceListRequest,
+) -> Result<PriceListSnapshot, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .price_lists
+        .upsert(&state.sync_ctx, state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn time_clock_status(state: State<'_, AppState>) -> Result<TimeClockStatus, String> {
     let session = require_session(state.inner())?;
     load_time_clock_status(state.inner(), &session).await
@@ -1380,6 +1410,7 @@ async fn build_app_state(
     let products = ProductService::new(catalog_repo.clone(), master_data.clone());
     let families = FamilyService::new(catalog_repo.clone(), master_data.clone());
     let taxes = TaxService::new(catalog_repo.clone(), master_data.clone());
+    let price_lists = PriceListService::new(catalog_repo.clone(), master_data.clone());
     let sellers = SellerService::new(catalog_repo.clone(), master_data.clone());
     let stores = StoreService::new(catalog_repo.clone(), master_data.clone());
     let imports = ProductImportService::new(import_repo);
@@ -1416,6 +1447,7 @@ async fn build_app_state(
         products,
         families,
         taxes,
+        price_lists,
         sellers,
         stores,
         imports,
@@ -1518,6 +1550,8 @@ fn main() {
             save_family,
             list_taxes,
             save_tax,
+            list_price_lists,
+            save_price_list,
             time_clock_status,
             time_clock_in,
             time_clock_out,
@@ -1625,6 +1659,8 @@ mod e2e_tests {
                 save_family,
                 list_taxes,
                 save_tax,
+                list_price_lists,
+                save_price_list,
                 time_clock_status,
                 time_clock_in,
                 time_clock_out,
@@ -2019,6 +2055,45 @@ mod e2e_tests {
                 .expect("products array")
                 .iter()
                 .any(|item| item["id"] == product_id)
+        );
+
+        let price_list = invoke(
+            &webview,
+            "save_price_list",
+            json!({
+                "request": {
+                    "code": "UI-PL",
+                    "name": "Tarifa UI",
+                    "items": [
+                        {"product_id": product_id, "unit_price": "8,50"}
+                    ],
+                    "active": true
+                }
+            }),
+        )
+        .expect("save price list");
+        assert_eq!(price_list["price_list"]["code"], "UI-PL");
+        assert_eq!(price_list["price_list"]["name"], "Tarifa UI");
+        assert_eq!(
+            price_list["items"]
+                .as_array()
+                .expect("price list items")
+                .len(),
+            1
+        );
+        let price_list_id = price_list["price_list"]["id"]
+            .as_str()
+            .expect("price list id")
+            .to_string();
+        let price_lists =
+            invoke(&webview, "list_price_lists", json!({})).expect("list price lists");
+        assert!(
+            price_lists
+                .as_array()
+                .expect("price lists array")
+                .iter()
+                .any(|item| item["price_list"]["id"] == price_list_id
+                    && item["price_list"]["code"] == "UI-PL")
         );
 
         let updated = invoke(

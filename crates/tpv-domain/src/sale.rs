@@ -6,7 +6,8 @@ use time::OffsetDateTime;
 use crate::catalog::Product;
 use crate::error::{DomainError, Result};
 use crate::ids::{
-    CustomerId, InvoiceId, PaymentId, ProductId, RegisterId, SaleId, SaleLineId, SellerId, StoreId,
+    CustomerId, InvoiceId, PaymentId, PriceListId, ProductId, RegisterId, SaleId, SaleLineId,
+    SellerId, StoreId,
 };
 use crate::money::{Money, Quantity};
 use crate::tax::{TaxBreakdown, TaxRate};
@@ -247,6 +248,8 @@ pub struct Sale {
     pub register_id: RegisterId,
     pub seller_id: SellerId,
     pub customer_id: Option<CustomerId>,
+    #[serde(default)]
+    pub price_list_id: Option<PriceListId>,
     pub lines: Vec<SaleLine>,
     pub payments: Vec<Payment>,
     pub state: SaleState,
@@ -273,6 +276,7 @@ impl Sale {
             register_id,
             seller_id,
             customer_id,
+            price_list_id: None,
             lines: Vec::new(),
             payments: Vec::new(),
             state: SaleState::Draft,

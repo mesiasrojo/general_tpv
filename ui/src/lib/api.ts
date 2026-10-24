@@ -65,6 +65,36 @@ export interface SaveFamilyRequest {
   active: boolean;
 }
 
+export interface PriceList {
+  id: string;
+  code: string;
+  name: string;
+  active: boolean;
+}
+
+export interface PriceListItem {
+  product_id: string;
+  unit_price: string;
+}
+
+export interface PriceListSnapshot {
+  price_list: PriceList;
+  items: PriceListItem[];
+}
+
+export interface PriceListItemRequest {
+  product_id: string;
+  unit_price: string;
+}
+
+export interface SavePriceListRequest {
+  price_list_id?: string | null;
+  code: string;
+  name: string;
+  items: PriceListItemRequest[];
+  active: boolean;
+}
+
 export interface Tax {
   id: string;
   code: string;
@@ -513,6 +543,9 @@ export const api = {
   saveFamily: (request: SaveFamilyRequest) => invoke<Family>('save_family', { request }),
   listTaxes: () => invoke<Tax[]>('list_taxes'),
   saveTax: (request: SaveTaxRequest) => invoke<Tax>('save_tax', { request }),
+  listPriceLists: () => invoke<PriceListSnapshot[]>('list_price_lists'),
+  savePriceList: (request: SavePriceListRequest) =>
+    invoke<PriceListSnapshot>('save_price_list', { request }),
   listSellers: () => invoke<Seller[]>('list_sellers'),
   saveSeller: (request: SaveSellerRequest) => invoke<Seller>('save_seller', { request }),
   saveStore: (request: SaveStoreRequest) => invoke<Store>('save_store', { request }),
@@ -525,8 +558,11 @@ export const api = {
     invoke<Customer>('save_customer', { request }),
   listMasterDataConflicts: (limit = 100) =>
     invoke<MasterDataConflict[]>('list_master_data_conflicts', { limit }),
-  startSale: (customerId?: string | null) =>
-    invoke<SaleView>('start_sale', { customerId: customerId ?? null }),
+  startSale: (customerId?: string | null, priceListId?: string | null) =>
+    invoke<SaleView>('start_sale', {
+      customerId: customerId ?? null,
+      priceListId: priceListId ?? null
+    }),
   addLine: (saleId: string, sku: string, quantity: string, kind: LineKind) =>
     invoke<SaleView>('add_line', { saleId, sku, quantity, kind }),
   applyPayment: (

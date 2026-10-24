@@ -3,8 +3,8 @@ use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::cash::{CashCount, CashMovementKind};
 use tpv_domain::ids::{
-    CustomerId, FamilyId, ProductId, RegisterId, SaleId, SaleLineId, SellerId, StoreId, TaxId,
-    UserId,
+    CustomerId, FamilyId, PriceListId, ProductId, RegisterId, SaleId, SaleLineId, SellerId,
+    StoreId, TaxId, UserId,
 };
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::notes::Note;
@@ -65,6 +65,25 @@ pub struct UpsertTaxRequest {
     pub code: String,
     pub name: String,
     pub percent_bp: u32,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceListItemRequest {
+    pub product_id: ProductId,
+    /// Tax-inclusive price. Accepts a decimal comma from the UI.
+    pub unit_price: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertPriceListRequest {
+    #[serde(default)]
+    pub price_list_id: Option<PriceListId>,
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub items: Vec<PriceListItemRequest>,
     #[serde(default = "default_active")]
     pub active: bool,
 }
@@ -197,6 +216,8 @@ pub struct StartSaleRequest {
     pub register_id: RegisterId,
     pub seller_id: SellerId,
     pub customer_id: Option<CustomerId>,
+    #[serde(default)]
+    pub price_list_id: Option<PriceListId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

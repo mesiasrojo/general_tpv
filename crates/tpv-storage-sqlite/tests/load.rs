@@ -79,6 +79,7 @@ async fn sale_and_print_throughput() {
                 register_id: demo.register_id,
                 seller_id: demo.seller_id,
                 customer_id: Some(demo.customer_id),
+                price_list_id: None,
             })
             .await
             .expect("start sale");

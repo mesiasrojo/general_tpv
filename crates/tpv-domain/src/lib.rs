@@ -16,6 +16,7 @@ pub mod master_data;
 pub mod money;
 pub mod notes;
 pub mod people;
+pub mod pricing;
 pub mod sale;
 pub mod sync;
 pub mod tax;

@@ -8,6 +8,7 @@ use tpv_domain::master_data::{
     MasterDataApplyResult, MasterDataChange, MasterDataConflict, MasterDataKind, resolve_change,
 };
 use tpv_domain::people::{Customer, Seller, Store};
+use tpv_domain::pricing::PriceListSnapshot;
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
 use uuid::Uuid;
@@ -175,6 +176,16 @@ impl MasterDataRepository for SqliteStore {
                             self.persist_tax(&tax).await?;
                         }
                     }
+                    MasterDataKind::PriceList => {
+                        if let Ok(mut snapshot) =
+                            serde_json::from_value::<PriceListSnapshot>(change.payload.clone())
+                        {
+                            if change.deleted {
+                                snapshot.price_list.active = false;
+                            }
+                            self.persist_price_list(&snapshot).await?;
+                        }
+                    }
                     MasterDataKind::Seller => {
                         if let Ok(mut seller) =
                             serde_json::from_value::<Seller>(change.payload.clone())
@@ -291,6 +302,16 @@ impl MasterDataRepository for SqliteStore {
                             tax.active = false;
                         }
                         self.persist_tax(&tax).await?;
+                    }
+                }
+                MasterDataKind::PriceList => {
+                    if let Ok(mut snapshot) =
+                        serde_json::from_value::<PriceListSnapshot>(change.payload.clone())
+                    {
+                        if deleted {
+                            snapshot.price_list.active = false;
+                        }
+                        self.persist_price_list(&snapshot).await?;
                     }
                 }
                 MasterDataKind::Seller => {

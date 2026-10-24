@@ -16,6 +16,7 @@
     type MasterDataConflict,
     type NoteInbox,
     type PaymentMethod,
+    type PriceListSnapshot,
     type Product,
     type ProductImportReport,
     type ProductSearchResult,
@@ -25,6 +26,7 @@
     type SaleView,
     type SaveCustomerRequest,
     type SaveFamilyRequest,
+    type SavePriceListRequest,
     type SaveSellerRequest,
     type SaveStoreRequest,
     type SaveTaxRequest,
@@ -118,7 +120,9 @@
   let catalogError = $state('');
   let catalogBusy = $state(false);
   let catalogFilter = $state('');
-  let catalogSection = $state<'products' | 'families' | 'taxes' | 'sellers' | 'stores'>('products');
+  let catalogSection = $state<
+    'products' | 'families' | 'taxes' | 'price-lists' | 'sellers' | 'stores'
+  >('products');
   let families = $state<Family[]>([]);
   let taxes = $state<Tax[]>([]);
   let sellers = $state<Seller[]>([]);
@@ -157,6 +161,15 @@
   let productTaxCode = $state('IVA21');
   let productTaxPercentBp = $state(2100);
   let productActive = $state(true);
+  let priceLists = $state<PriceListSnapshot[]>([]);
+  let priceListId = $state('');
+  let editingPriceListId = $state<string | null>(null);
+  let priceListCode = $state('');
+  let priceListName = $state('');
+  let priceListActive = $state(true);
+  let priceListPrices = $state<Record<string, string>>({});
+  let priceListProductId = $state('');
+  let priceListProductPrice = $state('');
   let importSourceSystem = $state('micro_server');
   let importBatchId = $state('');
   let importFileName = $state('');
@@ -319,6 +332,7 @@
     session = null;
     info = null;
     sale = null;
+    priceListId = '';
     cash = null;
     invoice = null;
     printSummary = null;
@@ -678,20 +692,23 @@
     catalogBusy = true;
     catalogError = '';
     try {
-      const [items, conflicts, familyItems, taxItems, sellerItems, storeItems] = await Promise.all([
-        api.listProducts(),
-        api.listMasterDataConflicts(),
-        api.listFamilies(),
-        api.listTaxes(),
-        api.listSellers(),
-        api.listStores()
-      ]);
+      const [items, conflicts, familyItems, taxItems, sellerItems, storeItems, priceListItems] =
+        await Promise.all([
+          api.listProducts(),
+          api.listMasterDataConflicts(),
+          api.listFamilies(),
+          api.listTaxes(),
+          api.listSellers(),
+          api.listStores(),
+          api.listPriceLists()
+        ]);
       catalogItems = items;
       catalogConflicts = conflicts;
       families = familyItems;
       taxes = taxItems;
       sellers = sellerItems;
       stores = storeItems;
+      priceLists = priceListItems;
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -984,6 +1001,89 @@
   }
 
 
+  function resetPriceListForm() {
+    editingPriceListId = null;
+    priceListCode = '';
+    priceListName = '';
+    priceListActive = true;
+    priceListPrices = {};
+    priceListProductId = '';
+    priceListProductPrice = '';
+    catalogError = '';
+  }
+
+  function editPriceList(snapshot: PriceListSnapshot) {
+    editingPriceListId = snapshot.price_list.id;
+    priceListCode = snapshot.price_list.code;
+    priceListName = snapshot.price_list.name;
+    priceListActive = snapshot.price_list.active;
+    priceListPrices = Object.fromEntries(
+      snapshot.items.map((item) => [item.product_id, item.unit_price])
+    );
+    priceListProductId = '';
+    priceListProductPrice = '';
+    catalogError = '';
+  }
+
+  function addPriceListItem() {
+    catalogError = '';
+    if (!priceListProductId) {
+      catalogError = 'Selecciona un artículo para la tarifa.';
+      return;
+    }
+    const price = Number.parseFloat(priceListProductPrice.trim().replace(',', '.'));
+    if (!Number.isFinite(price) || price < 0) {
+      catalogError = 'El precio de la tarifa debe ser un número no negativo.';
+      return;
+    }
+    priceListPrices = {
+      ...priceListPrices,
+      [priceListProductId]: priceListProductPrice.trim().replace(',', '.')
+    };
+    priceListProductId = '';
+    priceListProductPrice = '';
+  }
+
+  function removePriceListItem(productId: string) {
+    const next = { ...priceListPrices };
+    delete next[productId];
+    priceListPrices = next;
+  }
+
+  async function savePriceList() {
+    if (catalogBusy) return;
+    catalogError = '';
+    if (!priceListCode.trim() || !priceListName.trim()) {
+      catalogError = 'Código y nombre de tarifa son obligatorios.';
+      return;
+    }
+    const request: SavePriceListRequest = {
+      price_list_id: editingPriceListId,
+      code: priceListCode.trim(),
+      name: priceListName.trim(),
+      items: Object.entries(priceListPrices).map(([product_id, unit_price]) => ({
+        product_id,
+        unit_price: unit_price.replace(',', '.')
+      })),
+      active: priceListActive
+    };
+    catalogBusy = true;
+    try {
+      const saved = await api.savePriceList(request);
+      priceLists = priceLists.some((item) => item.price_list.id === saved.price_list.id)
+        ? priceLists.map((item) =>
+            item.price_list.id === saved.price_list.id ? saved : item
+          )
+        : [...priceLists, saved];
+      message = `Tarifa guardada: ${saved.price_list.code} · ${saved.price_list.name}`;
+      resetPriceListForm();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      catalogBusy = false;
+    }
+  }
+
   async function selectImportFile(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -1268,7 +1368,7 @@
     busy = true;
     try {
       if (!sale) {
-        sale = await api.startSale(customerId);
+        sale = await api.startSale(customerId, priceListId || null);
       }
       sale = await api.addLine(sale.sale.id, sku, '1', 'sale');
       query = '';
@@ -1677,6 +1777,21 @@
           </select>
         </label>
         <span class="muted small">El cliente se asigna al iniciar la venta.</span>
+      </div>
+
+      <div class="customer-picker">
+        <label class="field">
+          <span>Tarifa</span>
+          <select bind:value={priceListId} disabled={!!sale}>
+            <option value="">Precio base de catálogo</option>
+            {#each priceLists.filter((list) => list.price_list.active) as list (list.price_list.id)}
+              <option value={list.price_list.id}>
+                {list.price_list.name} ({list.price_list.code})
+              </option>
+            {/each}
+          </select>
+        </label>
+        <span class="muted small">La tarifa se fija al iniciar la venta.</span>
       </div>
 
       <form class="search" onsubmit={(event) => { event.preventDefault(); void search(); }}>
@@ -2618,6 +2733,15 @@
           <button
             type="button"
             role="tab"
+            class:active={catalogSection === 'price-lists'}
+            aria-selected={catalogSection === 'price-lists'}
+            onclick={() => (catalogSection = 'price-lists')}
+          >
+            Tarifas
+          </button>
+          <button
+            type="button"
+            role="tab"
             class:active={catalogSection === 'sellers'}
             aria-selected={catalogSection === 'sellers'}
             onclick={() => (catalogSection = 'sellers')}
@@ -3129,6 +3253,126 @@
               </div>
             {:else}
               <p class="muted small">No hay tiendas.</p>
+            {/each}
+          </div>
+        {/if}
+
+        {#if catalogSection === 'price-lists'}
+          <form
+            class="product-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void savePriceList();
+            }}
+          >
+            <label class="field">
+              <span>Código</span>
+              <input bind:value={priceListCode} autocomplete="off" placeholder="EMPLEADOS" />
+            </label>
+            <label class="field">
+              <span>Nombre</span>
+              <input bind:value={priceListName} placeholder="Tarifa de empleados" />
+            </label>
+            <div class="field">
+              <span>Estado</span>
+              <label class="inline">
+                <input type="checkbox" bind:checked={priceListActive} />
+                Activa
+              </label>
+            </div>
+            <div class="product-actions">
+              <button class="primary" type="submit" disabled={catalogBusy}>
+                {catalogBusy ? 'Guardando…' : 'Guardar tarifa'}
+              </button>
+              <button class="secondary" type="button" onclick={resetPriceListForm}>
+                Nueva tarifa
+              </button>
+            </div>
+          </form>
+
+          <div class="catalog-toolbar">
+            <div class="price-list-item-form">
+              <label class="field">
+                <span>Artículo</span>
+                <select bind:value={priceListProductId}>
+                  <option value="">Selecciona artículo</option>
+                  {#each catalogItems as product (product.id)}
+                    <option value={product.id}>
+                      {product.sku} · {product.name}
+                    </option>
+                  {/each}
+                </select>
+              </label>
+              <label class="field">
+                <span>Precio</span>
+                <input bind:value={priceListProductPrice} inputmode="decimal" placeholder="0,00" />
+              </label>
+              <button class="secondary" type="button" onclick={addPriceListItem}>
+                Añadir precio
+              </button>
+            </div>
+            <span class="muted small">{Object.keys(priceListPrices).length} precio(s)</span>
+          </div>
+
+          {#if Object.keys(priceListPrices).length > 0}
+            <div class="product-list">
+              {#each Object.entries(priceListPrices) as [productId, price] (productId)}
+                <div class="product-row">
+                  <div>
+                    <strong>
+                      {catalogItems.find((product) => product.id === productId)?.name ?? productId.slice(0, 8)}
+                    </strong>
+                    <span class="muted small mono">
+                      {catalogItems.find((product) => product.id === productId)?.sku ?? '—'}
+                    </span>
+                  </div>
+                  <div class="product-row-actions">
+                    <strong>{formatMoney(Math.round(Number(price) * 100))}</strong>
+                    <button
+                      class="secondary"
+                      type="button"
+                      onclick={() => removePriceListItem(productId)}
+                    >
+                      Quitar
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="muted small">
+              Añade precios concretos; los artículos sin precio usan el precio base del catálogo.
+            </p>
+          {/if}
+
+          <div class="catalog-toolbar">
+            <span class="muted small">{priceLists.length} tarifa(s)</span>
+          </div>
+
+          <div class="product-list">
+            {#each priceLists as snapshot (snapshot.price_list.id)}
+              <div class="product-row">
+                <div>
+                  <strong>{snapshot.price_list.name}</strong>
+                  <span class="muted small mono">
+                    {snapshot.price_list.code} · {snapshot.items.length} precio(s)
+                  </span>
+                </div>
+                <div class="product-row-actions">
+                  <span class="badge" class:inactive={!snapshot.price_list.active}>
+                    {snapshot.price_list.active ? 'ACTIVA' : 'INACTIVA'}
+                  </span>
+                  <button
+                    class="secondary"
+                    type="button"
+                    onclick={() => editPriceList(snapshot)}
+                  >
+                    Editar
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <p class="muted small">No hay tarifas.</p>
             {/each}
           </div>
         {/if}
@@ -4252,6 +4496,18 @@
     flex: 1;
   }
 
+  .price-list-item-form {
+    display: grid;
+    grid-template-columns: minmax(200px, 1fr) 120px auto;
+    gap: 10px;
+    align-items: end;
+    flex: 1;
+  }
+
+  .price-list-item-form .field {
+    margin: 0;
+  }
+
   .product-list {
     display: grid;
     gap: 8px;
@@ -4478,6 +4734,10 @@
     }
 
     .import-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .price-list-item-form {
       grid-template-columns: 1fr;
     }
 

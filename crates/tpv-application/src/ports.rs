@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::Sku;
@@ -7,12 +8,14 @@ use tpv_domain::cash::{CashCount, CashSession};
 use tpv_domain::catalog::{Family, Product};
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{
-    CashSessionId, CustomerId, InvoiceId, NoteId, RegisterId, SaleId, StoreId, UserId,
+    CashSessionId, CustomerId, InvoiceId, NoteId, PriceListId, ProductId, RegisterId, SaleId,
+    StoreId, UserId,
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDataConflict};
 use tpv_domain::notes::{Note, NoteRecipient};
 use tpv_domain::people::{Customer, Seller, Store};
+use tpv_domain::pricing::{PriceList, PriceListSnapshot};
 use tpv_domain::sale::{Sale, SaleState};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
@@ -49,6 +52,17 @@ pub trait CatalogRepository: Send + Sync {
     async fn list_taxes(&self) -> Result<Vec<Tax>>;
     async fn find_tax_by_code(&self, code: &str) -> Result<Option<Tax>>;
     async fn save_tax(&self, tax: &Tax) -> Result<()>;
+
+    async fn list_price_lists(&self) -> Result<Vec<PriceListSnapshot>>;
+    async fn find_price_list(&self, id: PriceListId) -> Result<Option<PriceListSnapshot>>;
+    async fn find_price_list_by_code(&self, code: &str) -> Result<Option<PriceList>>;
+    async fn save_price_list(&self, snapshot: &PriceListSnapshot) -> Result<()>;
+    /// Returns the tax-inclusive override, if the list has one for the product.
+    async fn price_list_price(
+        &self,
+        price_list_id: PriceListId,
+        product_id: ProductId,
+    ) -> Result<Option<Decimal>>;
 
     async fn find_customer(&self, id: CustomerId) -> Result<Option<Customer>>;
     async fn search_customers(&self, query: &str, limit: u32) -> Result<Vec<Customer>>;

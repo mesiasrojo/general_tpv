@@ -14,6 +14,7 @@ mod key_store;
 mod master_data;
 mod notes;
 mod persistence;
+mod price_lists;
 mod prints;
 mod sales;
 mod seed;

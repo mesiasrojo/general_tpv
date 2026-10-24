@@ -6,10 +6,11 @@ use time::{Duration, OffsetDateTime};
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceLineSelection,
-    InvoiceRepository, InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService,
-    RectifyInvoiceLinesRequest, ResetPasswordRequest, SaleQuery, SaleRepository, SaleService,
-    SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService,
-    UpdateUserRequest, UserRepository,
+    InvoiceRepository, InvoiceService, MasterDataService, OpenCashRequest, PriceListItemRequest,
+    PriceListService, PrintQueueRepository, PrintService, RectifyInvoiceLinesRequest,
+    ResetPasswordRequest, SaleQuery, SaleRepository, SaleService, SequenceRepository,
+    StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService, UpdateUserRequest,
+    UpsertPriceListRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::CashCount;
@@ -101,6 +102,7 @@ async fn confirmed_sale(services: &Services, sku: &str, quantity: &str) -> Sale 
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: Some(services.demo.customer_id),
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -264,6 +266,7 @@ async fn confirms_sale_persists_ticket_and_outbox() {
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: Some(services.demo.customer_id),
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -335,6 +338,7 @@ async fn issues_invoice_and_rejects_second_invoice() {
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: Some(services.demo.customer_id),
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -448,6 +452,7 @@ async fn closes_cash_with_expected_and_counted_amounts() {
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: None,
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -561,6 +566,7 @@ async fn outbox_can_be_read_and_marked_as_sent() {
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: None,
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -614,6 +620,7 @@ async fn quarantines_failed_events_and_can_requeue_them() {
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: None,
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -699,6 +706,7 @@ async fn prints_ticket_through_persistent_queue() {
             register_id: services.demo.register_id,
             seller_id: services.demo.seller_id,
             customer_id: Some(services.demo.customer_id),
+            price_list_id: None,
         })
         .await
         .unwrap();
@@ -984,6 +992,97 @@ async fn cannot_demote_or_deactivate_last_active_admin() {
         .await;
     assert!(matches!(
         deactivate,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
+}
+
+#[tokio::test]
+async fn sale_lines_use_the_price_list_override() {
+    let services = services().await;
+    let catalog: Arc<dyn tpv_application::CatalogRepository> = services.store.clone();
+    let master_repo: Arc<dyn tpv_application::MasterDataRepository> = services.store.clone();
+    let context = services.store.sync_context().await.unwrap();
+    let master_data = MasterDataService::new(master_repo, Arc::new(tpv_application::SystemClock));
+    let price_lists = PriceListService::new(catalog.clone(), master_data);
+
+    let sku = tpv_domain::Sku::new("1").unwrap();
+    let product = catalog.find_product_by_sku(&sku).await.unwrap().unwrap();
+    assert_eq!(product.unit_price, Decimal::new(10, 2));
+
+    let snapshot = price_lists
+        .upsert(
+            &context,
+            services.demo.store_id,
+            UpsertPriceListRequest {
+                price_list_id: None,
+                code: "empleados".into(),
+                name: "Empleados".into(),
+                items: vec![PriceListItemRequest {
+                    product_id: product.id,
+                    unit_price: "0,08".into(),
+                }],
+                active: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.price_list.code, "EMPLEADOS");
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(price_lists.list().await.unwrap().len(), 1);
+
+    let mut sale = services
+        .sales
+        .start_sale(StartSaleRequest {
+            store_id: services.demo.store_id,
+            register_id: services.demo.register_id,
+            seller_id: services.demo.seller_id,
+            customer_id: Some(services.demo.customer_id),
+            price_list_id: Some(snapshot.price_list.id),
+        })
+        .await
+        .unwrap();
+    assert_eq!(sale.price_list_id, Some(snapshot.price_list.id));
+
+    sale = services
+        .sales
+        .add_line(AddLineRequest {
+            sale_id: sale.id,
+            sku: "1".into(),
+            quantity: "1".into(),
+            kind: "sale".into(),
+            discount_bp: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(sale.lines[0].unit_price, Decimal::new(8, 2));
+    assert_eq!(sale.totals().unwrap().gross, Money::from_cents(8));
+
+    let inactive = price_lists
+        .upsert(
+            &context,
+            services.demo.store_id,
+            UpsertPriceListRequest {
+                price_list_id: None,
+                code: "antigua".into(),
+                name: "Tarifa antigua".into(),
+                items: vec![],
+                active: false,
+            },
+        )
+        .await
+        .unwrap();
+    let rejected = services
+        .sales
+        .start_sale(StartSaleRequest {
+            store_id: services.demo.store_id,
+            register_id: services.demo.register_id,
+            seller_id: services.demo.seller_id,
+            customer_id: Some(services.demo.customer_id),
+            price_list_id: Some(inactive.price_list.id),
+        })
+        .await;
+    assert!(matches!(
+        rejected,
         Err(tpv_application::ApplicationError::Validation(_))
     ));
 }

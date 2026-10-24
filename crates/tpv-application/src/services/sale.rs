@@ -46,13 +46,26 @@ impl SaleService {
     }
 
     pub async fn start_sale(&self, request: StartSaleRequest) -> Result<Sale> {
-        let sale = Sale::new(
+        let mut sale = Sale::new(
             request.store_id,
             request.register_id,
             request.seller_id,
             request.customer_id,
             self.clock.now(),
         );
+        if let Some(price_list_id) = request.price_list_id {
+            let snapshot = self
+                .catalog_repo
+                .find_price_list(price_list_id)
+                .await?
+                .ok_or_else(|| ApplicationError::NotFound(format!("price list {price_list_id}")))?;
+            if !snapshot.price_list.active {
+                return Err(ApplicationError::Validation(
+                    "la tarifa seleccionada está inactiva".into(),
+                ));
+            }
+            sale.price_list_id = Some(price_list_id);
+        }
         self.sale_repo.save_draft(&sale).await?;
         Ok(sale)
     }
@@ -78,6 +91,15 @@ impl SaleService {
             }
         };
         let mut line = SaleLine::from_product(&product, quantity, kind)?;
+        if let Some(price_list_id) = sale.price_list_id {
+            if let Some(price) = self
+                .catalog_repo
+                .price_list_price(price_list_id, product.id)
+                .await?
+            {
+                line.unit_price = price;
+            }
+        }
         if let Some(discount_bp) = request.discount_bp {
             line = line.with_discount(discount_bp)?;
         }

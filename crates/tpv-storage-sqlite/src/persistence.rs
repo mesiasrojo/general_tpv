@@ -62,10 +62,10 @@ pub(crate) async fn persist_sale_tx(
     let state = enum_to_text(&sale.state)?;
     sqlx::query(
         "INSERT INTO sales
-            (id, store_id, register_id, seller_id, customer_id, state, created_at, closed_at,
-             invoice_id, ticket_series, ticket_number, notes, total_gross_cents, total_net_cents,
-             total_tax_cents, paid_cents, change_cents)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, store_id, register_id, seller_id, customer_id, price_list_id, state, created_at,
+             closed_at, invoice_id, ticket_series, ticket_number, notes, total_gross_cents,
+             total_net_cents, total_tax_cents, paid_cents, change_cents)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             state = excluded.state,
             closed_at = excluded.closed_at,
@@ -84,6 +84,7 @@ pub(crate) async fn persist_sale_tx(
     .bind(sale.register_id.to_string())
     .bind(sale.seller_id.to_string())
     .bind(sale.customer_id.map(|id| id.to_string()))
+    .bind(sale.price_list_id.map(|id| id.to_string()))
     .bind(state)
     .bind(format_time(sale.created_at)?)
     .bind(sale.closed_at.map(format_time).transpose()?)

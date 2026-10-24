@@ -10,7 +10,8 @@ use tpv_domain::audit::AuditEvent;
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{
-    CustomerId, InvoiceId, PaymentId, ProductId, RegisterId, SaleId, SaleLineId, SellerId, StoreId,
+    CustomerId, InvoiceId, PaymentId, PriceListId, ProductId, RegisterId, SaleId, SaleLineId,
+    SellerId, StoreId,
 };
 use tpv_domain::invoice::{Invoice, InvoiceKind, InvoiceLine};
 use tpv_domain::money::{Money, Quantity};
@@ -109,6 +110,10 @@ impl SqliteStore {
             customer_id: row
                 .try_get::<Option<String>, _>("customer_id")?
                 .map(|value| parse_uuid(&value).map(CustomerId::from_uuid))
+                .transpose()?,
+            price_list_id: row
+                .try_get::<Option<String>, _>("price_list_id")?
+                .map(|value| parse_uuid(&value).map(PriceListId::from_uuid))
                 .transpose()?,
             lines,
             payments,
