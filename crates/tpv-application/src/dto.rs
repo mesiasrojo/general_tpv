@@ -328,6 +328,18 @@ impl SaleView {
     }
 }
 
+/// Página de consultas de ventas con totales conciliados del filtro completo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaleHistoryPage {
+    pub items: Vec<SaleView>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+    pub gross: Money,
+    pub tax: Money,
+    pub paid: Money,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TicketLine {
     pub sku: String,

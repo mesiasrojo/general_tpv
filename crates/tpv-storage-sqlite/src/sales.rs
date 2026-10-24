@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
-use tpv_application::{InvoiceRepository, Result as AppResult, SaleRepository, SequenceRepository};
+use tpv_application::{
+    InvoiceRepository, Result as AppResult, SaleQuery, SaleQueryResult, SaleQuerySummary,
+    SaleRepository, SequenceRepository,
+};
 use tpv_domain::audit::AuditEvent;
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
@@ -22,6 +25,14 @@ use crate::helpers::{
 };
 use crate::persistence::{enqueue_event_tx, insert_audit_tx, persist_sale_tx};
 use crate::store::SqliteStore;
+
+/// Filtros compartidos por el resumen y la página de la consulta de ventas.
+/// `?1` tienda, `?2` desde, `?3` hasta, `?4` estado, `?5` número de ticket.
+const SALE_QUERY_FILTER: &str = "store_id = ?1
+    AND (?2 IS NULL OR created_at >= ?2)
+    AND (?3 IS NULL OR created_at <= ?3)
+    AND (?4 IS NULL OR state = ?4)
+    AND (?5 IS NULL OR ticket_number = ?5)";
 
 fn row_to_sale_line(row: &SqliteRow) -> StorageResult<SaleLine> {
     let product_id = row
@@ -128,6 +139,72 @@ impl SqliteStore {
                 )?))
             })
             .collect()
+    }
+
+    async fn query_sales_inner(&self, query: &SaleQuery) -> StorageResult<SaleQueryResult> {
+        let from = query.from.map(format_time).transpose()?;
+        let to = query.to.map(format_time).transpose()?;
+        let state = query.state.map(|value| enum_to_text(&value)).transpose()?;
+        let ticket_number = query
+            .ticket_number
+            .map(|value| {
+                i64::try_from(value)
+                    .map_err(|_| StorageError::InvalidData("ticket number is too large".into()))
+            })
+            .transpose()?;
+
+        let summary_sql = format!(
+            "SELECT COUNT(*) AS total,
+                    COALESCE(SUM(total_gross_cents), 0) AS gross_cents,
+                    COALESCE(SUM(total_tax_cents), 0) AS tax_cents,
+                    COALESCE(SUM(paid_cents), 0) AS paid_cents
+             FROM sales
+             WHERE {SALE_QUERY_FILTER}"
+        );
+        let row = sqlx::query(&summary_sql)
+            .bind(query.store_id.to_string())
+            .bind(from.as_deref())
+            .bind(to.as_deref())
+            .bind(state.as_deref())
+            .bind(ticket_number)
+            .fetch_one(self.pool())
+            .await?;
+        let total = i64_to_u64(row.try_get::<i64, _>("total")?, "total")?;
+        let summary = SaleQuerySummary {
+            gross: Money::from_cents(row.try_get::<i64, _>("gross_cents")?),
+            tax: Money::from_cents(row.try_get::<i64, _>("tax_cents")?),
+            paid: Money::from_cents(row.try_get::<i64, _>("paid_cents")?),
+        };
+
+        let page_sql = format!(
+            "SELECT id FROM sales
+             WHERE {SALE_QUERY_FILTER}
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?6 OFFSET ?7"
+        );
+        let rows = sqlx::query(&page_sql)
+            .bind(query.store_id.to_string())
+            .bind(from.as_deref())
+            .bind(to.as_deref())
+            .bind(state.as_deref())
+            .bind(ticket_number)
+            .bind(i64::from(query.limit))
+            .bind(i64::from(query.offset))
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id = SaleId::from_uuid(parse_uuid(&row.try_get::<String, _>("id")?)?);
+            if let Some(sale) = self.load_sale(id).await? {
+                items.push(sale);
+            }
+        }
+        Ok(SaleQueryResult {
+            items,
+            total,
+            summary,
+        })
     }
 
     async fn load_invoice(&self, id: InvoiceId) -> StorageResult<Option<Invoice>> {
@@ -404,6 +481,10 @@ impl SaleRepository for SqliteStore {
             }
         }
         Ok(sales)
+    }
+
+    async fn query(&self, query: &SaleQuery) -> AppResult<SaleQueryResult> {
+        Ok(self.query_sales_inner(query).await?)
     }
 
     async fn payment_totals_since(

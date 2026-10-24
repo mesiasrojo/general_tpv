@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use time::OffsetDateTime;
 use tpv_application::{
@@ -15,12 +15,12 @@ use tpv_application::{
     MasterDataService, NoteInbox, NoteRepository, NoteService, OpenCashRequest,
     PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
     ProductImportService, ProductService, QuarantinedEvent, RectifyInvoiceLinesRequest,
-    RectifyInvoiceRequest, ResetPasswordRequest, SaleRepository, SaleService, SaleView,
-    SellerService, SequenceRepository, SessionUser, StartSaleRequest, StoreService, SyncContext,
-    SyncOutboxRepository, SyncService, SyncStatus, TaxService, TimeClockRepository,
-    TimeClockService, TimeClockStatus, UpdateUserRequest, UpsertCustomerRequest,
-    UpsertFamilyRequest, UpsertProductRequest, UpsertSellerRequest, UpsertStoreRequest,
-    UpsertTaxRequest, UserRepository,
+    RectifyInvoiceRequest, ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository,
+    SaleService, SaleView, SellerService, SequenceRepository, SessionUser, StartSaleRequest,
+    StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService,
+    TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
+    UpsertCustomerRequest, UpsertFamilyRequest, UpsertProductRequest, UpsertSellerRequest,
+    UpsertStoreRequest, UpsertTaxRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -31,7 +31,7 @@ use tpv_domain::ids::{
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Customer, Role, Seller, Store, UserAccount, UserProvision};
-use tpv_domain::sale::PaymentMethod;
+use tpv_domain::sale::{PaymentMethod, SaleState};
 use tpv_domain::tax::Tax;
 use tpv_print::{
     EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
@@ -616,6 +616,65 @@ async fn list_sales(state: State<'_, AppState>) -> Result<Vec<SaleView>, String>
         .into_iter()
         .map(|sale| SaleView::new(sale).map_err(|error| error.to_string()))
         .collect()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SaleHistoryRequest {
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
+    #[serde(default)]
+    from_ms: Option<i64>,
+    #[serde(default)]
+    to_ms: Option<i64>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    ticket_number: Option<u64>,
+}
+
+fn millis_to_time(value: i64) -> Result<OffsetDateTime, String> {
+    let nanos = i128::from(value)
+        .checked_mul(1_000_000)
+        .ok_or_else(|| "fecha fuera de rango".to_string())?;
+    OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|_| "fecha fuera de rango".to_string())
+}
+
+fn parse_sale_state(value: Option<String>) -> Result<Option<SaleState>, String> {
+    let Some(value) = value.map(|text| text.trim().to_ascii_lowercase()) else {
+        return Ok(None);
+    };
+    if value.is_empty() || value == "all" {
+        return Ok(None);
+    }
+    serde_json::from_value(serde_json::Value::String(value.clone()))
+        .map(Some)
+        .map_err(|_| format!("estado de venta no válido: {value}"))
+}
+
+#[tauri::command]
+async fn query_sales(
+    state: State<'_, AppState>,
+    request: SaleHistoryRequest,
+) -> Result<SaleHistoryPage, String> {
+    require_session(state.inner())?;
+    let state = state.inner().clone();
+    let from = request.from_ms.map(millis_to_time).transpose()?;
+    let to = request.to_ms.map(millis_to_time).transpose()?;
+    state
+        .sales
+        .history(SaleQuery {
+            store_id: state.demo.store_id,
+            limit: request.limit.unwrap_or(25),
+            offset: request.offset.unwrap_or(0),
+            from,
+            to,
+            state: parse_sale_state(request.state)?,
+            ticket_number: request.ticket_number.filter(|value| *value > 0),
+        })
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1440,6 +1499,7 @@ fn main() {
             print_pending,
             list_print_jobs,
             list_sales,
+            query_sales,
             sync_status,
             list_failed_sync_events,
             retry_sync_events,
@@ -1546,6 +1606,7 @@ mod e2e_tests {
                 print_pending,
                 list_print_jobs,
                 list_sales,
+                query_sales,
                 sync_status,
                 list_failed_sync_events,
                 retry_sync_events,
@@ -1782,6 +1843,40 @@ mod e2e_tests {
         );
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);
+        let ticket_number = sales[0]["sale"]["ticket_number"]
+            .as_u64()
+            .expect("ticket number");
+
+        let history = invoke(
+            &webview,
+            "query_sales",
+            json!({
+                "request": {
+                    "limit": 10,
+                    "offset": 0,
+                    "state": "paid",
+                    "ticket_number": ticket_number
+                }
+            }),
+        )
+        .expect("query sales");
+        assert_eq!(history["total"], 1);
+        assert_eq!(history["items"].as_array().expect("history items").len(), 1);
+        assert!(history["gross"].as_i64().unwrap_or_default() > 0);
+
+        let no_results = invoke(
+            &webview,
+            "query_sales",
+            json!({
+                "request": {
+                    "limit": 10,
+                    "offset": 0,
+                    "ticket_number": ticket_number + 1
+                }
+            }),
+        )
+        .expect("query empty sales");
+        assert_eq!(no_results["total"], 0);
 
         let cash = invoke(&webview, "cash_status", json!({})).expect("cash status");
         assert!(cash.is_object());

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use time::OffsetDateTime;
+use tpv_domain::Money;
 use tpv_domain::Sku;
 use tpv_domain::audit::AuditEvent;
 use tpv_domain::cash::{CashCount, CashSession};
@@ -12,7 +13,7 @@ use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDataConflict};
 use tpv_domain::notes::{Note, NoteRecipient};
 use tpv_domain::people::{Customer, Seller, Store};
-use tpv_domain::sale::Sale;
+use tpv_domain::sale::{Sale, SaleState};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
 use tpv_domain::timeclock::TimeEntry;
@@ -64,6 +65,33 @@ pub trait CatalogRepository: Send + Sync {
     async fn save_seller(&self, seller: &Seller) -> Result<()>;
 }
 
+/// Filtros y paginación de la consulta de ventas.
+#[derive(Debug, Clone)]
+pub struct SaleQuery {
+    pub store_id: StoreId,
+    pub limit: u32,
+    pub offset: u32,
+    pub from: Option<OffsetDateTime>,
+    pub to: Option<OffsetDateTime>,
+    pub state: Option<SaleState>,
+    pub ticket_number: Option<u64>,
+}
+
+/// Totales acumulados del filtro, no solo de la página devuelta.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SaleQuerySummary {
+    pub gross: Money,
+    pub tax: Money,
+    pub paid: Money,
+}
+
+#[derive(Debug, Clone)]
+pub struct SaleQueryResult {
+    pub items: Vec<Sale>,
+    pub total: u64,
+    pub summary: SaleQuerySummary,
+}
+
 #[async_trait]
 pub trait SaleRepository: Send + Sync {
     async fn save_draft(&self, sale: &Sale) -> Result<()>;
@@ -71,6 +99,7 @@ pub trait SaleRepository: Send + Sync {
     async fn find(&self, id: SaleId) -> Result<Option<Sale>>;
     async fn confirm_sale(&self, sale: &Sale, event: &SyncEvent, audit: &AuditEvent) -> Result<()>;
     async fn list_recent(&self, store_id: StoreId, limit: u32) -> Result<Vec<Sale>>;
+    async fn query(&self, query: &SaleQuery) -> Result<SaleQueryResult>;
     async fn payment_totals_since(
         &self,
         store_id: StoreId,

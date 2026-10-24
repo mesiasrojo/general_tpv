@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use rust_decimal::Decimal;
 use sqlx::Row;
+use time::{Duration, OffsetDateTime};
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
     CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceLineSelection,
     InvoiceRepository, InvoiceService, OpenCashRequest, PrintQueueRepository, PrintService,
-    RectifyInvoiceLinesRequest, ResetPasswordRequest, SaleRepository, SaleService,
+    RectifyInvoiceLinesRequest, ResetPasswordRequest, SaleQuery, SaleRepository, SaleService,
     SequenceRepository, StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService,
     UpdateUserRequest, UserRepository,
 };
@@ -17,7 +18,7 @@ use tpv_domain::ids::{DeviceId, TenantId};
 use tpv_domain::invoice::InvoiceKind;
 use tpv_domain::money::Money;
 use tpv_domain::people::Role;
-use tpv_domain::sale::PaymentMethod;
+use tpv_domain::sale::{PaymentMethod, Sale, SaleState};
 use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::SqliteStore;
 
@@ -90,6 +91,145 @@ async fn services() -> Services {
         print_service,
         auth,
     }
+}
+
+async fn confirmed_sale(services: &Services, sku: &str, quantity: &str) -> Sale {
+    let mut sale = services
+        .sales
+        .start_sale(StartSaleRequest {
+            store_id: services.demo.store_id,
+            register_id: services.demo.register_id,
+            seller_id: services.demo.seller_id,
+            customer_id: Some(services.demo.customer_id),
+        })
+        .await
+        .unwrap();
+    sale = services
+        .sales
+        .add_line(AddLineRequest {
+            sale_id: sale.id,
+            sku: sku.into(),
+            quantity: quantity.into(),
+            kind: "sale".into(),
+            discount_bp: None,
+        })
+        .await
+        .unwrap();
+    let totals = sale.totals().unwrap();
+    sale = services
+        .sales
+        .apply_payment(ApplyPaymentRequest {
+            sale_id: sale.id,
+            method: PaymentMethod::Cash,
+            amount_cents: totals.gross.cents(),
+            received_cents: totals.gross.cents(),
+            reference: None,
+        })
+        .await
+        .unwrap();
+    services
+        .sales
+        .confirm_sale(ConfirmSaleRequest { sale_id: sale.id })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sale_queries_filter_paginate_and_summarize() {
+    let services = services().await;
+    let first = confirmed_sale(&services, "1", "2").await;
+    let second = confirmed_sale(&services, "3", "1").await;
+
+    let all = services
+        .sales
+        .history(SaleQuery {
+            store_id: services.demo.store_id,
+            limit: 1,
+            offset: 0,
+            from: None,
+            to: None,
+            state: Some(SaleState::Paid),
+            ticket_number: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(all.total, 2);
+    assert_eq!(all.items.len(), 1);
+    assert_eq!(all.items[0].sale.id, second.id);
+
+    let expected_gross = first
+        .totals()
+        .unwrap()
+        .gross
+        .checked_add(second.totals().unwrap().gross)
+        .unwrap();
+    assert_eq!(all.gross, expected_gross);
+
+    let page = services
+        .sales
+        .history(SaleQuery {
+            store_id: services.demo.store_id,
+            limit: 1,
+            offset: 1,
+            from: None,
+            to: None,
+            state: Some(SaleState::Paid),
+            ticket_number: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items[0].sale.id, first.id);
+
+    let by_ticket = services
+        .sales
+        .history(SaleQuery {
+            store_id: services.demo.store_id,
+            limit: 10,
+            offset: 0,
+            from: None,
+            to: None,
+            state: None,
+            ticket_number: second.ticket_number,
+        })
+        .await
+        .unwrap();
+    assert_eq!(by_ticket.total, 1);
+    assert_eq!(by_ticket.items[0].sale.id, second.id);
+
+    let future = OffsetDateTime::now_utc() + Duration::days(1);
+    let empty = services
+        .sales
+        .history(SaleQuery {
+            store_id: services.demo.store_id,
+            limit: 10,
+            offset: 0,
+            from: Some(future),
+            to: None,
+            state: None,
+            ticket_number: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 0);
+    assert!(empty.items.is_empty());
+
+    let invalid = services
+        .sales
+        .history(SaleQuery {
+            store_id: services.demo.store_id,
+            limit: 10,
+            offset: 0,
+            from: Some(future),
+            to: Some(future - Duration::days(2)),
+            state: None,
+            ticket_number: None,
+        })
+        .await;
+    assert!(matches!(
+        invalid,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
 }
 
 #[tokio::test]

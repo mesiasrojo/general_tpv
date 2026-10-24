@@ -10,10 +10,11 @@ use tpv_domain::sale::{LineKind, Payment, Sale, SaleLine};
 use tpv_domain::sync::SyncEvent;
 
 use crate::dto::{
-    AddLineRequest, ApplyPaymentRequest, ConfirmSaleRequest, StartSaleRequest, SyncContext,
+    AddLineRequest, ApplyPaymentRequest, ConfirmSaleRequest, SaleHistoryPage, SaleView,
+    StartSaleRequest, SyncContext,
 };
 use crate::error::{ApplicationError, Result};
-use crate::ports::{CatalogRepository, Clock, SaleRepository, SequenceRepository};
+use crate::ports::{CatalogRepository, Clock, SaleQuery, SaleRepository, SequenceRepository};
 
 #[derive(Clone)]
 pub struct SaleService {
@@ -155,6 +156,35 @@ impl SaleService {
 
     pub async fn list_recent(&self, store_id: StoreId, limit: u32) -> Result<Vec<Sale>> {
         self.sale_repo.list_recent(store_id, limit).await
+    }
+
+    /// Consulta el histórico con filtros y devuelve los totales del filtro
+    /// completo, no solo de la página visible.
+    pub async fn history(&self, mut query: SaleQuery) -> Result<SaleHistoryPage> {
+        if let (Some(from), Some(to)) = (query.from, query.to) {
+            if from > to {
+                return Err(ApplicationError::Validation(
+                    "la fecha inicial no puede ser posterior a la final".into(),
+                ));
+            }
+        }
+        query.limit = query.limit.clamp(1, 100);
+        query.offset = query.offset.min(1_000_000);
+        let result = self.sale_repo.query(&query).await?;
+        let items = result
+            .items
+            .into_iter()
+            .map(SaleView::new)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SaleHistoryPage {
+            items,
+            total: result.total,
+            limit: query.limit,
+            offset: query.offset,
+            gross: result.summary.gross,
+            tax: result.summary.tax,
+            paid: result.summary.paid,
+        })
     }
 
     async fn load(&self, sale_id: SaleId) -> Result<Sale> {

@@ -21,6 +21,7 @@
     type ProductSearchResult,
     type PrintSummary,
     type QuarantinedEvent,
+    type SaleHistoryPage,
     type SaleView,
     type SaveCustomerRequest,
     type SaveFamilyRequest,
@@ -59,6 +60,16 @@
   let cash = $state<CashSession | null>(null);
   let countedCash = $state('0.00');
   let lastSales = $state<SaleView[]>([]);
+  let historyOpen = $state(false);
+  let historyPage = $state<SaleHistoryPage | null>(null);
+  let historyBusy = $state(false);
+  let historyError = $state('');
+  let historyFrom = $state('');
+  let historyTo = $state('');
+  let historyState = $state('');
+  let historyTicket = $state('');
+  let historyOffset = $state(0);
+  let historySelected = $state<SaleView | null>(null);
   let syncStatus = $state<SyncStatus | null>(null);
   let syncQuarantine = $state<QuarantinedEvent[]>([]);
   let syncBusy = $state(false);
@@ -173,6 +184,12 @@
   let unreadNotes = $derived(noteInbox?.unread ?? 0);
   let canManageNotes = $derived(
     session?.user.role === 'admin' || session?.user.role === 'manager'
+  );
+  let historyTotalPages = $derived(
+    Math.max(1, Math.ceil((historyPage?.total ?? 0) / (historyPage?.limit || 25)))
+  );
+  let historyHasNext = $derived(
+    historyOffset + (historyPage?.items.length ?? 0) < (historyPage?.total ?? 0)
   );
   let timeClockButtonLabel = $derived.by(() => {
     const active = activeTimeClock;
@@ -307,6 +324,9 @@
     printSummary = null;
     results = [];
     lastSales = [];
+    historyOpen = false;
+    historyPage = null;
+    historySelected = null;
     syncStatus = null;
     syncQuarantine = [];
     usersOpen = false;
@@ -372,6 +392,33 @@
     return Number.isNaN(millis) ? '—' : new Date(millis).toLocaleString('es-ES');
   }
 
+  function localDateBoundary(date: string, endOfDay: boolean): number | null {
+    if (!date) return null;
+    const [year = 1970, month = 1, day = 1] = date.split('-').map(Number);
+    const local = endOfDay
+      ? new Date(year, month - 1, day, 23, 59, 59, 999)
+      : new Date(year, month - 1, day, 0, 0, 0, 0);
+    return local.getTime();
+  }
+
+  function paymentLabel(method: string): string {
+    if (method === 'cash') return 'Efectivo';
+    if (method === 'card') return 'Tarjeta';
+    if (method === 'voucher') return 'Vale';
+    if (method === 'credit') return 'Crédito';
+    return method;
+  }
+
+  function resolveSellerName(id: string): string {
+    return sellers.find((seller) => seller.id === id)?.name ?? id.slice(0, 8);
+  }
+
+  function resolveCustomerName(id: string | null): string {
+    if (!id) return 'Sin cliente';
+    const customer = customers.find((item) => item.id === id);
+    return customer ? customerLabel(customer) : id.slice(0, 8);
+  }
+
   function formatDuration(start: unknown, end: unknown, nowMillis: number): string {
     const startMillis = dateTimeMillis(start);
     const endMillis = end ? dateTimeMillis(end) : nowMillis;
@@ -419,6 +466,52 @@
     } catch {
       lastSales = [];
     }
+  }
+
+  async function searchSales(offset = 0) {
+    if (historyBusy) return;
+    const rawTicket = historyTicket.trim();
+    let ticketNumber: number | null = null;
+    if (rawTicket) {
+      const parsed = Number(rawTicket);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        historyError = 'El número de ticket debe ser un entero positivo.';
+        return;
+      }
+      ticketNumber = parsed;
+    }
+
+    historyBusy = true;
+    historyError = '';
+    try {
+      historyPage = await api.querySales({
+        limit: 25,
+        offset,
+        from_ms: localDateBoundary(historyFrom, false),
+        to_ms: localDateBoundary(historyTo, true),
+        state: historyState || null,
+        ticket_number: ticketNumber
+      });
+      historyOffset = offset;
+      historySelected = null;
+    } catch (error) {
+      historyError = String(error);
+    } finally {
+      historyBusy = false;
+    }
+  }
+
+  async function openHistory() {
+    historyOpen = true;
+    historySelected = null;
+    historyError = '';
+    await searchSales(0);
+  }
+
+  async function pageHistory(direction: -1 | 1) {
+    const next = historyOffset + direction * 25;
+    if (next < 0) return;
+    await searchSales(next);
   }
 
   async function refreshCustomers() {
@@ -1528,6 +1621,7 @@
         Notas
         {#if unreadNotes > 0}<span class="note-badge">{unreadNotes}</span>{/if}
       </button>
+      <button class="icon" type="button" onclick={() => void openHistory()}>Consultas</button>
       {#if session.user.role === 'admin' || session.user.role === 'manager'}
         <button class="icon" type="button" onclick={() => void openCatalog()}>Catálogo</button>
         <button class="icon" type="button" onclick={() => void openCustomers()}>Clientes</button>
@@ -2105,6 +2199,228 @@
             <p class="muted small">No hay usuarios.</p>
           {/each}
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if historyOpen}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal history-modal" role="dialog" aria-modal="true" aria-label="Consultas de ventas">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">CONSULTAS</p>
+            <h2>Histórico de ventas</h2>
+          </div>
+          <button class="icon" type="button" onclick={() => (historyOpen = false)}>Esc</button>
+        </div>
+
+        {#if historySelected}
+          <div class="history-detail">
+            <button class="icon" type="button" onclick={() => (historySelected = null)}>
+              Volver
+            </button>
+            <div class="history-detail-head">
+              <div>
+                <h3>
+                  Ticket #{historySelected.sale.ticket_number ?? '—'}
+                  {#if historySelected.sale.ticket_series}
+                    <span class="muted small">· {historySelected.sale.ticket_series}</span>
+                  {/if}
+                </h3>
+                <p class="muted small">
+                  {formatDateTime(historySelected.sale.created_at)} ·
+                  {stateLabel(historySelected.sale.state)}
+                </p>
+              </div>
+              <strong>{formatMoney(historySelected.totals.gross)}</strong>
+            </div>
+
+            <div class="history-meta">
+              <span>Vendedor: {resolveSellerName(historySelected.sale.seller_id)}</span>
+              <span>Cliente: {resolveCustomerName(historySelected.sale.customer_id)}</span>
+            </div>
+
+            <table class="history-lines">
+              <thead>
+                <tr>
+                  <th>Artículo</th>
+                  <th>Cantidad</th>
+                  <th>Precio</th>
+                  <th>IVA</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each historySelected.sale.lines as line (line.id)}
+                  <tr>
+                    <td>
+                      <strong>{line.description}</strong>
+                      <span class="muted small"> · {line.sku}</span>
+                    </td>
+                    <td>{line.quantity}</td>
+                    <td>{line.unit_price} €</td>
+                    <td>{line.tax_rate.percent_bp / 100}%</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+
+            <div class="history-totals">
+              <div><span>Base</span><strong>{formatMoney(historySelected.totals.net)}</strong></div>
+              <div><span>IVA</span><strong>{formatMoney(historySelected.totals.tax)}</strong></div>
+              <div><span>Total</span><strong>{formatMoney(historySelected.totals.gross)}</strong></div>
+              <div><span>Cobrado</span><strong>{formatMoney(historySelected.totals.paid)}</strong></div>
+            </div>
+
+            <div class="history-payments">
+              <p class="eyebrow">PAGOS</p>
+              {#each historySelected.sale.payments as payment (payment.id)}
+                <div class="history-payment-row">
+                  <span>{paymentLabel(payment.method)}</span>
+                  <strong>{formatMoney(payment.amount)}</strong>
+                </div>
+              {:else}
+                <p class="muted small">Sin pagos registrados.</p>
+              {/each}
+            </div>
+
+            {#if historySelected.sale.invoice_id && (session?.user.role === 'admin' || session?.user.role === 'manager')}
+              <div class="sale-actions history-detail-actions">
+                <button
+                  class="icon"
+                  type="button"
+                  disabled={rectifyBusy}
+                  onclick={() => {
+                    if (historySelected?.sale.invoice_id) void rectifyInvoice(historySelected.sale.invoice_id);
+                  }}
+                >
+                  Rectificar factura
+                </button>
+                <button
+                  class="icon"
+                  type="button"
+                  onclick={() => {
+                    if (historySelected?.sale.invoice_id) void openRefund(historySelected.sale.invoice_id);
+                  }}
+                >
+                  Devolver
+                </button>
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <form
+            class="history-filters"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void searchSales(0);
+            }}
+          >
+            <label class="field">
+              <span>Desde</span>
+              <input type="date" bind:value={historyFrom} />
+            </label>
+            <label class="field">
+              <span>Hasta</span>
+              <input type="date" bind:value={historyTo} />
+            </label>
+            <label class="field">
+              <span>Estado</span>
+              <select bind:value={historyState}>
+                <option value="">Todos</option>
+                <option value="draft">Borrador</option>
+                <option value="priced">Preciada</option>
+                <option value="awaiting_payment">Pendiente de cobro</option>
+                <option value="paid">Cobrada</option>
+                <option value="closed">Cerrada</option>
+                <option value="cancelled">Anulada</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Ticket</span>
+              <input inputmode="numeric" bind:value={historyTicket} placeholder="Nº" />
+            </label>
+            <div class="history-filter-actions">
+              <button class="primary" type="submit" disabled={historyBusy}>
+                {historyBusy ? 'Consultando…' : 'Buscar'}
+              </button>
+              <button
+                class="icon"
+                type="button"
+                onclick={() => {
+                  historyFrom = '';
+                  historyTo = '';
+                  historyState = '';
+                  historyTicket = '';
+                  void searchSales(0);
+                }}
+              >
+                Limpiar
+              </button>
+            </div>
+          </form>
+
+          {#if historyError}
+            <p class="error" role="alert">{historyError}</p>
+          {/if}
+
+          <div class="history-summary">
+            <div>
+              <span class="eyebrow">VENTAS</span>
+              <strong>{historyPage?.total ?? 0}</strong>
+            </div>
+            <div>
+              <span class="eyebrow">BRUTO</span>
+              <strong>{formatMoney(historyPage?.gross ?? 0)}</strong>
+            </div>
+            <div>
+              <span class="eyebrow">IVA</span>
+              <strong>{formatMoney(historyPage?.tax ?? 0)}</strong>
+            </div>
+            <div>
+              <span class="eyebrow">COBRADO</span>
+              <strong>{formatMoney(historyPage?.paid ?? 0)}</strong>
+            </div>
+          </div>
+
+          <div class="history-list">
+            {#each historyPage?.items ?? [] as item (item.sale.id)}
+              <button
+                class="history-row"
+                type="button"
+                onclick={() => (historySelected = item)}
+              >
+                <span class="mono">#{item.sale.ticket_number ?? '—'}</span>
+                <span>{stateLabel(item.sale.state)}</span>
+                <span class="muted small">{formatDateTime(item.sale.created_at)}</span>
+                <strong>{formatMoney(item.totals.gross)}</strong>
+              </button>
+            {:else}
+              <p class="muted small">No hay ventas para esos filtros.</p>
+            {/each}
+          </div>
+
+          <div class="history-pager">
+            <button
+              class="icon"
+              type="button"
+              disabled={historyBusy || historyOffset === 0}
+              onclick={() => void pageHistory(-1)}
+            >
+              Anterior
+            </button>
+            <span class="muted small">
+              Página {Math.floor(historyOffset / 25) + 1} de {historyTotalPages}
+            </span>
+            <button
+              class="icon"
+              type="button"
+              disabled={historyBusy || !historyHasNext}
+              onclick={() => void pageHistory(1)}
+            >
+              Siguiente
+            </button>
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -3555,6 +3871,161 @@
     padding: 6px 10px;
   }
 
+  .history-modal {
+    width: min(960px, 100%);
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .history-filters {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+    gap: 10px;
+    align-items: end;
+    padding: 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .history-filters .field {
+    margin: 0;
+  }
+
+  .history-filter-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .history-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+  }
+
+  .history-summary > div {
+    display: grid;
+    gap: 4px;
+    padding: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .history-summary strong {
+    font-size: 1.15rem;
+  }
+
+  .history-list {
+    display: grid;
+    gap: 2px;
+    margin-top: 14px;
+  }
+
+  .history-row {
+    display: grid;
+    grid-template-columns: 70px 1fr 1.4fr auto;
+    gap: 10px;
+    align-items: center;
+    width: 100%;
+    padding: 10px 4px;
+    color: inherit;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+  }
+
+  .history-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 14px;
+  }
+
+  .history-detail {
+    display: grid;
+    gap: 14px;
+  }
+
+  .history-detail > .icon {
+    justify-self: start;
+  }
+
+  .history-detail-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .history-detail-head h3,
+  .history-detail-head p {
+    margin: 0;
+  }
+
+  .history-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 22px;
+    font-size: 0.9rem;
+  }
+
+  .history-lines {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .history-lines th,
+  .history-lines td {
+    padding: 8px 6px;
+    text-align: left;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .history-lines th {
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .history-totals {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .history-totals > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .history-payments {
+    display: grid;
+    gap: 6px;
+  }
+
+  .history-payment-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .history-detail-actions {
+    justify-content: flex-start;
+  }
+
   .refund-modal {
     width: min(720px, 100%);
     max-height: 90vh;
@@ -4013,6 +4484,31 @@
     .timeclock-row {
       grid-template-columns: 1fr;
       gap: 4px;
+    }
+
+    .history-filters {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .history-filter-actions {
+      grid-column: 1 / -1;
+    }
+
+    .history-summary,
+    .history-totals {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .history-row {
+      grid-template-columns: 58px 1fr auto;
+    }
+
+    .history-row .muted {
+      grid-column: 1 / -1;
+    }
+
+    .history-detail-head {
+      flex-direction: column;
     }
 
     .customer-picker,

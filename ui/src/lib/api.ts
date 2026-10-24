@@ -209,6 +209,25 @@ export interface SaleView {
   totals: SaleTotals;
 }
 
+export interface SaleHistoryRequest {
+  limit?: number;
+  offset?: number;
+  from_ms?: number | null;
+  to_ms?: number | null;
+  state?: string | null;
+  ticket_number?: number | null;
+}
+
+export interface SaleHistoryPage {
+  items: SaleView[];
+  total: number;
+  limit: number;
+  offset: number;
+  gross: MoneyCents;
+  tax: MoneyCents;
+  paid: MoneyCents;
+}
+
 export interface InvoiceLine {
   source_line_id: string;
   description: string;
@@ -574,6 +593,8 @@ export const api = {
   printPending: () => invoke<unknown[]>('print_pending'),
   listPrintJobs: () => invoke<PrintJob[]>('list_print_jobs'),
   listSales: () => invoke<SaleView[]>('list_sales'),
+  querySales: (request: SaleHistoryRequest) =>
+    invoke<SaleHistoryPage>('query_sales', { request }),
   syncStatus: () => invoke<SyncStatus>('sync_status'),
   syncNow: () => invoke<SyncSummary>('sync_now'),
   listFailedSyncEvents: (limit = 20) =>

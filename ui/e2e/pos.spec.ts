@@ -235,6 +235,22 @@ test.describe('TPV desktop UI', () => {
         async list_sales() {
           return sale && sale.ticket_number ? [saleView()] : [];
         },
+        async query_sales(request: any) {
+          const hasSale = Boolean(sale && sale.ticket_number);
+          const ticket = request.ticket_number;
+          const matches =
+            hasSale && (ticket == null || Number(ticket) === Number(sale?.ticket_number));
+          const items = matches ? [saleView()] : [];
+          return {
+            items,
+            total: items.length,
+            limit: request.limit ?? 25,
+            offset: request.offset ?? 0,
+            gross: items.length ? totals.gross : 0,
+            tax: items.length ? totals.tax : 0,
+            paid: items.length ? totals.paid : 0
+          };
+        },
         async sync_status() {
           return {
             pending: 0,
@@ -524,6 +540,8 @@ test.describe('TPV desktop UI', () => {
               );
             case 'list_sales':
               return api.list_sales();
+            case 'query_sales':
+              return api.query_sales(args.request);
             case 'sync_status':
               return api.sync_status();
             case 'sync_now':
@@ -910,6 +928,23 @@ test.describe('TPV desktop UI', () => {
     await payment.getByRole('button', { name: 'Cobrar y cerrar' }).click();
     await expect(page.getByText(/Ticket 1 confirmado e impreso/)).toBeVisible();
     await expect(page.getByText('Cobrada').first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Consultas', exact: true }).click();
+    const historyDialog = page.getByRole('dialog', { name: 'Consultas de ventas' });
+    await expect(historyDialog).toBeVisible();
+    await expect(historyDialog.locator('.history-row')).toHaveCount(1);
+    await historyDialog.locator('.history-row').click();
+    await expect(historyDialog.getByRole('heading', { name: /Ticket #1/ })).toBeVisible();
+    await expect(historyDialog.getByText('Café solo')).toBeVisible();
+    await historyDialog.getByRole('button', { name: 'Volver' }).click();
+    await historyDialog.getByLabel('Ticket').fill('1');
+    await historyDialog.getByRole('button', { name: 'Buscar' }).click();
+    await expect(historyDialog.locator('.history-row')).toHaveCount(1);
+    await historyDialog.getByLabel('Ticket').fill('99');
+    await historyDialog.getByRole('button', { name: 'Buscar' }).click();
+    await expect(historyDialog.locator('.history-row')).toHaveCount(0);
+    await expect(historyDialog.getByText('No hay ventas para esos filtros.')).toBeVisible();
+    await historyDialog.getByRole('button', { name: 'Esc' }).click();
 
     await page.getByRole('button', { name: 'Emitir factura' }).click();
     await expect(page.getByText(/Factura FAC-000001 emitida/)).toBeVisible();
