@@ -4,14 +4,15 @@ use std::sync::Arc;
 use rust_decimal::Decimal;
 use time::OffsetDateTime;
 use tpv_domain::audit::{AuditAction, AuditEvent};
-use tpv_domain::ids::{ProductId, StockMovementId, StoreId, UserId};
+use tpv_domain::ids::{ProductId, StockMovementId, StockTransferId, StoreId, UserId};
 use tpv_domain::money::Quantity;
-use tpv_domain::stock::{StockLevel, StockMovement};
+use tpv_domain::stock::{StockLevel, StockMovement, StockTransfer};
 
 use crate::dto::{
     QueryStockMovementsRequest, RecordStockMovementRequest, SetStockCountRequest,
     SetStockMinimumRequest, StockCountCommand, StockCountResult, StockLevelStatus,
-    StockLevelsQuery, StockMovementPage, StockMovementView,
+    StockLevelsQuery, StockMovementPage, StockMovementView, StockTransferCommand,
+    StockTransferResult, TransferStockRequest,
 };
 use crate::error::{ApplicationError, Result};
 use crate::ports::{
@@ -251,6 +252,95 @@ impl StockService {
             }),
         )?;
         self.stock.set_count(&command, &audit).await
+    }
+
+    /// Moves units from the session store to another active store. The source
+    /// level is checked before and inside the storage transaction so a
+    /// transfer can never leave negative stock behind.
+    pub async fn transfer_stock(
+        &self,
+        from_store_id: StoreId,
+        actor_id: Option<UserId>,
+        request: TransferStockRequest,
+    ) -> Result<StockTransferResult> {
+        if request.to_store_id == from_store_id {
+            return Err(ApplicationError::Validation(
+                "la tienda de destino debe ser distinta de la tienda de origen".into(),
+            ));
+        }
+        let destination = self
+            .catalog
+            .find_store(request.to_store_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound(format!("store {}", request.to_store_id)))?;
+        if !destination.active {
+            return Err(ApplicationError::Validation(
+                "la tienda de destino está inactiva".into(),
+            ));
+        }
+        let product = self.find_product(request.product_id).await?;
+        let quantity = Quantity::new(parse_decimal(&request.quantity, "quantity")?)?;
+        let reason = request
+            .reason
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if reason
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 200)
+        {
+            return Err(ApplicationError::Validation(
+                "el motivo de la transferencia es demasiado largo".into(),
+            ));
+        }
+        let source = self
+            .get_level(from_store_id, product.id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound(format!("stock level {}", product.id)))?;
+        if source.quantity < quantity.as_decimal() {
+            return Err(ApplicationError::Validation(format!(
+                "stock insuficiente: disponible {}, solicitado {}",
+                source.quantity.normalize(),
+                quantity.as_decimal().normalize()
+            )));
+        }
+
+        let now = self.clock.now();
+        let transfer = StockTransfer::new(
+            StockTransferId::new(),
+            from_store_id,
+            destination.id,
+            product.id,
+            quantity,
+            reason.clone(),
+            now,
+        )?;
+        let audit = AuditEvent::new(
+            now,
+            actor_id,
+            Some(from_store_id),
+            AuditAction::StockTransfer,
+            "stock_transfer",
+            transfer.id.to_string(),
+            serde_json::json!({
+                "from_store_id": from_store_id,
+                "to_store_id": destination.id,
+                "product_id": product.id,
+                "sku": product.sku.as_str(),
+                "quantity": quantity.as_decimal().normalize().to_string(),
+                "source_quantity_before": source.quantity.normalize().to_string(),
+                "reason": reason,
+            }),
+        )?;
+        self.stock
+            .transfer_stock(
+                &StockTransferCommand {
+                    transfer,
+                    out_movement_id: StockMovementId::new(),
+                    in_movement_id: StockMovementId::new(),
+                },
+                &audit,
+            )
+            .await
     }
 
     /// Validates a count worksheet and resolves every SKU without writing.

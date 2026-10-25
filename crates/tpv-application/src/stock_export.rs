@@ -141,8 +141,11 @@ pub fn stock_movement_ledger_csv(records: &[StockMovementView]) -> String {
             StockMovementKind::Initial
             | StockMovementKind::Purchase
             | StockMovementKind::Return
-            | StockMovementKind::AdjustmentIn => movement.quantity,
-            StockMovementKind::Sale | StockMovementKind::AdjustmentOut => -movement.quantity,
+            | StockMovementKind::AdjustmentIn
+            | StockMovementKind::TransferIn => movement.quantity,
+            StockMovementKind::Sale
+            | StockMovementKind::AdjustmentOut
+            | StockMovementKind::TransferOut => -movement.quantity,
         };
         output.push_str(&csv_cell(&movement.sku));
         output.push(';');
@@ -184,6 +187,8 @@ fn movement_kind_label(kind: StockMovementKind) -> &'static str {
         StockMovementKind::Return => "Devolución",
         StockMovementKind::AdjustmentIn => "Ajuste positivo",
         StockMovementKind::AdjustmentOut => "Ajuste negativo",
+        StockMovementKind::TransferOut => "Transferencia enviada",
+        StockMovementKind::TransferIn => "Transferencia recibida",
     }
 }
 

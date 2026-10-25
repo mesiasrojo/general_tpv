@@ -197,6 +197,10 @@
   let stockCountedQuantity = $state('');
   let stockCountReason = $state('');
   let stockCountBusy = $state(false);
+  let stockTransferTo = $state('');
+  let stockTransferQuantity = $state('1');
+  let stockTransferReason = $state('');
+  let stockTransferBusy = $state(false);
   let stockExporting = $state(false);
   let stockReplenishmentExporting = $state(false);
   let stockCountSheetExporting = $state(false);
@@ -1061,6 +1065,10 @@
         return 'Ajuste positivo';
       case 'adjustment_out':
         return 'Ajuste negativo';
+      case 'transfer_out':
+        return 'Transferencia enviada';
+      case 'transfer_in':
+        return 'Transferencia recibida';
       default:
         return kind;
     }
@@ -1074,6 +1082,9 @@
     stockReason = '';
     stockCountedQuantity = level.quantity;
     stockCountReason = '';
+    stockTransferTo = '';
+    stockTransferQuantity = '1';
+    stockTransferReason = '';
     await loadStockMovements(level.product_id);
   }
 
@@ -1192,6 +1203,32 @@
       catalogError = String(error);
     } finally {
       stockCountBusy = false;
+    }
+  }
+
+  async function saveStockTransfer() {
+    if (stockTransferBusy || !stockSelectedProductId || !stockTransferTo) return;
+    stockTransferBusy = true;
+    catalogError = '';
+    try {
+      const result = await api.transferStock({
+        to_store_id: stockTransferTo,
+        product_id: stockSelectedProductId,
+        quantity: stockTransferQuantity.trim(),
+        reason: stockTransferReason.trim() || null
+      });
+      const destination =
+        stores.find((store) => store.id === result.transfer.to_store_id)?.name ??
+        result.transfer.to_store_id;
+      message = `Transferencia enviada · ${formatQuantity(result.transfer.quantity)} uds a ${destination}`;
+      stockTransferQuantity = '1';
+      stockTransferReason = '';
+      await refreshStockLevels(stockSelectedProductId);
+      await refreshLowStockAlert();
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockTransferBusy = false;
     }
   }
 
@@ -3927,6 +3964,60 @@
                       {/if}
                     </p>
                   {/if}
+
+                  <p class="eyebrow stock-count-title">TRANSFERENCIA ENTRE TIENDAS</p>
+                  {#if stores.some((store) => store.active && store.id !== info?.store_id)}
+                    <form
+                      class="stock-count-form stock-transfer-form"
+                      onsubmit={(event) => {
+                        event.preventDefault();
+                        void saveStockTransfer();
+                      }}
+                    >
+                      <label class="field">
+                        <span>Tienda destino</span>
+                        <select bind:value={stockTransferTo} aria-label="Tienda destino" required>
+                          <option value="">Selecciona tienda</option>
+                          {#each stores.filter((store) => store.active && store.id !== info?.store_id) as store (store.id)}
+                            <option value={store.id}>{store.code} · {store.name}</option>
+                          {/each}
+                        </select>
+                      </label>
+                      <label class="field">
+                        <span>Cantidad a transferir</span>
+                        <input
+                          bind:value={stockTransferQuantity}
+                          inputmode="decimal"
+                          aria-label="Cantidad a transferir"
+                          required
+                        />
+                      </label>
+                      <label class="field">
+                        <span>Motivo de la transferencia</span>
+                        <input
+                          bind:value={stockTransferReason}
+                          aria-label="Motivo de la transferencia"
+                          placeholder="Reposición entre tiendas"
+                        />
+                      </label>
+                      <button
+                        class="secondary"
+                        type="submit"
+                        disabled={stockTransferBusy || !stockTransferTo}
+                      >
+                        {stockTransferBusy ? 'Transfiriendo…' : 'Transferir stock'}
+                      </button>
+                    </form>
+                    <p class="muted small">
+                      Disponible en esta tienda:
+                      <strong>{formatQuantity(selectedStockLevel.quantity)}</strong> uds. Las
+                      unidades se envían y reciben en una única operación.
+                    </p>
+                  {:else}
+                    <p class="muted small">
+                      No hay otra tienda activa configurada para recibir stock.
+                    </p>
+                  {/if}
                 {:else}
                   <p class="muted small">
                     Solo un responsable puede registrar entradas o cambios de existencias.
@@ -5922,6 +6013,14 @@
   .stock-count-form .field {
     margin: 0;
     min-width: 0;
+  }
+
+  .stock-transfer-form {
+    grid-template-columns: minmax(180px, 1.1fr) 100px minmax(170px, 1fr) auto;
+  }
+
+  .stock-transfer-form + .muted {
+    margin: 6px 0 14px;
   }
 
   .stock-count-preview {

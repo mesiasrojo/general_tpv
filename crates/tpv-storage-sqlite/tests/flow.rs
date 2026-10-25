@@ -12,7 +12,7 @@ use tpv_application::{
     ResetPasswordRequest, SaleQuery, SaleRepository, SaleService, SequenceRepository,
     SetStockCountRequest, SetStockMinimumRequest, StartSaleRequest, StockLevelStatus,
     StockLevelsQuery, StockRepository, StockService, SyncContext, SyncOutboxRepository,
-    SyncService, UpdateUserRequest, UpsertPriceListRequest, UserRepository,
+    SyncService, TransferStockRequest, UpdateUserRequest, UpsertPriceListRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::audit::{AuditAction, AuditEvent};
@@ -1773,6 +1773,95 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
             .quantity,
         Decimal::ZERO
     );
+
+    let transferred = stock
+        .transfer_stock(
+            services.demo.store_id,
+            None,
+            TransferStockRequest {
+                to_store_id: other_store.id,
+                product_id: product.id,
+                quantity: "1,25".into(),
+                reason: Some("Reposición entre tiendas".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(transferred.transfer.quantity, Decimal::new(125, 2));
+    assert_eq!(transferred.source_level.quantity, Decimal::ONE);
+    assert_eq!(transferred.destination_level.quantity, Decimal::new(125, 2));
+    let source_movements = stock
+        .list_movements(services.demo.store_id, product.id, 20)
+        .await
+        .unwrap();
+    assert_eq!(source_movements.len(), 5);
+    assert_eq!(source_movements[0].kind, StockMovementKind::TransferOut);
+    assert_eq!(
+        source_movements[0].quantity.as_decimal(),
+        Decimal::new(125, 2)
+    );
+    let destination_movements = stock
+        .list_movements(other_store.id, product.id, 20)
+        .await
+        .unwrap();
+    assert_eq!(destination_movements.len(), 1);
+    assert_eq!(destination_movements[0].kind, StockMovementKind::TransferIn);
+    assert!(
+        destination_movements[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Reposición entre tiendas"))
+    );
+
+    let insufficient = stock
+        .transfer_stock(
+            services.demo.store_id,
+            None,
+            TransferStockRequest {
+                to_store_id: other_store.id,
+                product_id: product.id,
+                quantity: "2".into(),
+                reason: None,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(insufficient.contains("stock insuficiente"));
+    assert_eq!(
+        stock
+            .get_level(services.demo.store_id, product.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quantity,
+        Decimal::ONE
+    );
+    assert_eq!(
+        stock
+            .get_level(other_store.id, product.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quantity,
+        Decimal::new(125, 2)
+    );
+
+    let same_store = stock
+        .transfer_stock(
+            services.demo.store_id,
+            None,
+            TransferStockRequest {
+                to_store_id: services.demo.store_id,
+                product_id: product.id,
+                quantity: "1".into(),
+                reason: None,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(same_store.contains("distinta"));
 
     let rejected = stock
         .record_movement(

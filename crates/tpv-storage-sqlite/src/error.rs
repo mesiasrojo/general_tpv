@@ -26,6 +26,9 @@ pub enum StorageError {
 
     #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("{0}")]
+    Conflict(String),
 }
 
 impl From<StorageError> for ApplicationError {

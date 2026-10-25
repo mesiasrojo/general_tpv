@@ -71,6 +71,7 @@ uuid_id!(NoteId);
 uuid_id!(TimeEntryId);
 uuid_id!(PrintJobId);
 uuid_id!(StockMovementId);
+uuid_id!(StockTransferId);
 
 /// Stock keeping unit. This is the code a cashier types or scans.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

@@ -101,7 +101,9 @@ export type StockMovementKind =
   | 'sale'
   | 'return'
   | 'adjustment_in'
-  | 'adjustment_out';
+  | 'adjustment_out'
+  | 'transfer_out'
+  | 'transfer_in';
 
 export interface StockLevel {
   store_id: string;
@@ -149,6 +151,31 @@ export interface StockCountResult {
   counted_quantity: string;
   difference: string;
   movement: StockMovement | null;
+}
+
+export interface TransferStockRequest {
+  to_store_id: string;
+  product_id: string;
+  quantity: string;
+  reason?: string | null;
+}
+
+export interface StockTransferView {
+  id: string;
+  from_store_id: string;
+  to_store_id: string;
+  product_id: string;
+  sku: string;
+  name: string;
+  quantity: string;
+  reason: string | null;
+  occurred_at: string;
+}
+
+export interface StockTransferResult {
+  transfer: StockTransferView;
+  source_level: StockLevel;
+  destination_level: StockLevel;
 }
 
 export interface StockMovementView {
@@ -682,6 +709,8 @@ export const api = {
     invoke<StockLevel>('set_stock_minimum', { request }),
   setStockCount: (request: SetStockCountRequest) =>
     invoke<StockCountResult>('set_stock_count', { request }),
+  transferStock: (request: TransferStockRequest) =>
+    invoke<StockTransferResult>('transfer_stock', { request }),
   previewStockCountImport: (csv: string) =>
     invoke<StockCountImportReport>('preview_stock_count_import', { csv }),
   commitStockCountImport: (csv: string) =>

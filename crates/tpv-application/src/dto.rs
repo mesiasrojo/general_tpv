@@ -5,13 +5,13 @@ use tpv_domain::Money;
 use tpv_domain::cash::{CashCount, CashMovementKind};
 use tpv_domain::ids::{
     CustomerId, FamilyId, PriceListId, ProductId, RegisterId, SaleId, SaleLineId, SellerId,
-    StockMovementId, StoreId, TaxId, UserId,
+    StockMovementId, StockTransferId, StoreId, TaxId, UserId,
 };
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::notes::Note;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
-use tpv_domain::stock::{StockLevel, StockMovement, StockMovementKind};
+use tpv_domain::stock::{StockLevel, StockMovement, StockMovementKind, StockTransfer};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::timeclock::TimeEntry;
 use uuid::Uuid;
@@ -154,6 +154,45 @@ pub struct StockCountResult {
     pub difference: Decimal,
     /// `None` when the physical count matched the recorded level.
     pub movement: Option<StockMovement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferStockRequest {
+    /// Destination store. The source is always the session store.
+    pub to_store_id: StoreId,
+    pub product_id: ProductId,
+    /// Positive quantity. Accepts a decimal comma from the UI.
+    pub quantity: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Internal command for the transactional stock adapter.
+#[derive(Debug, Clone)]
+pub struct StockTransferCommand {
+    pub transfer: StockTransfer,
+    pub out_movement_id: StockMovementId,
+    pub in_movement_id: StockMovementId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockTransferView {
+    pub id: StockTransferId,
+    pub from_store_id: StoreId,
+    pub to_store_id: StoreId,
+    pub product_id: ProductId,
+    pub sku: String,
+    pub name: String,
+    pub quantity: Decimal,
+    pub reason: Option<String>,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockTransferResult {
+    pub transfer: StockTransferView,
+    pub source_level: StockLevel,
+    pub destination_level: StockLevel,
 }
 
 /// Movement enriched with product data for the store-wide audit ledger.

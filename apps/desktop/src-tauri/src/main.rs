@@ -20,9 +20,11 @@ use tpv_application::{
     ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository, SaleService, SaleView,
     SellerService, SequenceRepository, SessionUser, SetStockCountRequest, SetStockMinimumRequest,
     StartSaleRequest, StockCountImportReport, StockCountResult, StockLevelStatus, StockLevelsQuery,
-    StockMovementPage, StockRepository, StockService, StoreService, SyncContext,
+    StockMovementPage, StockRepository, StockService, StockTransferResult, StoreService,
+    SyncContext,
     SyncOutboxRepository, SyncService, SyncStatus, TaxService, TimeClockRepository,
-    TimeClockService, TimeClockStatus, UpdateUserRequest, UpsertCustomerRequest,
+    TimeClockService, TimeClockStatus, TransferStockRequest, UpdateUserRequest,
+    UpsertCustomerRequest,
     UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest, UpsertSellerRequest,
     UpsertStoreRequest, UpsertTaxRequest, UserRepository, stock_count_sheet_csv, stock_levels_csv,
     stock_movement_ledger_csv, stock_movements_csv, stock_replenishment_csv,
@@ -1294,6 +1296,20 @@ async fn set_stock_count(
 }
 
 #[tauri::command]
+async fn transfer_stock(
+    state: State<'_, AppState>,
+    request: TransferStockRequest,
+) -> Result<StockTransferResult, String> {
+    let session = require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .transfer_stock(state.demo.store_id, Some(session.user.id), request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn preview_stock_count_import(
     state: State<'_, AppState>,
     csv: String,
@@ -1899,6 +1915,7 @@ fn main() {
             record_stock_movement,
             set_stock_minimum,
             set_stock_count,
+            transfer_stock,
             preview_stock_count_import,
             commit_stock_count_import,
             time_clock_status,
@@ -2018,6 +2035,7 @@ mod e2e_tests {
                 record_stock_movement,
                 set_stock_minimum,
                 set_stock_count,
+                transfer_stock,
                 preview_stock_count_import,
                 commit_stock_count_import,
                 time_clock_status,
@@ -2590,6 +2608,79 @@ mod e2e_tests {
         assert_eq!(
             final_stock.as_array().expect("stock movements array").len(),
             5
+        );
+
+        let transfer_store = invoke(
+            &webview,
+            "save_store",
+            json!({
+                "request": {
+                    "code": "UI-DEST",
+                    "name": "Tienda destino UI",
+                    "tax_id": "B12345674",
+                    "phone": null,
+                    "street": "Calle Destino",
+                    "number": "2",
+                    "locality": "Benalmádena",
+                    "postal_code": "29630",
+                    "province": "Málaga",
+                    "active": true
+                }
+            }),
+        )
+        .expect("save transfer destination store");
+        let transfer_store_id = transfer_store["id"]
+            .as_str()
+            .expect("transfer store id")
+            .to_string();
+        let transfer = invoke(
+            &webview,
+            "transfer_stock",
+            json!({
+                "request": {
+                    "to_store_id": transfer_store_id,
+                    "product_id": sold_product_id,
+                    "quantity": "1,5",
+                    "reason": "Transferencia E2E"
+                }
+            }),
+        )
+        .expect("transfer stock");
+        assert_eq!(transfer["transfer"]["quantity"], "1.5");
+        assert_eq!(transfer["source_level"]["quantity"], "1");
+        assert_eq!(transfer["destination_level"]["quantity"], "1.5");
+        let transfer_movements = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("stock movements after transfer");
+        assert_eq!(
+            transfer_movements
+                .as_array()
+                .expect("stock movements array")
+                .len(),
+            6
+        );
+        assert_eq!(transfer_movements[0]["kind"], "transfer_out");
+        assert_eq!(transfer_movements[0]["quantity"], "1.5");
+        let insufficient_transfer = invoke(
+            &webview,
+            "transfer_stock",
+            json!({
+                "request": {
+                    "to_store_id": transfer_store_id,
+                    "product_id": sold_product_id,
+                    "quantity": "2",
+                    "reason": null
+                }
+            }),
+        )
+        .expect_err("insufficient stock transfer");
+        assert!(
+            insufficient_transfer
+                .to_string()
+                .contains("stock insuficiente")
         );
 
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");

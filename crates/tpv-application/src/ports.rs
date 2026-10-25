@@ -22,7 +22,10 @@ use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
 use tpv_domain::timeclock::TimeEntry;
 
-use crate::dto::{StockCountCommand, StockCountResult, StockMovementPage};
+use crate::dto::{
+    StockCountCommand, StockCountResult, StockMovementPage, StockTransferCommand,
+    StockTransferResult,
+};
 use crate::error::Result;
 use crate::import::{ProductImportPreview, ProductImportRow};
 
@@ -237,6 +240,14 @@ pub trait StockRepository: Send + Sync {
         &self,
         command: &StockCountImportCommand,
     ) -> Result<StockCountImportOutcome>;
+
+    /// Moves stock between two stores in one transaction. The source level
+    /// cannot become negative because of a transfer.
+    async fn transfer_stock(
+        &self,
+        command: &StockTransferCommand,
+        audit: &AuditEvent,
+    ) -> Result<StockTransferResult>;
 }
 
 #[async_trait]

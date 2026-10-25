@@ -5,6 +5,7 @@ use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use tpv_application::{
     Result as AppResult, StockCountCommand, StockCountImportCommand, StockCountImportOutcome,
     StockCountResult, StockMovementFilter, StockMovementPage, StockMovementView, StockRepository,
+    StockTransferCommand, StockTransferResult, StockTransferView,
 };
 use tpv_domain::Sku;
 use tpv_domain::audit::AuditEvent;
@@ -558,6 +559,120 @@ impl SqliteStore {
         Ok(outcome)
     }
 
+    async fn transfer_stock_inner(
+        &self,
+        command: &StockTransferCommand,
+        audit: &AuditEvent,
+    ) -> StorageResult<StockTransferResult> {
+        let transfer = &command.transfer;
+        let mut tx = self.pool().begin().await?;
+        let from_code = sqlx::query_scalar::<_, String>("SELECT code FROM stores WHERE id = ?")
+            .bind(transfer.from_store_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StorageError::NotFound(format!("store {}", transfer.from_store_id)))?;
+        let to_code = sqlx::query_scalar::<_, String>("SELECT code FROM stores WHERE id = ?")
+            .bind(transfer.to_store_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StorageError::NotFound(format!("store {}", transfer.to_store_id)))?;
+        let available = sqlx::query_scalar::<_, String>(
+            "SELECT quantity FROM stock_levels WHERE store_id = ? AND product_id = ?",
+        )
+        .bind(transfer.from_store_id.to_string())
+        .bind(transfer.product_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|value| parse_decimal(&value))
+        .transpose()?
+        .unwrap_or(Decimal::ZERO);
+        let requested = transfer.quantity.as_decimal();
+        if available < requested {
+            return Err(StorageError::Conflict(format!(
+                "stock insuficiente en la tienda de origen: disponible {}, solicitado {}",
+                available.normalize(),
+                requested.normalize()
+            )));
+        }
+
+        let detail = transfer
+            .reason
+            .as_deref()
+            .map(|reason| format!(": {reason}"))
+            .unwrap_or_default();
+        let outgoing = StockMovement::new(
+            command.out_movement_id,
+            transfer.from_store_id,
+            transfer.product_id,
+            StockMovementKind::TransferOut,
+            transfer.quantity,
+            Some(format!("Transferencia a {to_code}{detail}")),
+            None,
+            None,
+            transfer.occurred_at,
+        )?;
+        let incoming = StockMovement::new(
+            command.in_movement_id,
+            transfer.to_store_id,
+            transfer.product_id,
+            StockMovementKind::TransferIn,
+            transfer.quantity,
+            Some(format!("Transferencia desde {from_code}{detail}")),
+            None,
+            None,
+            transfer.occurred_at,
+        )?;
+        insert_stock_movement_tx(&mut tx, &outgoing).await?;
+        insert_stock_movement_tx(&mut tx, &incoming).await?;
+        sqlx::query(
+            "INSERT INTO stock_transfers
+                (id, from_store_id, to_store_id, product_id, quantity, reason,
+                 out_movement_id, in_movement_id, occurred_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(transfer.id.to_string())
+        .bind(transfer.from_store_id.to_string())
+        .bind(transfer.to_store_id.to_string())
+        .bind(transfer.product_id.to_string())
+        .bind(requested.normalize().to_string())
+        .bind(transfer.reason.as_deref())
+        .bind(command.out_movement_id.to_string())
+        .bind(command.in_movement_id.to_string())
+        .bind(format_time(transfer.occurred_at)?)
+        .execute(&mut *tx)
+        .await?;
+        insert_audit_tx(&mut tx, audit).await?;
+        tx.commit().await?;
+
+        let source_level = self
+            .load_stock_level(transfer.from_store_id, transfer.product_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::NotFound(format!("stock level {}", transfer.product_id))
+            })?;
+        let destination_level = self
+            .load_stock_level(transfer.to_store_id, transfer.product_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::NotFound(format!("stock level {}", transfer.product_id))
+            })?;
+        Ok(StockTransferResult {
+            transfer: StockTransferView {
+                id: transfer.id,
+                from_store_id: transfer.from_store_id,
+                to_store_id: transfer.to_store_id,
+                product_id: transfer.product_id,
+                sku: source_level.sku.to_string(),
+                name: source_level.name.clone(),
+                quantity: requested,
+                reason: transfer.reason.clone(),
+                occurred_at: transfer.occurred_at,
+            },
+            source_level,
+            destination_level,
+        })
+    }
+
     async fn set_stock_minimum_inner(
         &self,
         store_id: StoreId,
@@ -667,5 +782,13 @@ impl StockRepository for SqliteStore {
         command: &StockCountImportCommand,
     ) -> AppResult<StockCountImportOutcome> {
         Ok(self.import_stock_counts_inner(command).await?)
+    }
+
+    async fn transfer_stock(
+        &self,
+        command: &StockTransferCommand,
+        audit: &AuditEvent,
+    ) -> AppResult<StockTransferResult> {
+        Ok(self.transfer_stock_inner(command, audit).await?)
     }
 }

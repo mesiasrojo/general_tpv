@@ -620,6 +620,53 @@ test.describe('TPV desktop UI', () => {
             movement
           };
         },
+        async transfer_stock(request: any) {
+          (window as any).__lastTransferRequest = request;
+          const product = catalogItems.find((item) => item.id === request.product_id);
+          if (!product) throw 'Producto no encontrado.';
+          if (!request.to_store_id || request.to_store_id === storeId) {
+            throw 'La tienda de destino debe ser distinta de la tienda de origen.';
+          }
+          const quantity = Number.parseFloat(String(request.quantity).replace(',', '.'));
+          if (!Number.isFinite(quantity) || quantity <= 0) {
+            throw 'La cantidad debe ser mayor que cero.';
+          }
+          const level = stockLevelFor(product);
+          if (Number(level.quantity) < quantity) throw 'stock insuficiente';
+          level.quantity = String(Number((Number(level.quantity) - quantity).toFixed(3)));
+          level.updated_at = now();
+          const movement = {
+            id: crypto.randomUUID(),
+            store_id: storeId,
+            product_id: request.product_id,
+            kind: 'transfer_out',
+            quantity: String(quantity),
+            reason: `Transferencia a ${request.to_store_id}`,
+            sale_id: null,
+            sale_line_id: null,
+            occurred_at: now()
+          };
+          stockMovements.unshift(movement);
+          return {
+            transfer: {
+              id: crypto.randomUUID(),
+              from_store_id: storeId,
+              to_store_id: request.to_store_id,
+              product_id: request.product_id,
+              sku: product.sku,
+              name: product.name,
+              quantity: String(quantity),
+              reason: request.reason ?? null,
+              occurred_at: now()
+            },
+            source_level: { ...level },
+            destination_level: {
+              ...level,
+              store_id: request.to_store_id,
+              quantity: String(quantity)
+            }
+          };
+        },
         async preview_stock_count_import(csv: string) {
           return previewStockCountImport(csv, false);
         },
@@ -945,6 +992,8 @@ test.describe('TPV desktop UI', () => {
               return api.set_stock_minimum(args.request);
             case 'set_stock_count':
               return api.set_stock_count(args.request);
+            case 'transfer_stock':
+              return api.transfer_stock(args.request);
             case 'preview_stock_count_import':
               return api.preview_stock_count_import(String(args.csv));
             case 'commit_stock_count_import':
@@ -1440,6 +1489,30 @@ test.describe('TPV desktop UI', () => {
       'Producto E2E editado'
     );
     await expect(catalogDialog.locator('.stock-detail-panel')).toContainText('Reponer 13');
+
+    await catalogDialog
+      .getByLabel('Tienda destino')
+      .selectOption({ label: 'E2E-STORE · Tienda E2E' });
+    await catalogDialog.getByLabel('Cantidad a transferir').fill('1');
+    await catalogDialog.getByLabel('Motivo de la transferencia').fill('Traslado UI');
+    await catalogDialog.getByRole('button', { name: 'Transferir stock' }).click();
+    await expect(
+      page.getByText(/Transferencia enviada · 1 uds a Tienda E2E/)
+    ).toBeVisible();
+    await expect(catalogDialog.locator('.stock-current')).toContainText('6');
+    await expect(catalogDialog.locator('.stock-movements')).toContainText(
+      'Transferencia enviada'
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__lastTransferRequest?.to_store_id)
+      )
+      .toBeTruthy();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__lastTransferRequest?.quantity)
+      )
+      .toBe('1');
 
     await page.getByRole('tab', { name: 'Tarifas' }).click();
     await page.getByLabel('Código', { exact: true }).fill('E2E-PL');

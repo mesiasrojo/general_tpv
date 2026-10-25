@@ -28,6 +28,7 @@ pub enum AuditAction {
     StockMovement,
     StockMinimumChanged,
     StockCount,
+    StockTransfer,
     Reprint,
     TimeClockIn,
     TimeClockOut,

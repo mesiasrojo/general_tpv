@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::error::{DomainError, Result};
-use crate::ids::{ProductId, SaleId, SaleLineId, Sku, StockMovementId, StoreId};
+use crate::ids::{ProductId, SaleId, SaleLineId, Sku, StockMovementId, StockTransferId, StoreId};
 use crate::money::Quantity;
 
 /// Movements that explain every change of the on-hand quantity.
@@ -22,6 +22,10 @@ pub enum StockMovementKind {
     AdjustmentIn,
     /// Negative manual correction after a physical count or breakage.
     AdjustmentOut,
+    /// Units sent to another store.
+    TransferOut,
+    /// Units received from another store.
+    TransferIn,
 }
 
 impl StockMovementKind {
@@ -38,8 +42,12 @@ impl StockMovementKind {
     #[must_use]
     pub fn sign(self) -> i64 {
         match self {
-            Self::Initial | Self::Purchase | Self::Return | Self::AdjustmentIn => 1,
-            Self::Sale | Self::AdjustmentOut => -1,
+            Self::Initial
+            | Self::Purchase
+            | Self::Return
+            | Self::AdjustmentIn
+            | Self::TransferIn => 1,
+            Self::Sale | Self::AdjustmentOut | Self::TransferOut => -1,
         }
     }
 
@@ -88,9 +96,13 @@ impl StockMovement {
         // Confirmed sales always reference their sale line. Invoice returns
         // reference the original sale but not a single line because the same
         // line can be partially returned across several rectificative invoices.
-        let references_sale = sale_id.is_some() && sale_line_id.is_some();
-        let references_invoice_sale = kind == StockMovementKind::Return && sale_id.is_some();
-        if !kind.is_manual() && !references_sale && !references_invoice_sale {
+        // Transfers are linked through the stock_transfers document instead.
+        let valid_reference = match kind {
+            StockMovementKind::Sale => sale_id.is_some() && sale_line_id.is_some(),
+            StockMovementKind::Return => sale_id.is_some(),
+            _ => true,
+        };
+        if !valid_reference {
             return Err(DomainError::Validation(
                 "sale movements must reference a sale line and returns must reference a sale"
                     .into(),
@@ -112,6 +124,56 @@ impl StockMovement {
     #[must_use]
     pub fn signed_quantity(&self) -> Decimal {
         self.quantity.as_decimal() * Decimal::from(self.kind.sign())
+    }
+}
+
+/// Document linking the outgoing and incoming movements of one transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StockTransfer {
+    pub id: StockTransferId,
+    pub from_store_id: StoreId,
+    pub to_store_id: StoreId,
+    pub product_id: ProductId,
+    pub quantity: Quantity,
+    pub reason: Option<String>,
+    pub occurred_at: OffsetDateTime,
+}
+
+impl StockTransfer {
+    pub fn new(
+        id: StockTransferId,
+        from_store_id: StoreId,
+        to_store_id: StoreId,
+        product_id: ProductId,
+        quantity: Quantity,
+        reason: Option<String>,
+        occurred_at: OffsetDateTime,
+    ) -> Result<Self> {
+        if from_store_id == to_store_id {
+            return Err(DomainError::Validation(
+                "stock transfers require two different stores".into(),
+            ));
+        }
+        let reason = reason
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if reason
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 200)
+        {
+            return Err(DomainError::Validation(
+                "stock transfer reason is too long".into(),
+            ));
+        }
+        Ok(Self {
+            id,
+            from_store_id,
+            to_store_id,
+            product_id,
+            quantity,
+            reason,
+            occurred_at,
+        })
     }
 }
 
@@ -199,6 +261,58 @@ mod tests {
         assert_eq!(
             movement(StockMovementKind::Return, Decimal::new(1, 0)).signed_quantity(),
             Decimal::new(1, 0)
+        );
+        assert_eq!(
+            movement(StockMovementKind::TransferOut, Decimal::new(4, 0)).signed_quantity(),
+            Decimal::new(-4, 0)
+        );
+        assert_eq!(
+            movement(StockMovementKind::TransferIn, Decimal::new(4, 0)).signed_quantity(),
+            Decimal::new(4, 0)
+        );
+    }
+
+    #[test]
+    fn transfers_require_two_stores_and_do_not_need_a_sale() {
+        let from = StoreId::new();
+        let to = StoreId::new();
+        let product = ProductId::new();
+        let transfer = StockTransfer::new(
+            StockTransferId::new(),
+            from,
+            to,
+            product,
+            Quantity::new(Decimal::new(3, 0)).unwrap(),
+            Some("  Reposición entre tiendas  ".into()),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert_eq!(transfer.reason.as_deref(), Some("Reposición entre tiendas"));
+
+        let outgoing = StockMovement::new(
+            StockMovementId::new(),
+            from,
+            product,
+            StockMovementKind::TransferOut,
+            Quantity::new(Decimal::new(3, 0)).unwrap(),
+            Some("Transferencia a Tienda 2".into()),
+            None,
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        assert!(outgoing.is_ok());
+
+        assert!(
+            StockTransfer::new(
+                StockTransferId::new(),
+                from,
+                from,
+                product,
+                Quantity::new(Decimal::ONE).unwrap(),
+                None,
+                OffsetDateTime::now_utc(),
+            )
+            .is_err()
         );
     }
 
