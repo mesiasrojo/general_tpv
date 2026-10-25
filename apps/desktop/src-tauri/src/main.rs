@@ -5,7 +5,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use time::OffsetDateTime;
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuthService, BackupRepository, BackupService,
@@ -14,26 +15,29 @@ use tpv_application::{
     FamilyService, InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataRepository,
     MasterDataService, NoteInbox, NoteRepository, NoteService, OpenCashRequest, PriceListService,
     PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
-    ProductImportService, ProductService, QuarantinedEvent, RectifyInvoiceLinesRequest,
-    RectifyInvoiceRequest, ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository,
-    SaleService, SaleView, SellerService, SequenceRepository, SessionUser, StartSaleRequest,
-    StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService,
-    TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
-    UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest,
-    UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest, UserRepository,
+    ProductImportService, ProductService, QuarantinedEvent, RecordStockMovementRequest,
+    RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest, SaleHistoryPage,
+    SaleQuery, SaleRepository, SaleService, SaleView, SellerService, SequenceRepository,
+    SessionUser, SetStockCountRequest, SetStockMinimumRequest, StartSaleRequest, StockCountResult,
+    StockRepository, StockService, StoreService, SyncContext, SyncOutboxRepository, SyncService,
+    SyncStatus, TaxService, TimeClockRepository, TimeClockService, TimeClockStatus,
+    UpdateUserRequest, UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest,
+    UpsertProductRequest, UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest,
+    UserRepository, stock_levels_csv, stock_movements_csv,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
 use tpv_domain::catalog::{Family, Product};
 use tpv_domain::ids::{
-    CashSessionId, CustomerId, InvoiceId, NoteId, PriceListId, RegisterId, SellerId, StoreId,
-    UserId,
+    CashSessionId, CustomerId, InvoiceId, NoteId, PriceListId, ProductId, RegisterId, SellerId,
+    StoreId, UserId,
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataChange, MasterDataConflict};
 use tpv_domain::people::{Customer, Role, Seller, Store, UserAccount, UserProvision};
 use tpv_domain::pricing::PriceListSnapshot;
 use tpv_domain::sale::{PaymentMethod, SaleState};
+use tpv_domain::stock::{StockLevel, StockMovement};
 use tpv_domain::tax::Tax;
 use tpv_print::{
     EscPosRenderer, PrinterProfile, apply_profile_defaults, build_printer, printer_profile,
@@ -66,6 +70,7 @@ struct AppState {
     families: FamilyService,
     taxes: TaxService,
     price_lists: PriceListService,
+    stock: StockService,
     sellers: SellerService,
     stores: StoreService,
     imports: ProductImportService,
@@ -991,6 +996,181 @@ async fn save_price_list(
 }
 
 #[tauri::command]
+async fn list_stock_levels(state: State<'_, AppState>) -> Result<Vec<StockLevel>, String> {
+    require_session(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .list_levels(state.demo.store_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn count_low_stock(state: State<'_, AppState>) -> Result<u64, String> {
+    require_session(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .count_low_stock(state.demo.store_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn export_stock_csv(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let levels = state
+        .stock
+        .list_levels(state.demo.store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let csv = stock_levels_csv(&levels);
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .set_file_name(format!("stock-{}.csv", OffsetDateTime::now_utc().date()))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("ruta de exportación no válida: {error}"))?;
+    std::fs::write(&path, csv.as_bytes())
+        .map_err(|error| format!("no se pudo guardar el CSV: {error}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+async fn export_stock_movements_csv(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    product_id: ProductId,
+) -> Result<Option<String>, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let level = state
+        .stock
+        .get_level(state.demo.store_id, product_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("producto no encontrado: {product_id}"))?;
+    let movements = state
+        .stock
+        .list_movements_for_export(state.demo.store_id, product_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let csv = stock_movements_csv(&level, &movements);
+    let safe_sku: String = level
+        .sku
+        .as_str()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .set_file_name(format!(
+            "movimientos-{safe_sku}-{}.csv",
+            OffsetDateTime::now_utc().date()
+        ))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("ruta de exportación no válida: {error}"))?;
+    std::fs::write(&path, csv.as_bytes())
+        .map_err(|error| format!("no se pudo guardar el CSV: {error}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+async fn list_stock_movements(
+    state: State<'_, AppState>,
+    product_id: ProductId,
+    limit: Option<u32>,
+) -> Result<Vec<StockMovement>, String> {
+    require_session(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .list_movements(state.demo.store_id, product_id, limit.unwrap_or(100))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_stock_levels_for_products(
+    state: State<'_, AppState>,
+    product_ids: Vec<ProductId>,
+) -> Result<Vec<StockLevel>, String> {
+    require_sell(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .levels_for_products(state.demo.store_id, &product_ids)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn record_stock_movement(
+    state: State<'_, AppState>,
+    request: RecordStockMovementRequest,
+) -> Result<StockMovement, String> {
+    let session = require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .record_movement(state.demo.store_id, Some(session.user.id), request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_stock_minimum(
+    state: State<'_, AppState>,
+    request: SetStockMinimumRequest,
+) -> Result<StockLevel, String> {
+    let session = require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .set_minimum(state.demo.store_id, Some(session.user.id), request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_stock_count(
+    state: State<'_, AppState>,
+    request: SetStockCountRequest,
+) -> Result<StockCountResult, String> {
+    let session = require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .set_count(state.demo.store_id, Some(session.user.id), request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn time_clock_status(state: State<'_, AppState>) -> Result<TimeClockStatus, String> {
     let session = require_session(state.inner())?;
     load_time_clock_status(state.inner(), &session).await
@@ -1411,6 +1591,8 @@ async fn build_app_state(
     let families = FamilyService::new(catalog_repo.clone(), master_data.clone());
     let taxes = TaxService::new(catalog_repo.clone(), master_data.clone());
     let price_lists = PriceListService::new(catalog_repo.clone(), master_data.clone());
+    let stock_repo: Arc<dyn StockRepository> = store.clone();
+    let stock = StockService::new(stock_repo, catalog_repo.clone(), clock.clone());
     let sellers = SellerService::new(catalog_repo.clone(), master_data.clone());
     let stores = StoreService::new(catalog_repo.clone(), master_data.clone());
     let imports = ProductImportService::new(import_repo);
@@ -1448,6 +1630,7 @@ async fn build_app_state(
         families,
         taxes,
         price_lists,
+        stock,
         sellers,
         stores,
         imports,
@@ -1552,6 +1735,15 @@ fn main() {
             save_tax,
             list_price_lists,
             save_price_list,
+            list_stock_levels,
+            count_low_stock,
+            export_stock_csv,
+            export_stock_movements_csv,
+            list_stock_levels_for_products,
+            list_stock_movements,
+            record_stock_movement,
+            set_stock_minimum,
+            set_stock_count,
             time_clock_status,
             time_clock_in,
             time_clock_out,
@@ -1661,6 +1853,13 @@ mod e2e_tests {
                 save_tax,
                 list_price_lists,
                 save_price_list,
+                list_stock_levels,
+                count_low_stock,
+                list_stock_levels_for_products,
+                list_stock_movements,
+                record_stock_movement,
+                set_stock_minimum,
+                set_stock_count,
                 time_clock_status,
                 time_clock_in,
                 time_clock_out,
@@ -1800,6 +1999,91 @@ mod e2e_tests {
         assert_eq!(sale["sale"]["state"], "paid");
         assert!(sale["sale"]["ticket_number"].is_number());
 
+        let stock_levels =
+            invoke(&webview, "list_stock_levels", json!({})).expect("list stock levels");
+        let sold_stock = stock_levels
+            .as_array()
+            .expect("stock levels array")
+            .iter()
+            .find(|level| level["sku"] == "3")
+            .expect("stock for sold sku")
+            .clone();
+        assert_eq!(sold_stock["quantity"], "-2");
+        let sold_product_id = sold_stock["product_id"]
+            .as_str()
+            .expect("stock product id")
+            .to_string();
+        let purchase = invoke(
+            &webview,
+            "record_stock_movement",
+            json!({
+                "request": {
+                    "product_id": sold_product_id,
+                    "kind": "purchase",
+                    "quantity": "10",
+                    "reason": "Reposición E2E"
+                }
+            }),
+        )
+        .expect("record stock purchase");
+        assert_eq!(purchase["kind"], "purchase");
+        let low_before_minimum =
+            invoke(&webview, "count_low_stock", json!({})).expect("count low stock");
+        assert_eq!(low_before_minimum, json!(0));
+        let minimum = invoke(
+            &webview,
+            "set_stock_minimum",
+            json!({
+                "request": {
+                    "product_id": sold_product_id,
+                    "min_quantity": "9"
+                }
+            }),
+        )
+        .expect("set stock minimum");
+        assert_eq!(minimum["quantity"], "8");
+        assert_eq!(minimum["min_quantity"], "9");
+        let low_after_minimum =
+            invoke(&webview, "count_low_stock", json!({})).expect("count low stock");
+        assert_eq!(low_after_minimum, json!(1));
+        let visible_stock = invoke(
+            &webview,
+            "list_stock_levels_for_products",
+            json!({ "productIds": [sold_product_id] }),
+        )
+        .expect("list stock for products");
+        assert_eq!(
+            visible_stock.as_array().expect("visible stock array").len(),
+            1
+        );
+        assert_eq!(visible_stock[0]["quantity"], "8");
+        assert_eq!(visible_stock[0]["min_quantity"], "9");
+        let movements = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("list stock movements");
+        assert_eq!(
+            movements.as_array().expect("stock movements array").len(),
+            2
+        );
+        assert!(
+            movements
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|movement| movement["kind"] == "sale")
+        );
+        assert!(
+            movements
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|movement| movement["kind"] == "purchase"
+                    && movement["reason"] == "Reposición E2E")
+        );
+
         let print = invoke(
             &webview,
             "print_ticket",
@@ -1877,6 +2161,99 @@ mod e2e_tests {
                 .unwrap_or_default()
                 .contains("REC-000001")
         );
+        let stock_after_refund =
+            invoke(&webview, "list_stock_levels", json!({})).expect("list stock after refund");
+        let refunded_stock = stock_after_refund
+            .as_array()
+            .expect("stock levels array")
+            .iter()
+            .find(|level| level["sku"] == "3")
+            .expect("stock for refunded sku");
+        assert_eq!(refunded_stock["quantity"], "9");
+        let stock_movements = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("list stock movements after refund");
+        assert_eq!(
+            stock_movements
+                .as_array()
+                .expect("stock movements array")
+                .len(),
+            3
+        );
+        assert!(stock_movements.as_array().unwrap().iter().any(|movement| {
+            movement["kind"] == "return"
+                && movement["quantity"] == "1"
+                && movement["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("REC-000001")
+        }));
+
+        let count = invoke(
+            &webview,
+            "set_stock_count",
+            json!({
+                "request": {
+                    "product_id": sold_product_id,
+                    "counted_quantity": "4",
+                    "reason": "Conteo físico E2E"
+                }
+            }),
+        )
+        .expect("set stock count");
+        assert_eq!(count["previous_quantity"], "9");
+        assert_eq!(count["counted_quantity"], "4");
+        assert_eq!(count["difference"], "-5");
+        assert_eq!(count["level"]["quantity"], "4");
+        assert_eq!(count["movement"]["kind"], "adjustment_out");
+        assert_eq!(count["movement"]["quantity"], "5");
+        assert_eq!(count["movement"]["reason"], "Conteo físico E2E");
+        let unchanged_count = invoke(
+            &webview,
+            "set_stock_count",
+            json!({
+                "request": {
+                    "product_id": sold_product_id,
+                    "counted_quantity": "4",
+                    "reason": "Conteo sin diferencias E2E"
+                }
+            }),
+        )
+        .expect("repeat stock count");
+        assert_eq!(unchanged_count["difference"], "0");
+        assert_eq!(unchanged_count["level"]["quantity"], "4");
+        assert!(unchanged_count["movement"].is_null());
+        let movements_after_count = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("list stock movements after count");
+        assert_eq!(
+            movements_after_count
+                .as_array()
+                .expect("stock movements array")
+                .len(),
+            4
+        );
+        assert!(
+            movements_after_count
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|movement| {
+                    movement["kind"] == "adjustment_out"
+                        && movement["quantity"] == "5"
+                        && movement["reason"] == "Conteo físico E2E"
+                })
+        );
+        let low_after_count =
+            invoke(&webview, "count_low_stock", json!({})).expect("count low stock after count");
+        assert_eq!(low_after_count, json!(1));
+
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);
         let ticket_number = sales[0]["sale"]["ticket_number"]

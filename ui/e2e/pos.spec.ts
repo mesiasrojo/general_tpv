@@ -99,6 +99,27 @@ test.describe('TPV desktop UI', () => {
           items: []
         }
       ];
+      const stockMovements: Array<Record<string, any>> = [];
+      const stockLevels = new Map<string, Record<string, any>>();
+      const stockLevelFor = (product: Record<string, any>) => {
+        const cached = stockLevels.get(String(product.id));
+        if (cached) {
+          cached.sku = product.sku;
+          cached.name = product.name;
+          return cached;
+        }
+        const level = {
+          store_id: storeId,
+          product_id: product.id,
+          sku: product.sku,
+          name: product.name,
+          quantity: '0',
+          min_quantity: '0',
+          updated_at: null
+        };
+        stockLevels.set(String(product.id), level);
+        return level;
+      };
       let cashSession: any = null;
       const timeEntries: any[] = [];
       const timeClockStatus = () => {
@@ -282,6 +303,7 @@ test.describe('TPV desktop UI', () => {
           }
           return [
             {
+              id: '00000000-0000-7000-8000-000000000010',
               sku: '3',
               name: 'Café solo',
               price_cents: 120,
@@ -289,6 +311,25 @@ test.describe('TPV desktop UI', () => {
               tax_percent_bp: 1000
             }
           ];
+        },
+        async list_stock_levels_for_products(productIds: string[]) {
+          return productIds.flatMap((productId) => {
+            if (productId === '00000000-0000-7000-8000-000000000010') {
+              return [
+                {
+                  store_id: storeId,
+                  product_id: productId,
+                  sku: '3',
+                  name: 'Café solo',
+                  quantity: '5',
+                  min_quantity: '10',
+                  updated_at: null
+                }
+              ];
+            }
+            const product = catalogItems.find((item) => item.id === productId);
+            return product ? [{ ...stockLevelFor(product) }] : [];
+          });
         },
         async list_customers() {
           return customerRecords;
@@ -321,6 +362,107 @@ test.describe('TPV desktop UI', () => {
             priceListItems.push(snapshot);
           }
           return snapshot;
+        },
+        async list_stock_levels() {
+          return catalogItems.map((product) => ({ ...stockLevelFor(product) }));
+        },
+        async export_stock_csv() {
+          return '/tmp/stock-e2e.csv';
+        },
+        async export_stock_movements_csv(_productId: string) {
+          return '/tmp/movimientos-e2e.csv';
+        },
+        async count_low_stock() {
+          return catalogItems.reduce((count, product) => {
+            const level = stockLevelFor(product);
+            const minimum = Number.parseFloat(level.min_quantity);
+            const low =
+              Number.isFinite(minimum) &&
+              minimum > 0 &&
+              Number.parseFloat(level.quantity) <= minimum;
+            return count + (low ? 1 : 0);
+          }, 0);
+        },
+        async list_stock_movements(productId: string, limit = 100) {
+          return stockMovements
+            .filter((movement) => movement.product_id === productId)
+            .slice(0, limit);
+        },
+        async record_stock_movement(request: any) {
+          const product = catalogItems.find((item) => item.id === request.product_id);
+          if (!product) throw 'Producto no encontrado.';
+          const level = stockLevelFor(product);
+          const quantity = Number.parseFloat(String(request.quantity).replace(',', '.'));
+          if (!Number.isFinite(quantity) || quantity <= 0) {
+            throw 'La cantidad debe ser mayor que cero.';
+          }
+          const delta = request.kind === 'adjustment_out' ? -quantity : quantity;
+          level.quantity = String(Number((Number(level.quantity) + delta).toFixed(3)));
+          level.updated_at = now();
+          const movement = {
+            id: crypto.randomUUID(),
+            store_id: storeId,
+            product_id: request.product_id,
+            kind: request.kind,
+            quantity: String(quantity),
+            reason: request.reason ?? null,
+            sale_id: null,
+            sale_line_id: null,
+            occurred_at: now()
+          };
+          stockMovements.unshift(movement);
+          return movement;
+        },
+        async set_stock_minimum(request: any) {
+          const product = catalogItems.find((item) => item.id === request.product_id);
+          if (!product) throw 'Producto no encontrado.';
+          const minimum = Number.parseFloat(String(request.min_quantity).replace(',', '.'));
+          if (!Number.isFinite(minimum) || minimum < 0) {
+            throw 'El mínimo no puede ser negativo.';
+          }
+          const level = stockLevelFor(product);
+          level.min_quantity = String(minimum);
+          level.updated_at = now();
+          return { ...level };
+        },
+        async set_stock_count(request: any) {
+          const product = catalogItems.find((item) => item.id === request.product_id);
+          if (!product) throw 'Producto no encontrado.';
+          const counted = Number.parseFloat(
+            String(request.counted_quantity).replace(',', '.')
+          );
+          if (!Number.isFinite(counted) || counted < 0) {
+            throw 'El conteo no puede ser negativo.';
+          }
+          const reason = String(request.reason ?? '').trim();
+          if (!reason) throw 'El motivo del conteo es obligatorio.';
+          const level = stockLevelFor(product);
+          const previous = Number(level.quantity);
+          const difference = Number((counted - previous).toFixed(3));
+          let movement = null;
+          if (difference !== 0) {
+            movement = {
+              id: crypto.randomUUID(),
+              store_id: storeId,
+              product_id: request.product_id,
+              kind: difference > 0 ? 'adjustment_in' : 'adjustment_out',
+              quantity: String(Math.abs(difference)),
+              reason,
+              sale_id: null,
+              sale_line_id: null,
+              occurred_at: now()
+            };
+            stockMovements.unshift(movement);
+          }
+          level.quantity = String(counted);
+          level.updated_at = now();
+          return {
+            level: { ...level },
+            previous_quantity: String(previous),
+            counted_quantity: String(counted),
+            difference: String(difference),
+            movement
+          };
         },
         async save_customer(request: any) {
           const existing = request.customer_id
@@ -617,6 +759,24 @@ test.describe('TPV desktop UI', () => {
               return api.list_price_lists();
             case 'save_price_list':
               return api.save_price_list(args.request);
+            case 'list_stock_levels':
+              return api.list_stock_levels();
+            case 'export_stock_csv':
+              return api.export_stock_csv();
+            case 'export_stock_movements_csv':
+              return api.export_stock_movements_csv(String(args.productId));
+            case 'list_stock_levels_for_products':
+              return api.list_stock_levels_for_products(args.productIds as string[]);
+            case 'count_low_stock':
+              return api.count_low_stock();
+            case 'list_stock_movements':
+              return api.list_stock_movements(String(args.productId), Number(args.limit ?? 100));
+            case 'record_stock_movement':
+              return api.record_stock_movement(args.request);
+            case 'set_stock_minimum':
+              return api.set_stock_minimum(args.request);
+            case 'set_stock_count':
+              return api.set_stock_count(args.request);
             case 'list_master_data_conflicts':
               return [];
             case 'save_product': {
@@ -912,6 +1072,53 @@ test.describe('TPV desktop UI', () => {
     await page.getByRole('button', { name: 'Guardar producto' }).click();
     await expect(page.locator('.product-row', { hasText: 'Producto E2E editado' })).toBeVisible();
 
+    const catalogDialog = page.getByRole('dialog', { name: 'Catálogo' });
+    await page.getByRole('tab', { name: 'Stock' }).click();
+    await expect(page.locator('.stock-level-row.selected')).toContainText('Producto E2E editado');
+    await catalogDialog.getByLabel('Cantidad', { exact: true }).fill('12');
+    await catalogDialog.getByLabel('Motivo', { exact: true }).fill('Compra UI');
+    await catalogDialog.getByRole('button', { name: 'Registrar movimiento' }).click();
+    await expect(page.getByText(/Movimiento de stock: Entrada 12/)).toBeVisible();
+    await expect(page.locator('.stock-current')).toContainText('12');
+    await catalogDialog.getByLabel('Mínimo de stock').fill('20');
+    await catalogDialog.getByRole('button', { name: 'Guardar mínimo' }).click();
+    await expect(page.getByText(/Mínimo de stock actualizado: 20/)).toBeVisible();
+    await expect(page.locator('.stock-level-row.selected')).toContainText('BAJO');
+    await catalogDialog.getByLabel('Conteo físico').fill('7');
+    await catalogDialog.getByLabel('Motivo del conteo').fill('Conteo UI');
+    await expect(catalogDialog.locator('.stock-count-preview')).toContainText('Ajuste previsto');
+    await expect(catalogDialog.locator('.stock-count-preview')).toContainText('-5');
+    await catalogDialog.getByRole('button', { name: 'Ajustar a conteo' }).click();
+    await expect(page.getByText(/Conteo físico ajustado: -5 · existencias 7/)).toBeVisible();
+    await expect(page.locator('.stock-current')).toContainText('7');
+    await expect(page.locator('.stock-movements')).toContainText('Ajuste negativo');
+    await expect(page.locator('.stock-movements')).toContainText('Conteo UI');
+    await catalogDialog.getByRole('button', { name: 'Exportar CSV' }).click();
+    await expect(page.getByText(/Stock exportado · \/tmp\/stock-e2e\.csv/)).toBeVisible();
+    await expect(page.locator('.stock-movements')).toContainText('Compra UI');
+    await catalogDialog.getByRole('button', { name: 'Exportar historial' }).click();
+    await expect(
+      page.getByText(/Historial exportado · \/tmp\/movimientos-e2e\.csv/)
+    ).toBeVisible();
+    const lowSummary = catalogDialog.locator('.stock-summary-card.low');
+    await expect(lowSummary.locator('strong')).toHaveText('1');
+    await lowSummary.click();
+    await expect(lowSummary).toHaveAttribute('aria-pressed', 'true');
+    await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(1);
+
+    const outSummary = catalogDialog.locator('.stock-summary-card.out');
+    const outCount = Number(await outSummary.locator('strong').textContent());
+    await outSummary.click();
+    await expect(outSummary).toHaveAttribute('aria-pressed', 'true');
+    await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(outCount);
+
+    const allSummary = catalogDialog.locator('.stock-summary-card.all');
+    const allCount = Number(await allSummary.locator('strong').textContent());
+    await allSummary.click();
+    await expect(allSummary).toHaveAttribute('aria-pressed', 'true');
+    await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(allCount);
+    await expect(catalogDialog).toBeVisible();
+
     await page.getByRole('tab', { name: 'Tarifas' }).click();
     await page.getByLabel('Código', { exact: true }).fill('E2E-PL');
     await page.getByLabel('Nombre').fill('Tarifa E2E');
@@ -944,6 +1151,12 @@ test.describe('TPV desktop UI', () => {
       page.getByText('Importación confirmada: 1 nuevos, 1 actualizados.')
     ).toBeVisible();
     await page.getByRole('dialog', { name: 'Catálogo' }).getByRole('button', { name: 'Esc' }).click();
+    const lowStockButton = page.getByRole('button', { name: /Stock bajo/ });
+    await expect(lowStockButton).toContainText('1');
+    await lowStockButton.click();
+    await expect(catalogDialog).toBeVisible();
+    await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(1);
+    await catalogDialog.getByRole('button', { name: 'Esc' }).click();
     await page.getByRole('button', { name: 'Usuarios' }).click();
     const usersDialog = page.getByRole('dialog', { name: 'Gestión de usuarios' });
     await expect(usersDialog).toBeVisible();
@@ -976,7 +1189,10 @@ test.describe('TPV desktop UI', () => {
 
     const search = page.getByRole('textbox', { name: 'Buscar artículo' });
     await search.fill('café');
-    await page.getByRole('button', { name: /3 · Café solo/ }).click();
+    const searchResult = page.getByRole('button', { name: /3 · Café solo/ });
+    await expect(searchResult.locator('.badge')).toContainText('5 uds');
+    await expect(searchResult.locator('.badge')).toHaveClass(/warn/);
+    await searchResult.click();
     await expect(page.getByText(/Línea añadida/)).toBeVisible();
 
     await page.getByRole('button', { name: /F5 · Cobrar/ }).click();

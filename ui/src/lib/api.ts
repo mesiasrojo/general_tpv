@@ -95,6 +95,62 @@ export interface SavePriceListRequest {
   active: boolean;
 }
 
+export type StockMovementKind =
+  | 'initial'
+  | 'purchase'
+  | 'sale'
+  | 'return'
+  | 'adjustment_in'
+  | 'adjustment_out';
+
+export interface StockLevel {
+  store_id: string;
+  product_id: string;
+  sku: string;
+  name: string;
+  quantity: string;
+  min_quantity: string;
+  updated_at: string | null;
+}
+
+export interface StockMovement {
+  id: string;
+  store_id: string;
+  product_id: string;
+  kind: StockMovementKind;
+  quantity: string;
+  reason: string | null;
+  sale_id: string | null;
+  sale_line_id: string | null;
+  occurred_at: string;
+}
+
+export interface RecordStockMovementRequest {
+  product_id: string;
+  kind: StockMovementKind;
+  quantity: string;
+  reason?: string | null;
+}
+
+export interface SetStockMinimumRequest {
+  product_id: string;
+  min_quantity: string;
+}
+
+export interface SetStockCountRequest {
+  product_id: string;
+  counted_quantity: string;
+  reason: string;
+}
+
+export interface StockCountResult {
+  level: StockLevel;
+  previous_quantity: string;
+  counted_quantity: string;
+  difference: string;
+  movement: StockMovement | null;
+}
+
 export interface Tax {
   id: string;
   code: string;
@@ -190,6 +246,7 @@ export interface MasterDataConflict {
 }
 
 export interface ProductSearchResult {
+  id: string;
   sku: string;
   name: string;
   price_cents: MoneyCents;
@@ -546,6 +603,21 @@ export const api = {
   listPriceLists: () => invoke<PriceListSnapshot[]>('list_price_lists'),
   savePriceList: (request: SavePriceListRequest) =>
     invoke<PriceListSnapshot>('save_price_list', { request }),
+  listStockLevels: () => invoke<StockLevel[]>('list_stock_levels'),
+  exportStockCsv: () => invoke<string | null>('export_stock_csv'),
+  exportStockMovementsCsv: (productId: string) =>
+    invoke<string | null>('export_stock_movements_csv', { productId }),
+  listStockLevelsForProducts: (productIds: string[]) =>
+    invoke<StockLevel[]>('list_stock_levels_for_products', { productIds }),
+  countLowStock: () => invoke<number>('count_low_stock'),
+  listStockMovements: (productId: string, limit = 100) =>
+    invoke<StockMovement[]>('list_stock_movements', { productId, limit }),
+  recordStockMovement: (request: RecordStockMovementRequest) =>
+    invoke<StockMovement>('record_stock_movement', { request }),
+  setStockMinimum: (request: SetStockMinimumRequest) =>
+    invoke<StockLevel>('set_stock_minimum', { request }),
+  setStockCount: (request: SetStockCountRequest) =>
+    invoke<StockCountResult>('set_stock_count', { request }),
   listSellers: () => invoke<Seller[]>('list_sellers'),
   saveSeller: (request: SaveSellerRequest) => invoke<Seller>('save_seller', { request }),
   saveStore: (request: SaveStoreRequest) => invoke<Store>('save_store', { request }),

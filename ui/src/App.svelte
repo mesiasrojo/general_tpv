@@ -32,6 +32,9 @@
     type SaveTaxRequest,
     type Seller,
     type SessionUser,
+    type StockLevel,
+    type StockMovement,
+    type StockMovementKind,
     type Store,
     type SyncStatus,
     type SyncSummary,
@@ -51,6 +54,7 @@
   let sale = $state<SaleView | null>(null);
   let query = $state('');
   let results = $state<ProductSearchResult[]>([]);
+  let resultStock = $state<Record<string, StockLevel>>({});
   let message = $state('Cargando TPV…');
   let busy = $state(false);
   let paymentOpen = $state(false);
@@ -121,7 +125,7 @@
   let catalogBusy = $state(false);
   let catalogFilter = $state('');
   let catalogSection = $state<
-    'products' | 'families' | 'taxes' | 'price-lists' | 'sellers' | 'stores'
+    'products' | 'families' | 'taxes' | 'price-lists' | 'stock' | 'sellers' | 'stores'
   >('products');
   let families = $state<Family[]>([]);
   let taxes = $state<Tax[]>([]);
@@ -170,6 +174,23 @@
   let priceListPrices = $state<Record<string, string>>({});
   let priceListProductId = $state('');
   let priceListProductPrice = $state('');
+  let stockLevels = $state<StockLevel[]>([]);
+  let stockFilter = $state('');
+  let stockStatusFilter = $state<'all' | 'low' | 'out'>('all');
+  let lowStockAlertCount = $state(0);
+  let stockSelectedProductId = $state<string | null>(null);
+  let stockMovements = $state<StockMovement[]>([]);
+  let stockMovementKind = $state<StockMovementKind>('purchase');
+  let stockQuantity = $state('1');
+  let stockReason = $state('');
+  let stockMinQuantity = $state('0');
+  let stockBusy = $state(false);
+  let stockCountedQuantity = $state('');
+  let stockCountReason = $state('');
+  let stockCountBusy = $state(false);
+  let stockExporting = $state(false);
+  let stockMovementsExporting = $state(false);
+  let stockLoading = $state(false);
   let importSourceSystem = $state('micro_server');
   let importBatchId = $state('');
   let importFileName = $state('');
@@ -219,6 +240,48 @@
       );
     })
   );
+
+  let filteredStock = $derived(
+    stockLevels.filter((level) => {
+      if (stockStatusFilter === 'low' && !isStockLow(level)) return false;
+      if (stockStatusFilter === 'out') {
+        const quantity = Number.parseFloat(level.quantity);
+        if (!Number.isFinite(quantity) || quantity > 0) return false;
+      }
+      const needle = stockFilter.trim().toLowerCase();
+      return (
+        !needle ||
+        level.name.toLowerCase().includes(needle) ||
+        level.sku.toLowerCase().includes(needle)
+      );
+    })
+  );
+  let selectedStockLevel = $derived(
+    stockLevels.find((level) => level.product_id === stockSelectedProductId) ?? null
+  );
+  let lowStockCount = $derived(stockLevels.filter((level) => isStockLow(level)).length);
+  let stockOutCount = $derived(
+    stockLevels.filter((level) => {
+      const quantity = Number.parseFloat(level.quantity);
+      return Number.isFinite(quantity) && quantity <= 0;
+    }).length
+  );
+  let stockTotalUnits = $derived(
+    stockLevels
+      .reduce((total, level) => {
+        const quantity = Number.parseFloat(level.quantity);
+        return total + (Number.isFinite(quantity) ? quantity : 0);
+      }, 0)
+      .toString()
+  );
+  let stockCountDifference = $derived.by(() => {
+    if (!selectedStockLevel || !stockCountedQuantity.trim()) return null;
+    const current = Number.parseFloat(selectedStockLevel.quantity);
+    const counted = Number.parseFloat(stockCountedQuantity.trim().replace(',', '.'));
+    if (!Number.isFinite(current) || !Number.isFinite(counted)) return null;
+    const difference = counted - current;
+    return Math.abs(difference) < 0.0005 ? '0' : difference.toFixed(3);
+  });
 
   let selectableFamilies = $derived.by(() => {
     const options = families.filter(
@@ -332,11 +395,13 @@
     session = null;
     info = null;
     sale = null;
+    lowStockAlertCount = 0;
     priceListId = '';
     cash = null;
     invoice = null;
     printSummary = null;
     results = [];
+    resultStock = {};
     lastSales = [];
     historyOpen = false;
     historyPage = null;
@@ -468,6 +533,7 @@
       await refreshSync();
       await refreshTimeClock();
       await refreshNotes();
+      await refreshLowStockAlert();
       message = `Caja lista · ${info.store_name}`;
     } catch (error) {
       message = `No se pudo conectar con el núcleo TPV: ${String(error)}`;
@@ -688,20 +754,36 @@
     await refreshCatalog();
   }
 
+  async function openLowStock() {
+    catalogSection = 'stock';
+    stockStatusFilter = 'low';
+    stockFilter = '';
+    await openCatalog();
+  }
+
   async function refreshCatalog() {
     catalogBusy = true;
     catalogError = '';
     try {
-      const [items, conflicts, familyItems, taxItems, sellerItems, storeItems, priceListItems] =
-        await Promise.all([
-          api.listProducts(),
-          api.listMasterDataConflicts(),
-          api.listFamilies(),
-          api.listTaxes(),
-          api.listSellers(),
-          api.listStores(),
-          api.listPriceLists()
-        ]);
+      const [
+        items,
+        conflicts,
+        familyItems,
+        taxItems,
+        sellerItems,
+        storeItems,
+        priceListItems,
+        stockLevelItems
+      ] = await Promise.all([
+        api.listProducts(),
+        api.listMasterDataConflicts(),
+        api.listFamilies(),
+        api.listTaxes(),
+        api.listSellers(),
+        api.listStores(),
+        api.listPriceLists(),
+        api.listStockLevels()
+      ]);
       catalogItems = items;
       catalogConflicts = conflicts;
       families = familyItems;
@@ -709,6 +791,18 @@
       sellers = sellerItems;
       stores = storeItems;
       priceLists = priceListItems;
+      stockLevels = stockLevelItems;
+      lowStockAlertCount = stockLevelItems.filter((level) => isStockLow(level)).length;
+      const preferred =
+        stockLevelItems.find((level) => level.product_id === stockSelectedProductId) ??
+        stockLevelItems[0];
+      if (preferred) {
+        stockSelectedProductId = preferred.product_id;
+        stockMinQuantity = preferred.min_quantity;
+        stockCountedQuantity = preferred.quantity;
+        stockCountReason = '';
+        await loadStockMovements(preferred.product_id);
+      }
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -772,6 +866,7 @@
         : [...catalogItems, saved];
       message = `Producto guardado: ${saved.sku} · ${saved.name}`;
       resetProductForm();
+      await refreshStockLevels(saved.id);
     } catch (error) {
       catalogError = String(error);
     } finally {
@@ -779,6 +874,193 @@
     }
   }
 
+
+  function isStockLow(level: StockLevel): boolean {
+    const minimum = Number.parseFloat(level.min_quantity);
+    return Number.isFinite(minimum) && minimum > 0 && Number.parseFloat(level.quantity) <= minimum;
+  }
+
+  async function refreshLowStockAlert() {
+    if (!session || (session.user.role !== 'admin' && session.user.role !== 'manager')) {
+      lowStockAlertCount = 0;
+      return;
+    }
+    try {
+      lowStockAlertCount = await api.countLowStock();
+    } catch {
+      lowStockAlertCount = 0;
+    }
+  }
+
+  function formatQuantity(value: string): string {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return value;
+    return parsed.toLocaleString('es-ES', { maximumFractionDigits: 3 });
+  }
+
+  function formatSignedQuantity(value: string): string {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed) || parsed === 0) return formatQuantity(value);
+    return `${parsed > 0 ? '+' : ''}${formatQuantity(value)}`;
+  }
+
+  function stockKindLabel(kind: StockMovementKind): string {
+    switch (kind) {
+      case 'initial':
+        return 'Stock inicial';
+      case 'purchase':
+        return 'Entrada';
+      case 'sale':
+        return 'Venta';
+      case 'return':
+        return 'Devolución';
+      case 'adjustment_in':
+        return 'Ajuste positivo';
+      case 'adjustment_out':
+        return 'Ajuste negativo';
+      default:
+        return kind;
+    }
+  }
+
+  async function selectStockLevel(level: StockLevel) {
+    stockSelectedProductId = level.product_id;
+    stockMinQuantity = level.min_quantity;
+    stockReason = '';
+    stockCountedQuantity = level.quantity;
+    stockCountReason = '';
+    await loadStockMovements(level.product_id);
+  }
+
+  async function loadStockMovements(productId: string) {
+    stockLoading = true;
+    catalogError = '';
+    try {
+      stockMovements = await api.listStockMovements(productId);
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockLoading = false;
+    }
+  }
+
+  async function refreshStockLevels(preferredProductId = stockSelectedProductId) {
+    const levels = await api.listStockLevels();
+    stockLevels = levels;
+    lowStockAlertCount = levels.filter((level) => isStockLow(level)).length;
+    const preferred =
+      levels.find((level) => level.product_id === preferredProductId) ?? levels[0];
+    if (!preferred) {
+      stockSelectedProductId = null;
+      stockMovements = [];
+      stockMinQuantity = '0';
+      stockCountedQuantity = '';
+      stockCountReason = '';
+      return;
+    }
+    stockSelectedProductId = preferred.product_id;
+    stockMinQuantity = preferred.min_quantity;
+    stockCountedQuantity = preferred.quantity;
+    stockCountReason = '';
+    await loadStockMovements(preferred.product_id);
+  }
+
+  async function saveStockCount() {
+    if (stockCountBusy || !stockSelectedProductId) return;
+    stockCountBusy = true;
+    catalogError = '';
+    try {
+      const result = await api.setStockCount({
+        product_id: stockSelectedProductId,
+        counted_quantity: stockCountedQuantity.trim(),
+        reason: stockCountReason.trim()
+      });
+      message = Number.parseFloat(result.difference) === 0
+        ? `Conteo sin diferencias: ${formatQuantity(result.level.quantity)} uds`
+        : `Conteo físico ajustado: ${formatSignedQuantity(result.difference)} · existencias ${formatQuantity(result.level.quantity)}`;
+      await refreshStockLevels(stockSelectedProductId);
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockCountBusy = false;
+    }
+  }
+
+  async function recordStockMovement() {
+    if (stockBusy || !stockSelectedProductId) return;
+    stockBusy = true;
+    catalogError = '';
+    try {
+      const movement = await api.recordStockMovement({
+        product_id: stockSelectedProductId,
+        kind: stockMovementKind,
+        quantity: stockQuantity.trim(),
+        reason: stockReason.trim() || null
+      });
+      message = `Movimiento de stock: ${stockKindLabel(movement.kind)} ${formatQuantity(movement.quantity)}`;
+      stockQuantity = '1';
+      stockReason = '';
+      await refreshStockLevels(stockSelectedProductId);
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockBusy = false;
+    }
+  }
+
+  async function saveStockMinimum() {
+    if (stockBusy || !stockSelectedProductId) return;
+    stockBusy = true;
+    catalogError = '';
+    try {
+      const level = await api.setStockMinimum({
+        product_id: stockSelectedProductId,
+        min_quantity: stockMinQuantity.trim() || '0'
+      });
+      stockLevels = stockLevels.map((item) =>
+        item.product_id === level.product_id ? level : item
+      );
+      stockMinQuantity = level.min_quantity;
+      lowStockAlertCount = stockLevels.filter((item) => isStockLow(item)).length;
+      message = `Mínimo de stock actualizado: ${formatQuantity(level.min_quantity)}`;
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockBusy = false;
+    }
+  }
+
+  async function exportStockCsv() {
+    if (stockExporting) return;
+    stockExporting = true;
+    catalogError = '';
+    try {
+      const path = await api.exportStockCsv();
+      if (path) {
+        message = `Stock exportado · ${path}`;
+      }
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockExporting = false;
+    }
+  }
+
+  async function exportStockMovements() {
+    if (stockMovementsExporting || !stockSelectedProductId) return;
+    stockMovementsExporting = true;
+    catalogError = '';
+    try {
+      const path = await api.exportStockMovementsCsv(stockSelectedProductId);
+      if (path) {
+        message = `Historial exportado · ${path}`;
+      }
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockMovementsExporting = false;
+    }
+  }
 
   function resetFamilyForm() {
     editingFamilyId = null;
@@ -1354,10 +1636,24 @@
   async function search() {
     if (!query.trim()) {
       results = [];
+      resultStock = {};
       return;
     }
     try {
-      results = await api.searchProducts(query.trim());
+      const found = await api.searchProducts(query.trim());
+      if (found.length === 0) {
+        results = [];
+        resultStock = {};
+        return;
+      }
+      let levels: StockLevel[] = [];
+      try {
+        levels = await api.listStockLevelsForProducts(found.map((result) => result.id));
+      } catch (error) {
+        message = String(error);
+      }
+      results = found;
+      resultStock = Object.fromEntries(levels.map((level) => [level.product_id, level]));
     } catch (error) {
       message = String(error);
     }
@@ -1373,6 +1669,7 @@
       sale = await api.addLine(sale.sale.id, sku, '1', 'sale');
       query = '';
       results = [];
+      resultStock = {};
       message = `Línea añadida · ${formatMoney(sale.totals.gross)}`;
     } catch (error) {
       message = String(error);
@@ -1435,6 +1732,7 @@
       message = `Ticket ${sale.sale.ticket_number ?? ''} confirmado e impreso.`;
       await refreshSales();
       await refreshSync();
+      await refreshLowStockAlert();
     } catch (error) {
       message = String(error);
     } finally {
@@ -1548,6 +1846,7 @@
       refundInvoice = null;
       await refreshSales();
       await refreshSync();
+      await refreshLowStockAlert();
     } catch (error) {
       message = String(error);
     } finally {
@@ -1723,6 +2022,12 @@
       </button>
       <button class="icon" type="button" onclick={() => void openHistory()}>Consultas</button>
       {#if session.user.role === 'admin' || session.user.role === 'manager'}
+        {#if lowStockAlertCount > 0}
+          <button class="icon notes-button" type="button" onclick={() => void openLowStock()}>
+            Stock bajo
+            <span class="note-badge">{lowStockAlertCount}</span>
+          </button>
+        {/if}
         <button class="icon" type="button" onclick={() => void openCatalog()}>Catálogo</button>
         <button class="icon" type="button" onclick={() => void openCustomers()}>Clientes</button>
         <button
@@ -1808,8 +2113,20 @@
       {#if results.length > 0}
         <div class="results">
           {#each results as result (result.sku)}
+            {@const stock = resultStock[result.id]}
             <button class="result" type="button" onclick={() => void addProduct(result.sku)}>
               <span><strong>{result.sku}</strong> · {result.name}</span>
+              {#if stock}
+                <span
+                  class="badge"
+                  class:warn={isStockLow(stock)}
+                  class:inactive={Number(stock.quantity) <= 0}
+                >
+                  {formatQuantity(stock.quantity)} uds
+                </span>
+              {:else}
+                <span class="badge">—</span>
+              {/if}
               <span>{formatMoney(result.price_cents)}</span>
             </button>
           {/each}
@@ -2715,6 +3032,15 @@
           <button
             type="button"
             role="tab"
+            class:active={catalogSection === 'stock'}
+            aria-selected={catalogSection === 'stock'}
+            onclick={() => (catalogSection = 'stock')}
+          >
+            Stock
+          </button>
+          <button
+            type="button"
+            role="tab"
             class:active={catalogSection === 'families'}
             aria-selected={catalogSection === 'families'}
             onclick={() => (catalogSection = 'families')}
@@ -2971,6 +3297,281 @@
             </div>
           {/if}
         </div>
+        {/if}
+
+        {#if catalogSection === 'stock'}
+          <div class="stock-summary">
+            <button
+              class="stock-summary-card all"
+              class:active={stockStatusFilter === 'all'}
+              type="button"
+              aria-pressed={stockStatusFilter === 'all'}
+              onclick={() => (stockStatusFilter = 'all')}
+            >
+              <span class="muted small">Artículos</span>
+              <strong>{stockLevels.length}</strong>
+            </button>
+            <button
+              class="stock-summary-card low"
+              class:active={stockStatusFilter === 'low'}
+              type="button"
+              aria-pressed={stockStatusFilter === 'low'}
+              onclick={() => (stockStatusFilter = 'low')}
+            >
+              <span class="muted small">Bajo mínimo</span>
+              <strong>{lowStockCount}</strong>
+            </button>
+            <button
+              class="stock-summary-card out"
+              class:active={stockStatusFilter === 'out'}
+              type="button"
+              aria-pressed={stockStatusFilter === 'out'}
+              onclick={() => (stockStatusFilter = 'out')}
+            >
+              <span class="muted small">Sin stock</span>
+              <strong>{stockOutCount}</strong>
+            </button>
+            <div class="stock-summary-card units">
+              <span class="muted small">Unidades</span>
+              <strong>{formatQuantity(stockTotalUnits)}</strong>
+            </div>
+          </div>
+
+          <div class="stock-layout">
+            <div class="stock-levels-panel">
+              <div class="catalog-toolbar">
+                <input
+                  class="catalog-filter"
+                  placeholder="Buscar stock"
+                  bind:value={stockFilter}
+                  aria-label="Buscar stock"
+                />
+                {#if session?.user.role === 'admin' || session?.user.role === 'manager'}
+                  <button
+                    class="secondary stock-export"
+                    type="button"
+                    disabled={stockExporting}
+                    onclick={() => void exportStockCsv()}
+                  >
+                    {stockExporting ? 'Exportando…' : 'Exportar CSV'}
+                  </button>
+                {/if}
+              </div>
+              <div class="stock-level-list">
+                {#each filteredStock as level (level.product_id)}
+                  <button
+                    type="button"
+                    class="stock-level-row"
+                    class:selected={level.product_id === stockSelectedProductId}
+                    onclick={() => void selectStockLevel(level)}
+                  >
+                    <span class="stock-level-main">
+                      <strong>{level.name}</strong>
+                      <span class="muted small mono">
+                        {level.sku} · mínimo {formatQuantity(level.min_quantity)}
+                      </span>
+                    </span>
+                    <span class="stock-level-side">
+                      <strong class:negative={Number.parseFloat(level.quantity) < 0}>
+                        {formatQuantity(level.quantity)}
+                      </strong>
+                      {#if isStockLow(level)}
+                        <span class="badge warn">BAJO</span>
+                      {:else if Number.parseFloat(level.quantity) <= 0}
+                        <span class="badge inactive">SIN STOCK</span>
+                      {:else if Number.parseFloat(level.min_quantity) <= 0}
+                        <span class="badge">SIN UMBRAL</span>
+                      {:else}
+                        <span class="badge ok">OK</span>
+                      {/if}
+                    </span>
+                  </button>
+                {:else}
+                  <p class="muted small">
+                    {#if stockStatusFilter === 'low'}
+                      No hay artículos por debajo de su mínimo.
+                    {:else if stockStatusFilter === 'out'}
+                      No hay artículos sin existencias.
+                    {:else}
+                      No hay artículos que coincidan.
+                    {/if}
+                  </p>
+                {/each}
+              </div>
+            </div>
+
+            <div class="stock-detail-panel">
+              {#if selectedStockLevel}
+                <div class="stock-detail-heading">
+                  <div>
+                    <p class="eyebrow">EXISTENCIAS</p>
+                    <h3>{selectedStockLevel.name}</h3>
+                    <span class="muted small mono">{selectedStockLevel.sku}</span>
+                  </div>
+                  <div class="stock-current">
+                    <strong class:negative={Number.parseFloat(selectedStockLevel.quantity) < 0}>
+                      {formatQuantity(selectedStockLevel.quantity)}
+                    </strong>
+                    <span class="muted small">unidades</span>
+                  </div>
+                </div>
+
+                {#if session?.user.role === 'admin' || session?.user.role === 'manager'}
+                  <form
+                    class="stock-form"
+                    onsubmit={(event) => {
+                      event.preventDefault();
+                      void recordStockMovement();
+                    }}
+                  >
+                    <label class="field">
+                      <span>Tipo de movimiento</span>
+                      <select bind:value={stockMovementKind} aria-label="Tipo de movimiento">
+                        <option value="purchase">Entrada</option>
+                        <option value="initial">Stock inicial</option>
+                        <option value="adjustment_in">Ajuste positivo</option>
+                        <option value="adjustment_out">Ajuste negativo</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>Cantidad</span>
+                      <input bind:value={stockQuantity} inputmode="decimal" aria-label="Cantidad" />
+                    </label>
+                    <label class="field">
+                      <span>Motivo</span>
+                      <input
+                        bind:value={stockReason}
+                        aria-label="Motivo"
+                        placeholder="Compra, recuento, merma…"
+                      />
+                    </label>
+                    <div class="product-actions">
+                      <button class="primary" type="submit" disabled={stockBusy}>
+                        {stockBusy ? 'Guardando…' : 'Registrar movimiento'}
+                      </button>
+                    </div>
+                  </form>
+
+                  <form
+                    class="stock-min-form"
+                    onsubmit={(event) => {
+                      event.preventDefault();
+                      void saveStockMinimum();
+                    }}
+                  >
+                    <label class="field">
+                      <span>Mínimo de stock</span>
+                      <input
+                        bind:value={stockMinQuantity}
+                        inputmode="decimal"
+                        aria-label="Mínimo de stock"
+                      />
+                    </label>
+                    <button class="secondary" type="submit" disabled={stockBusy}>
+                      Guardar mínimo
+                    </button>
+                  </form>
+
+                  <p class="eyebrow stock-count-title">CONTEO FÍSICO</p>
+                  <form
+                    class="stock-count-form"
+                    onsubmit={(event) => {
+                      event.preventDefault();
+                      void saveStockCount();
+                    }}
+                  >
+                    <label class="field">
+                      <span>Cantidad contada</span>
+                      <input
+                        bind:value={stockCountedQuantity}
+                        inputmode="decimal"
+                        aria-label="Conteo físico"
+                        required
+                      />
+                    </label>
+                    <label class="field">
+                      <span>Motivo del conteo</span>
+                      <input
+                        bind:value={stockCountReason}
+                        aria-label="Motivo del conteo"
+                        placeholder="Recuento periódico, merma…"
+                        required
+                      />
+                    </label>
+                    <button
+                      class="secondary"
+                      type="submit"
+                      disabled={stockCountBusy ||
+                        stockCountDifference === null ||
+                        !stockCountReason.trim()}
+                    >
+                      {stockCountBusy ? 'Ajustando…' : 'Ajustar a conteo'}
+                    </button>
+                  </form>
+                  {#if stockCountDifference !== null}
+                    <p class="muted small stock-count-preview">
+                      {#if Number.parseFloat(stockCountDifference) === 0}
+                        Sin diferencias respecto a las existencias actuales.
+                      {:else}
+                        Ajuste previsto:
+                        <strong class:negative={Number.parseFloat(stockCountDifference) < 0}>
+                          {formatSignedQuantity(stockCountDifference)}
+                        </strong>
+                        uds
+                      {/if}
+                    </p>
+                  {/if}
+                {:else}
+                  <p class="muted small">
+                    Solo un responsable puede registrar entradas o cambios de existencias.
+                  </p>
+                {/if}
+
+                <div class="stock-movements">
+                  <div class="stock-movements-heading">
+                    <p class="eyebrow">ÚLTIMOS MOVIMIENTOS</p>
+                    {#if session?.user.role === 'admin' || session?.user.role === 'manager'}
+                      <button
+                        class="secondary stock-history-export"
+                        type="button"
+                        disabled={stockMovementsExporting}
+                        onclick={() => void exportStockMovements()}
+                      >
+                        {stockMovementsExporting ? 'Exportando…' : 'Exportar historial'}
+                      </button>
+                    {/if}
+                  </div>
+                  {#if stockLoading}
+                    <p class="muted small">Cargando movimientos…</p>
+                  {:else if stockMovements.length === 0}
+                    <p class="muted small">Todavía no hay movimientos para este artículo.</p>
+                  {:else}
+                    {#each stockMovements as movement (movement.id)}
+                      <div class="stock-movement-row">
+                        <span>
+                          <strong>{stockKindLabel(movement.kind)}</strong>
+                          <span class="muted small">
+                            {formatDateTime(movement.occurred_at)}
+                            {movement.reason ? ` · ${movement.reason}` : ''}
+                          </span>
+                        </span>
+                        <strong
+                          class:negative={movement.kind === 'sale' ||
+                            movement.kind === 'adjustment_out'}
+                        >
+                          {movement.kind === 'sale' || movement.kind === 'adjustment_out'
+                            ? '−'
+                            : '+'}{formatQuantity(movement.quantity)}
+                        </strong>
+                      </div>
+                    {/each}
+                  {/if}
+                </div>
+              {:else}
+                <p class="muted small">Selecciona un artículo para ver sus existencias.</p>
+              {/if}
+            </div>
+          </div>
         {/if}
 
         {#if catalogSection === 'families'}
@@ -3633,6 +4234,7 @@
 
   .result {
     display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: 16px;
     text-align: left;
@@ -3641,6 +4243,15 @@
     color: var(--text);
     border-radius: 10px;
     padding: 10px 12px;
+  }
+
+  .result > span:first-child {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .result .badge {
+    white-space: nowrap;
   }
 
   .lines {
@@ -4496,6 +5107,63 @@
     flex: 1;
   }
 
+  .stock-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+
+  .stock-summary-card {
+    display: grid;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    color: inherit;
+    text-align: left;
+  }
+
+  button.stock-summary-card {
+    cursor: pointer;
+  }
+
+  button.stock-summary-card:hover,
+  .stock-summary-card.active {
+    border-color: var(--accent);
+    background: var(--panel-2);
+  }
+
+  .stock-summary-card.active {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  .stock-summary-card strong {
+    font-size: 1.35rem;
+  }
+
+  .stock-summary-card.low strong {
+    color: var(--warning);
+  }
+
+  .stock-summary-card.out strong {
+    color: var(--danger-text);
+  }
+
+  .stock-levels-panel .catalog-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .stock-levels-panel .catalog-filter {
+    flex: 1 1 100%;
+  }
+
+  .stock-export {
+    margin-left: auto;
+    white-space: nowrap;
+  }
+
   .price-list-item-form {
     display: grid;
     grid-template-columns: minmax(200px, 1fr) 120px auto;
@@ -4506,6 +5174,177 @@
 
   .price-list-item-form .field {
     margin: 0;
+  }
+
+  .stock-layout {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.15fr);
+    gap: 18px;
+  }
+
+  .stock-levels-panel,
+  .stock-detail-panel {
+    min-width: 0;
+  }
+
+  .stock-level-list {
+    display: grid;
+    gap: 6px;
+    max-height: 390px;
+    overflow: auto;
+  }
+
+  .stock-level-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 9px 11px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    cursor: pointer;
+  }
+
+  .stock-level-row.selected {
+    border-color: var(--accent);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .stock-level-main,
+  .stock-level-side {
+    display: grid;
+    gap: 2px;
+  }
+
+  .stock-level-side {
+    justify-items: end;
+    white-space: nowrap;
+  }
+
+  .stock-detail-panel {
+    padding-left: 18px;
+    border-left: 1px solid var(--line);
+  }
+
+  .stock-detail-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  .stock-detail-heading h3 {
+    margin: 2px 0;
+  }
+
+  .stock-current {
+    display: grid;
+    justify-items: end;
+  }
+
+  .stock-current strong {
+    font-size: 1.7rem;
+  }
+
+  .stock-form {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.9fr) 90px minmax(140px, 1.4fr) auto;
+    gap: 8px;
+    align-items: end;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .stock-form .field {
+    margin: 0;
+    min-width: 0;
+  }
+
+  .stock-form .product-actions {
+    grid-column: auto;
+  }
+
+  .stock-min-form {
+    display: flex;
+    align-items: end;
+    gap: 8px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .stock-min-form .field {
+    margin: 0;
+    width: 140px;
+  }
+
+  .stock-count-title {
+    margin: 14px 0 6px;
+  }
+
+  .stock-count-form {
+    display: grid;
+    grid-template-columns: 120px minmax(160px, 1fr) auto;
+    gap: 8px;
+    align-items: end;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel-2);
+  }
+
+  .stock-count-form .field {
+    margin: 0;
+    min-width: 0;
+  }
+
+  .stock-count-preview {
+    margin: 6px 0 12px;
+  }
+
+  .stock-count-preview .negative {
+    color: var(--danger-text);
+  }
+
+  .stock-movements {
+    margin-top: 12px;
+  }
+
+  .stock-movements-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .stock-history-export {
+    padding: 4px 10px;
+    font-size: 0.78rem;
+  }
+
+  .stock-movement-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .stock-movement-row > span {
+    display: grid;
+    gap: 2px;
+  }
+
+  .stock-level-row .negative,
+  .stock-current .negative,
+  .stock-movement-row .negative {
+    color: var(--danger-text);
   }
 
   .product-list {
@@ -4714,6 +5553,17 @@
     .totals {
       min-width: 0;
     }
+
+    .stock-layout {
+      grid-template-columns: 1fr;
+    }
+
+    .stock-detail-panel {
+      padding-top: 14px;
+      padding-left: 0;
+      border-top: 1px solid var(--line);
+      border-left: 0;
+    }
   }
 
   @media (max-width: 760px) {
@@ -4725,11 +5575,13 @@
     .user-create,
     .customer-form,
     .product-form,
+    .stock-form,
     .user-fields {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .product-actions {
+    .product-actions,
+    .stock-form .product-actions {
       grid-column: 1 / -1;
     }
 
@@ -4790,6 +5642,8 @@
     .user-create,
     .customer-form,
     .product-form,
+    .stock-form,
+    .stock-count-form,
     .user-fields {
       grid-template-columns: 1fr;
     }

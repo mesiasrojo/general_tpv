@@ -10,9 +10,11 @@ pub mod error;
 pub mod import;
 pub mod ports;
 pub mod services;
+pub mod stock_export;
 
 pub use dto::*;
 pub use error::{ApplicationError, Result};
 pub use import::*;
 pub use ports::*;
 pub use services::*;
+pub use stock_export::*;

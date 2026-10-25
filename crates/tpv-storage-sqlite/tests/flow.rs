@@ -5,21 +5,25 @@ use sqlx::Row;
 use time::{Duration, OffsetDateTime};
 use tpv_application::{
     AddLineRequest, ApplyPaymentRequest, AuditRepository, AuthService, CashRepository, CashService,
-    CloseCashRequest, ConfirmSaleRequest, CreateUserRequest, InvoiceLineSelection,
-    InvoiceRepository, InvoiceService, MasterDataService, OpenCashRequest, PriceListItemRequest,
-    PriceListService, PrintQueueRepository, PrintService, RectifyInvoiceLinesRequest,
-    ResetPasswordRequest, SaleQuery, SaleRepository, SaleService, SequenceRepository,
-    StartSaleRequest, SyncContext, SyncOutboxRepository, SyncService, UpdateUserRequest,
-    UpsertPriceListRequest, UserRepository,
+    CatalogRepository, CloseCashRequest, ConfirmSaleRequest, CreateUserRequest,
+    InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataService, OpenCashRequest,
+    PriceListItemRequest, PriceListService, PrintQueueRepository, PrintService,
+    RecordStockMovementRequest, RectifyInvoiceLinesRequest, ResetPasswordRequest, SaleQuery,
+    SaleRepository, SaleService, SequenceRepository, SetStockCountRequest, SetStockMinimumRequest,
+    StartSaleRequest, StockRepository, StockService, SyncContext, SyncOutboxRepository,
+    SyncService, UpdateUserRequest, UpsertPriceListRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
+use tpv_domain::audit::{AuditAction, AuditEvent};
 use tpv_domain::cash::CashCount;
 use tpv_domain::document::DocumentType;
-use tpv_domain::ids::{DeviceId, TenantId};
+use tpv_domain::ids::{DeviceId, StoreId, TenantId};
 use tpv_domain::invoice::InvoiceKind;
 use tpv_domain::money::Money;
-use tpv_domain::people::Role;
+use tpv_domain::people::{Role, Store};
 use tpv_domain::sale::{PaymentMethod, Sale, SaleState};
+use tpv_domain::stock::StockMovementKind;
+use tpv_domain::sync::SyncEvent;
 use tpv_print::{EscPosRenderer, FilePrinter};
 use tpv_storage_sqlite::SqliteStore;
 
@@ -417,6 +421,74 @@ async fn issues_invoice_and_rejects_second_invoice() {
         InvoiceKind::Standard => panic!("expected a rectificative invoice"),
     }
     partial.validate_totals().unwrap();
+
+    let sku = tpv_domain::Sku::new("2").unwrap();
+    let catalog: Arc<dyn CatalogRepository> = services.store.clone();
+    let product = catalog.find_product_by_sku(&sku).await.unwrap().unwrap();
+    let levels = StockRepository::list_levels(services.store.as_ref(), services.demo.store_id)
+        .await
+        .unwrap();
+    let level = levels
+        .into_iter()
+        .find(|level| level.product_id == product.id)
+        .unwrap();
+    assert_eq!(level.quantity, Decimal::new(-5, 1));
+    let movements = StockRepository::list_movements(
+        services.store.as_ref(),
+        services.demo.store_id,
+        product.id,
+        20,
+    )
+    .await
+    .unwrap();
+    let returned = movements
+        .iter()
+        .find(|movement| movement.kind == StockMovementKind::Return)
+        .expect("partial return must replenish stock");
+    assert_eq!(returned.quantity.as_decimal(), Decimal::new(5, 1));
+    assert_eq!(returned.sale_id, Some(sale.id));
+    assert!(returned.sale_line_id.is_none());
+
+    let second_partial = services
+        .invoices
+        .rectify_invoice_lines(RectifyInvoiceLinesRequest {
+            invoice_id: invoice.id,
+            series: "REC".into(),
+            year: 2026,
+            reason: "Segunda devolución parcial".into(),
+            refund_reference: Some("AUTH-124".into()),
+            lines: vec![InvoiceLineSelection {
+                source_line_id: invoice.lines[0].source_line_id,
+                quantity: "0.5".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(second_partial.full_number(), "REC-000002");
+    let levels = StockRepository::list_levels(services.store.as_ref(), services.demo.store_id)
+        .await
+        .unwrap();
+    let level = levels
+        .into_iter()
+        .find(|level| level.product_id == product.id)
+        .unwrap();
+    assert_eq!(level.quantity, Decimal::ZERO);
+    let movements = StockRepository::list_movements(
+        services.store.as_ref(),
+        services.demo.store_id,
+        product.id,
+        20,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        movements
+            .iter()
+            .filter(|movement| movement.kind == StockMovementKind::Return)
+            .count(),
+        2
+    );
+
     assert!(
         services
             .invoices
@@ -1080,6 +1152,350 @@ async fn sale_lines_use_the_price_list_override() {
             customer_id: Some(services.demo.customer_id),
             price_list_id: Some(inactive.price_list.id),
         })
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
+}
+
+#[tokio::test]
+async fn stock_tracks_manual_movements_and_sale_confirmation() {
+    let services = services().await;
+    let catalog: Arc<dyn tpv_application::CatalogRepository> = services.store.clone();
+    let stock_repo: Arc<dyn StockRepository> = services.store.clone();
+    let stock = StockService::new(
+        stock_repo,
+        catalog.clone(),
+        Arc::new(tpv_application::SystemClock),
+    );
+    let other_store = Store::new(StoreId::new(), "ST2", "Tienda secundaria", "B12345674").unwrap();
+    catalog.save_store(&other_store).await.unwrap();
+    let sku = tpv_domain::Sku::new("1").unwrap();
+    let product = catalog.find_product_by_sku(&sku).await.unwrap().unwrap();
+
+    let initial = stock
+        .list_levels(services.demo.store_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|level| level.product_id == product.id)
+        .expect("every product has a stock level");
+    assert_eq!(initial.quantity, Decimal::ZERO);
+    let other_initial = stock
+        .get_level(other_store.id, product.id)
+        .await
+        .unwrap()
+        .expect("every store has an independent stock level");
+    assert_eq!(other_initial.quantity, Decimal::ZERO);
+    assert_eq!(other_initial.min_quantity, Decimal::ZERO);
+    assert_eq!(
+        stock.count_low_stock(services.demo.store_id).await.unwrap(),
+        0
+    );
+    assert_eq!(stock.count_low_stock(other_store.id).await.unwrap(), 0);
+
+    stock
+        .record_movement(
+            services.demo.store_id,
+            None,
+            RecordStockMovementRequest {
+                product_id: product.id,
+                kind: StockMovementKind::Purchase,
+                quantity: "5".into(),
+                reason: Some("Reposición inicial".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let sale = confirmed_sale(&services, "1", "2").await;
+    let after_sale = stock
+        .get_level(services.demo.store_id, product.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_sale.quantity, Decimal::new(3, 0));
+    let visible = stock
+        .levels_for_products(services.demo.store_id, &[product.id])
+        .await
+        .unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].quantity, Decimal::new(3, 0));
+    assert!(
+        stock
+            .levels_for_products(services.demo.store_id, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let other_visible = stock
+        .levels_for_products(other_store.id, &[product.id])
+        .await
+        .unwrap();
+    assert_eq!(other_visible.len(), 1);
+    assert_eq!(other_visible[0].quantity, Decimal::ZERO);
+    let other_after_sale = stock
+        .get_level(other_store.id, product.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(other_after_sale.quantity, Decimal::ZERO);
+
+    let movements = stock
+        .list_movements(services.demo.store_id, product.id, 20)
+        .await
+        .unwrap();
+    assert_eq!(movements.len(), 2);
+    assert_eq!(movements[0].kind, StockMovementKind::Sale);
+    assert_eq!(movements[0].quantity.as_decimal(), Decimal::new(2, 0));
+    assert_eq!(movements[0].sale_id, Some(sale.id));
+    assert!(movements[0].sale_line_id.is_some());
+    assert_eq!(
+        stock
+            .list_movements_for_export(services.demo.store_id, product.id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Replaying the same confirmation must not discount stock twice.
+    let replay_event = SyncEvent::new(
+        TenantId::new(),
+        services.demo.store_id,
+        DeviceId::new(),
+        99,
+        "sale",
+        sale.id.as_uuid(),
+        "sale.confirmed",
+        1,
+        sale.closed_at.unwrap(),
+        serde_json::to_value(&sale).unwrap(),
+    )
+    .unwrap();
+    let replay_audit = AuditEvent::new(
+        sale.closed_at.unwrap(),
+        None,
+        Some(services.demo.store_id),
+        AuditAction::SaleConfirmed,
+        "sale",
+        sale.id.to_string(),
+        serde_json::json!({ "replay": true }),
+    )
+    .unwrap();
+    services
+        .store
+        .confirm_sale(&sale, &replay_event, &replay_audit)
+        .await
+        .unwrap();
+    let after_replay = stock
+        .get_level(services.demo.store_id, product.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_replay.quantity, Decimal::new(3, 0));
+    assert_eq!(
+        stock
+            .list_movements(services.demo.store_id, product.id, 20)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let audits = services
+        .audit
+        .list_recent(Some(services.demo.store_id), 30)
+        .await
+        .unwrap();
+    assert!(
+        audits
+            .iter()
+            .any(|event| matches!(event.action, AuditAction::StockMovement))
+    );
+
+    // Draft sales never touch stock.
+    let mut draft = services
+        .sales
+        .start_sale(StartSaleRequest {
+            store_id: services.demo.store_id,
+            register_id: services.demo.register_id,
+            seller_id: services.demo.seller_id,
+            customer_id: Some(services.demo.customer_id),
+            price_list_id: None,
+        })
+        .await
+        .unwrap();
+    draft = services
+        .sales
+        .add_line(AddLineRequest {
+            sale_id: draft.id,
+            sku: "1".into(),
+            quantity: "1".into(),
+            kind: "sale".into(),
+            discount_bp: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(draft.state, SaleState::Priced);
+    let after_draft = stock
+        .get_level(services.demo.store_id, product.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_draft.quantity, Decimal::new(3, 0));
+
+    let low = stock
+        .set_minimum(
+            services.demo.store_id,
+            None,
+            SetStockMinimumRequest {
+                product_id: product.id,
+                min_quantity: "4".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(low.is_low());
+    assert_eq!(
+        stock.count_low_stock(services.demo.store_id).await.unwrap(),
+        1
+    );
+    assert_eq!(stock.count_low_stock(other_store.id).await.unwrap(), 0);
+    let other_after_minimum = stock
+        .get_level(other_store.id, product.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(other_after_minimum.min_quantity, Decimal::ZERO);
+    assert_eq!(other_after_minimum.quantity, Decimal::ZERO);
+    assert!(
+        stock
+            .list_movements(other_store.id, product.id, 20)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let audits = services
+        .audit
+        .list_recent(Some(services.demo.store_id), 30)
+        .await
+        .unwrap();
+    assert!(
+        audits
+            .iter()
+            .any(|event| matches!(event.action, AuditAction::StockMinimumChanged))
+    );
+
+    let counted = stock
+        .set_count(
+            services.demo.store_id,
+            None,
+            SetStockCountRequest {
+                product_id: product.id,
+                counted_quantity: "1,5".into(),
+                reason: "Conteo físico".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(counted.previous_quantity, Decimal::new(3, 0));
+    assert_eq!(counted.counted_quantity, Decimal::new(15, 1));
+    assert_eq!(counted.difference, Decimal::new(-15, 1));
+    assert_eq!(counted.level.quantity, Decimal::new(15, 1));
+    let count_movement = counted.movement.expect("count must create an adjustment");
+    assert_eq!(count_movement.kind, StockMovementKind::AdjustmentOut);
+    assert_eq!(count_movement.quantity.as_decimal(), Decimal::new(15, 1));
+    assert_eq!(count_movement.reason.as_deref(), Some("Conteo físico"));
+    assert_eq!(
+        stock
+            .list_movements(services.demo.store_id, product.id, 20)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // Repeating the same count is auditable but does not create a zero move.
+    let unchanged = stock
+        .set_count(
+            services.demo.store_id,
+            None,
+            SetStockCountRequest {
+                product_id: product.id,
+                counted_quantity: "1.5".into(),
+                reason: "Segundo conteo sin diferencias".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(unchanged.difference.is_zero());
+    assert!(unchanged.movement.is_none());
+    assert_eq!(unchanged.level.quantity, Decimal::new(15, 1));
+    assert_eq!(
+        stock
+            .list_movements(services.demo.store_id, product.id, 20)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    let audits = services
+        .audit
+        .list_recent(Some(services.demo.store_id), 40)
+        .await
+        .unwrap();
+    assert!(
+        audits
+            .iter()
+            .filter(|event| matches!(event.action, AuditAction::StockCount))
+            .count()
+            >= 2
+    );
+
+    let negative_count = stock
+        .set_count(
+            services.demo.store_id,
+            None,
+            SetStockCountRequest {
+                product_id: product.id,
+                counted_quantity: "-1".into(),
+                reason: "Conteo inválido".into(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        negative_count,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
+    let missing_reason = stock
+        .set_count(
+            services.demo.store_id,
+            None,
+            SetStockCountRequest {
+                product_id: product.id,
+                counted_quantity: "2".into(),
+                reason: "   ".into(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        missing_reason,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
+
+    let rejected = stock
+        .record_movement(
+            services.demo.store_id,
+            None,
+            RecordStockMovementRequest {
+                product_id: product.id,
+                kind: StockMovementKind::Sale,
+                quantity: "1".into(),
+                reason: None,
+            },
+        )
         .await;
     assert!(matches!(
         rejected,

@@ -250,6 +250,14 @@ impl SqliteStore {
         row.as_ref().map(row_to_product).transpose()
     }
 
+    async fn get_product_by_id(&self, id: ProductId) -> StorageResult<Option<Product>> {
+        let row = sqlx::query("SELECT * FROM products WHERE id = ? AND active = 1")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_product).transpose()
+    }
+
     async fn search_product_rows(&self, query: &str, limit: u32) -> StorageResult<Vec<Product>> {
         let pattern = format!("%{}%", query.trim().to_lowercase());
         let rows = sqlx::query(
@@ -551,6 +559,10 @@ impl SqliteStore {
 impl CatalogRepository for SqliteStore {
     async fn find_product_by_sku(&self, sku: &Sku) -> AppResult<Option<Product>> {
         Ok(self.get_product_by_sku(sku).await?)
+    }
+
+    async fn find_product_by_id(&self, id: ProductId) -> AppResult<Option<Product>> {
+        Ok(self.get_product_by_id(id).await?)
     }
 
     async fn search_products(&self, query: &str, limit: u32) -> AppResult<Vec<Product>> {

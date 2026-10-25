@@ -1,4 +1,4 @@
-use sqlx::{Sqlite, Transaction};
+use sqlx::{QueryBuilder, Sqlite, Transaction};
 use tpv_domain::audit::AuditEvent;
 use tpv_domain::sale::Sale;
 use tpv_domain::sync::SyncEvent;
@@ -100,14 +100,20 @@ pub(crate) async fn persist_sale_tx(
     .execute(&mut **tx)
     .await?;
 
-    sqlx::query("DELETE FROM sale_lines WHERE sale_id = ?")
-        .bind(sale.id.to_string())
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("DELETE FROM payments WHERE sale_id = ?")
-        .bind(sale.id.to_string())
-        .execute(&mut **tx)
-        .await?;
+    // Upsert child rows instead of deleting and recreating them. Confirmed sale
+    // lines are referenced by the stock ledger, so a replay must preserve their
+    // identifiers. Rows removed from a draft are deleted separately below.
+    let mut stale_lines = QueryBuilder::new("DELETE FROM sale_lines WHERE sale_id = ");
+    stale_lines.push_bind(sale.id.to_string());
+    if !sale.lines.is_empty() {
+        stale_lines.push(" AND id NOT IN (");
+        let mut ids = stale_lines.separated(", ");
+        for line in &sale.lines {
+            ids.push_bind(line.id.to_string());
+        }
+        stale_lines.push(")");
+    }
+    stale_lines.build().execute(&mut **tx).await?;
 
     for (index, line) in sale.lines.iter().enumerate() {
         let kind = enum_to_text(&line.kind)?;
@@ -115,7 +121,19 @@ pub(crate) async fn persist_sale_tx(
             "INSERT INTO sale_lines
                 (id, sale_id, product_id, sku, description, unit_price, quantity,
                  discount_bp, tax_code, tax_percent_bp, kind, line_index)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                sale_id = excluded.sale_id,
+                product_id = excluded.product_id,
+                sku = excluded.sku,
+                description = excluded.description,
+                unit_price = excluded.unit_price,
+                quantity = excluded.quantity,
+                discount_bp = excluded.discount_bp,
+                tax_code = excluded.tax_code,
+                tax_percent_bp = excluded.tax_percent_bp,
+                kind = excluded.kind,
+                line_index = excluded.line_index",
         )
         .bind(line.id.to_string())
         .bind(sale.id.to_string())
@@ -133,12 +151,31 @@ pub(crate) async fn persist_sale_tx(
         .await?;
     }
 
+    let mut stale_payments = QueryBuilder::new("DELETE FROM payments WHERE sale_id = ");
+    stale_payments.push_bind(sale.id.to_string());
+    if !sale.payments.is_empty() {
+        stale_payments.push(" AND id NOT IN (");
+        let mut ids = stale_payments.separated(", ");
+        for payment in &sale.payments {
+            ids.push_bind(payment.id.to_string());
+        }
+        stale_payments.push(")");
+    }
+    stale_payments.build().execute(&mut **tx).await?;
+
     for (index, payment) in sale.payments.iter().enumerate() {
         let method = enum_to_text(&payment.method)?;
         sqlx::query(
             "INSERT INTO payments
                 (id, sale_id, method, amount_cents, received_cents, reference, payment_index)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                sale_id = excluded.sale_id,
+                method = excluded.method,
+                amount_cents = excluded.amount_cents,
+                received_cents = excluded.received_cents,
+                reference = excluded.reference,
+                payment_index = excluded.payment_index",
         )
         .bind(payment.id.to_string())
         .bind(sale.id.to_string())

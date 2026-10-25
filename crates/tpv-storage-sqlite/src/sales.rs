@@ -25,6 +25,7 @@ use crate::helpers::{
     parse_time, parse_uuid,
 };
 use crate::persistence::{enqueue_event_tx, insert_audit_tx, persist_sale_tx};
+use crate::stock::{record_invoice_return_stock_tx, record_sale_stock_tx};
 use crate::store::SqliteStore;
 
 /// Filtros compartidos por el resumen y la página de la consulta de ventas.
@@ -279,6 +280,8 @@ impl SqliteStore {
         let mut tx = self.pool().begin().await?;
         persist_sale_tx(&mut tx, sale).await?;
         if let Some(event) = event {
+            // Confirmation saves the sale and discounts its stock atomically.
+            record_sale_stock_tx(&mut tx, sale).await?;
             enqueue_event_tx(&mut tx, event).await?;
         }
         if let Some(audit) = audit {
@@ -373,6 +376,7 @@ impl SqliteStore {
             .execute(&mut *tx)
             .await?;
         }
+        record_invoice_return_stock_tx(&mut tx, invoice).await?;
         if let Some(sale) = sale {
             sqlx::query("UPDATE sales SET invoice_id = ? WHERE id = ?")
                 .bind(invoice.id.to_string())

@@ -18,6 +18,7 @@ pub mod notes;
 pub mod people;
 pub mod pricing;
 pub mod sale;
+pub mod stock;
 pub mod sync;
 pub mod tax;
 pub mod timeclock;

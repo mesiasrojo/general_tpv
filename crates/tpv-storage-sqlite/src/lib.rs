@@ -18,6 +18,7 @@ mod price_lists;
 mod prints;
 mod sales;
 mod seed;
+mod stock;
 mod store;
 mod sync_outbox;
 mod time_clock;

@@ -1,15 +1,17 @@
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tpv_domain::Money;
 use tpv_domain::cash::{CashCount, CashMovementKind};
 use tpv_domain::ids::{
     CustomerId, FamilyId, PriceListId, ProductId, RegisterId, SaleId, SaleLineId, SellerId,
-    StoreId, TaxId, UserId,
+    StockMovementId, StoreId, TaxId, UserId,
 };
 use tpv_domain::master_data::MasterDataKind;
 use tpv_domain::notes::Note;
 use tpv_domain::people::Role;
 use tpv_domain::sale::PaymentMethod;
+use tpv_domain::stock::{StockLevel, StockMovement, StockMovementKind};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::timeclock::TimeEntry;
 use uuid::Uuid;
@@ -86,6 +88,52 @@ pub struct UpsertPriceListRequest {
     pub items: Vec<PriceListItemRequest>,
     #[serde(default = "default_active")]
     pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordStockMovementRequest {
+    pub product_id: ProductId,
+    pub kind: StockMovementKind,
+    /// Positive quantity. Accepts a decimal comma from the UI.
+    pub quantity: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetStockMinimumRequest {
+    pub product_id: ProductId,
+    /// Alert threshold. Zero disables the alert.
+    pub min_quantity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetStockCountRequest {
+    pub product_id: ProductId,
+    /// Physically counted quantity. Accepts a decimal comma from the UI.
+    pub counted_quantity: String,
+    pub reason: String,
+}
+
+/// Internal command with parsed values for the transactional stock adapter.
+#[derive(Debug, Clone)]
+pub struct StockCountCommand {
+    pub store_id: StoreId,
+    pub product_id: ProductId,
+    pub counted_quantity: Decimal,
+    pub movement_id: StockMovementId,
+    pub reason: String,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockCountResult {
+    pub level: StockLevel,
+    pub previous_quantity: Decimal,
+    pub counted_quantity: Decimal,
+    pub difference: Decimal,
+    /// `None` when the physical count matched the recorded level.
+    pub movement: Option<StockMovement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +363,7 @@ pub struct ReopenCashRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductSearchResult {
+    pub id: ProductId,
     pub sku: String,
     pub name: String,
     pub price_cents: i64,
@@ -325,6 +374,7 @@ pub struct ProductSearchResult {
 impl ProductSearchResult {
     pub fn from_product(product: &tpv_domain::catalog::Product) -> Self {
         Self {
+            id: product.id,
             sku: product.sku.to_string(),
             name: product.name.clone(),
             price_cents: Money::from_decimal_round(product.unit_price)

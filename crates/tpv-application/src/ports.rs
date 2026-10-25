@@ -17,10 +17,12 @@ use tpv_domain::notes::{Note, NoteRecipient};
 use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::pricing::{PriceList, PriceListSnapshot};
 use tpv_domain::sale::{Sale, SaleState};
+use tpv_domain::stock::{StockLevel, StockMovement};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
 use tpv_domain::timeclock::TimeEntry;
 
+use crate::dto::{StockCountCommand, StockCountResult};
 use crate::error::Result;
 use crate::import::{ProductImportPreview, ProductImportRow};
 
@@ -41,6 +43,7 @@ impl Clock for SystemClock {
 #[async_trait]
 pub trait CatalogRepository: Send + Sync {
     async fn find_product_by_sku(&self, sku: &Sku) -> Result<Option<Product>>;
+    async fn find_product_by_id(&self, id: ProductId) -> Result<Option<Product>>;
     async fn search_products(&self, query: &str, limit: u32) -> Result<Vec<Product>>;
     async fn list_products(&self) -> Result<Vec<Product>>;
     async fn save_product(&self, product: &Product) -> Result<()>;
@@ -133,6 +136,58 @@ pub trait InvoiceRepository: Send + Sync {
     ) -> Result<()>;
     async fn find(&self, id: InvoiceId) -> Result<Option<Invoice>>;
     async fn list_recent(&self, store_id: StoreId, limit: u32) -> Result<Vec<Invoice>>;
+}
+
+#[async_trait]
+pub trait StockRepository: Send + Sync {
+    /// Lists every product for the store, including products that have never
+    /// had a stock movement (their level is zero).
+    async fn list_levels(&self, store_id: StoreId) -> Result<Vec<StockLevel>>;
+
+    /// Number of products at or below their configured minimum, excluding
+    /// products whose minimum is zero (alert disabled).
+    async fn count_low_stock(&self, store_id: StoreId) -> Result<u64>;
+
+    /// Batch lookup used by the POS search so it only loads the products
+    /// currently visible on screen.
+    async fn list_levels_for_products(
+        &self,
+        store_id: StoreId,
+        product_ids: &[ProductId],
+    ) -> Result<Vec<StockLevel>>;
+
+    async fn get_level(
+        &self,
+        store_id: StoreId,
+        product_id: ProductId,
+    ) -> Result<Option<StockLevel>>;
+
+    async fn list_movements(
+        &self,
+        store_id: StoreId,
+        product_id: ProductId,
+        limit: u32,
+    ) -> Result<Vec<StockMovement>>;
+
+    /// Persists the movement, updates the level and appends its audit event in
+    /// one transaction. Replaying the same sale line is a no-op.
+    async fn record_movement(&self, movement: &StockMovement, audit: &AuditEvent) -> Result<()>;
+
+    async fn set_minimum(
+        &self,
+        store_id: StoreId,
+        product_id: ProductId,
+        min_quantity: Decimal,
+        audit: &AuditEvent,
+    ) -> Result<StockLevel>;
+
+    /// Atomically aligns the level with a physical count, recording an
+    /// adjustment movement only when there is a difference.
+    async fn set_count(
+        &self,
+        command: &StockCountCommand,
+        audit: &AuditEvent,
+    ) -> Result<StockCountResult>;
 }
 
 #[async_trait]
