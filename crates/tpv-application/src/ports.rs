@@ -9,7 +9,7 @@ use tpv_domain::catalog::{Family, Product};
 use tpv_domain::document::DocumentType;
 use tpv_domain::ids::{
     CashSessionId, CustomerId, InvoiceId, NoteId, PriceListId, ProductId, RegisterId, SaleId,
-    StoreId, UserId,
+    StockMovementId, StoreId, UserId,
 };
 use tpv_domain::invoice::Invoice;
 use tpv_domain::master_data::{MasterDataApplyResult, MasterDataChange, MasterDataConflict};
@@ -138,6 +138,31 @@ pub trait InvoiceRepository: Send + Sync {
     async fn list_recent(&self, store_id: StoreId, limit: u32) -> Result<Vec<Invoice>>;
 }
 
+/// One row of an atomic physical-count import.
+#[derive(Debug, Clone)]
+pub struct StockCountImportItem {
+    pub product_id: ProductId,
+    pub counted_quantity: Decimal,
+    pub movement_id: StockMovementId,
+    pub reason: String,
+    pub occurred_at: OffsetDateTime,
+}
+
+/// A whole count worksheet applied in one transaction. `audits` contains one
+/// event per item, in the same order, including counts without differences.
+#[derive(Debug, Clone)]
+pub struct StockCountImportCommand {
+    pub store_id: StoreId,
+    pub items: Vec<StockCountImportItem>,
+    pub audits: Vec<AuditEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StockCountImportOutcome {
+    pub adjusted: u64,
+    pub unchanged: u64,
+}
+
 /// Filtros del libro global de movimientos de una tienda.
 #[derive(Debug, Clone)]
 pub struct StockMovementFilter {
@@ -205,6 +230,13 @@ pub trait StockRepository: Send + Sync {
         command: &StockCountCommand,
         audit: &AuditEvent,
     ) -> Result<StockCountResult>;
+
+    /// Applies every counted row, its level, adjustment movement and audit
+    /// event atomically. If one row fails, no stock is changed.
+    async fn import_counts(
+        &self,
+        command: &StockCountImportCommand,
+    ) -> Result<StockCountImportOutcome>;
 }
 
 #[async_trait]

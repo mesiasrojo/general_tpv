@@ -138,6 +138,111 @@ test.describe('TPV desktop UI', () => {
         recipients: [{ user_id: userId, user_name: 'Administrador' }]
       });
       let invoiceRecord: any = null;
+      const previewStockCountImport = (csv: string, commit: boolean) => {
+        (window as any).__lastCountImport = { csv, commit };
+        const normalize = (value: string) =>
+          value
+            .trim()
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '');
+        const lines = csv.replace(/\r\n/g, '\n').split('\n').filter((line) => line.trim());
+        if (lines.length < 2) throw 'El fichero no contiene filas.';
+        const delimiter = lines[0].includes(';') ? ';' : ',';
+        const headers = lines[0].split(delimiter).map(normalize);
+        const skuIndex = headers.findIndex((header) =>
+          ['codigo', 'sku', 'codigo_articulo', 'referencia', 'ref', 'articulo_id'].includes(header)
+        );
+        const countIndex = headers.findIndex((header) =>
+          ['conteo_fisico', 'conteo', 'cantidad_contada', 'stock_contado', 'contado'].includes(header)
+        );
+        const reasonIndex = headers.findIndex((header) =>
+          ['motivo', 'motivo_conteo', 'observaciones', 'comentario'].includes(header)
+        );
+        if (skuIndex < 0 || countIndex < 0) throw 'Faltan columnas obligatorias en el CSV.';
+        const errors: Array<{ line: number; sku: string | null; message: string }> = [];
+        const rows: Array<{ product: Record<string, any>; counted: number; reason: string }> = [];
+        const seen = new Set<string>();
+        let skipped = 0;
+        for (let index = 1; index < lines.length; index += 1) {
+          const cells = lines[index].split(delimiter);
+          const sku = String(cells[skuIndex] ?? '').trim();
+          const rawCount = String(cells[countIndex] ?? '').trim();
+          const line = index + 1;
+          if (!rawCount) {
+            skipped += 1;
+            continue;
+          }
+          if (!sku) {
+            errors.push({ line, sku: null, message: 'El código es obligatorio.' });
+            continue;
+          }
+          if (seen.has(sku)) {
+            errors.push({ line, sku, message: 'El código está repetido.' });
+            continue;
+          }
+          seen.add(sku);
+          const product = catalogItems.find((item) => String(item.sku) === sku);
+          if (!product) {
+            errors.push({ line, sku, message: 'SKU no encontrado en el catálogo' });
+            continue;
+          }
+          const normalizedCount = rawCount.replace(',', '.');
+          if ((normalizedCount.split('.')[1] ?? '').length > 3) {
+            errors.push({ line, sku, message: 'El conteo admite como máximo tres decimales.' });
+            continue;
+          }
+          const counted = Number(normalizedCount);
+          if (!Number.isFinite(counted) || counted < 0) {
+            errors.push({ line, sku, message: 'El conteo no puede ser negativo.' });
+            continue;
+          }
+          rows.push({
+            product,
+            counted,
+            reason: String(cells[reasonIndex] ?? '').trim() || 'Conteo físico importado'
+          });
+        }
+        const adjust = rows.filter(
+          (row) => Number(stockLevelFor(row.product).quantity) !== row.counted
+        ).length;
+        const report = {
+          total_rows: lines.length - 1,
+          skipped_rows: skipped,
+          valid_rows: rows.length,
+          invalid_rows: errors.length,
+          adjusted: adjust,
+          unchanged: rows.length - adjust,
+          committed: false,
+          errors
+        };
+        if (commit && errors.length === 0 && rows.length > 0) {
+          for (const row of rows) {
+            const level = stockLevelFor(row.product);
+            const previous = Number(level.quantity);
+            const difference = Number((row.counted - previous).toFixed(3));
+            if (difference !== 0) {
+              stockMovements.unshift({
+                id: crypto.randomUUID(),
+                store_id: storeId,
+                product_id: row.product.id,
+                kind: difference > 0 ? 'adjustment_in' : 'adjustment_out',
+                quantity: String(Math.abs(difference)),
+                reason: row.reason,
+                sale_id: null,
+                sale_line_id: null,
+                occurred_at: now()
+              });
+            }
+            level.quantity = String(row.counted);
+            level.updated_at = now();
+          }
+          report.committed = true;
+        }
+        return report;
+      };
       const api = {
         async current_user() {
           return session;
@@ -515,6 +620,12 @@ test.describe('TPV desktop UI', () => {
             movement
           };
         },
+        async preview_stock_count_import(csv: string) {
+          return previewStockCountImport(csv, false);
+        },
+        async commit_stock_count_import(csv: string) {
+          return previewStockCountImport(csv, true);
+        },
         async save_customer(request: any) {
           const existing = request.customer_id
             ? customerRecords.find((customer) => customer.id === request.customer_id)
@@ -834,6 +945,10 @@ test.describe('TPV desktop UI', () => {
               return api.set_stock_minimum(args.request);
             case 'set_stock_count':
               return api.set_stock_count(args.request);
+            case 'preview_stock_count_import':
+              return api.preview_stock_count_import(String(args.csv));
+            case 'commit_stock_count_import':
+              return api.commit_stock_count_import(String(args.csv));
             case 'export_stock_ledger_csv':
               return api.export_stock_ledger_csv(args.request);
             case 'list_master_data_conflicts':
@@ -1163,6 +1278,34 @@ test.describe('TPV desktop UI', () => {
     await stockDetail.getByLabel('Motivo', { exact: true }).fill('');
     await expect(page.locator('.stock-movements')).toContainText('Ajuste negativo');
     await expect(page.locator('.stock-movements')).toContainText('Conteo UI');
+
+    await catalogDialog.getByRole('button', { name: 'Importar conteo' }).click();
+    const countImportPanel = catalogDialog.locator('.stock-count-import');
+    const countImportFile = countImportPanel.getByLabel('Fichero de conteo CSV');
+    await countImportFile.setInputFiles({
+      name: 'conteo-invalido.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from(
+        'Codigo;Conteo fisico;Motivo\nUI-E2E-1;7;Importación UI\nNO-EXISTE;1;Error\n'
+      )
+    });
+    await expect(countImportPanel).toContainText('1 con error');
+    await expect(countImportPanel).toContainText('NO-EXISTE');
+    await expect(countImportPanel.getByRole('button', { name: 'Confirmar conteo' })).toBeDisabled();
+    await countImportFile.setInputFiles({
+      name: 'conteo-valido.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from('Codigo;Conteo fisico;Motivo\nUI-E2E-1;7;Importación UI\n')
+    });
+    await expect(countImportPanel).toContainText('0 ajustes');
+    await expect(countImportPanel).toContainText('1 sin cambios');
+    await countImportPanel.getByRole('button', { name: 'Confirmar conteo' }).click();
+    await expect(
+      page.getByText(/Conteo importado · 0 ajustes · 1 sin cambios/)
+    ).toBeVisible();
+    await expect(countImportPanel).toContainText('CONTEO IMPORTADO');
+    await catalogDialog.getByRole('button', { name: 'Cerrar importación' }).click();
+
     await catalogDialog.getByRole('button', { name: 'Exportar CSV' }).click();
     await expect(page.getByText(/Stock exportado · \/tmp\/stock-e2e\.csv/)).toBeVisible();
     await catalogDialog.getByRole('button', { name: 'Pedido de reposición' }).click();

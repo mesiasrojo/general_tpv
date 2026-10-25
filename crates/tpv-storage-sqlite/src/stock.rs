@@ -3,8 +3,8 @@ use rust_decimal::Decimal;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use tpv_application::{
-    Result as AppResult, StockCountCommand, StockCountResult, StockMovementFilter,
-    StockMovementPage, StockMovementView, StockRepository,
+    Result as AppResult, StockCountCommand, StockCountImportCommand, StockCountImportOutcome,
+    StockCountResult, StockMovementFilter, StockMovementPage, StockMovementView, StockRepository,
 };
 use tpv_domain::Sku;
 use tpv_domain::audit::AuditEvent;
@@ -489,6 +489,75 @@ impl SqliteStore {
         })
     }
 
+    async fn import_stock_counts_inner(
+        &self,
+        command: &StockCountImportCommand,
+    ) -> StorageResult<StockCountImportOutcome> {
+        if command.items.len() != command.audits.len() {
+            return Err(StorageError::InvalidData(
+                "stock count import requires one audit event per item".into(),
+            ));
+        }
+        let mut outcome = StockCountImportOutcome::default();
+        let mut tx = self.pool().begin().await?;
+        for (item, audit) in command.items.iter().zip(&command.audits) {
+            let previous = sqlx::query_scalar::<_, String>(
+                "SELECT quantity FROM stock_levels WHERE store_id = ? AND product_id = ?",
+            )
+            .bind(command.store_id.to_string())
+            .bind(item.product_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|value| parse_decimal(&value))
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
+            let difference = item.counted_quantity - previous;
+            if difference.is_zero() {
+                sqlx::query(
+                    "INSERT INTO stock_levels (store_id, product_id, quantity, min_quantity, updated_at)
+                     VALUES (?, ?, ?, '0', ?)
+                     ON CONFLICT(store_id, product_id) DO UPDATE SET
+                        quantity = excluded.quantity,
+                        updated_at = excluded.updated_at",
+                )
+                .bind(command.store_id.to_string())
+                .bind(item.product_id.to_string())
+                .bind(item.counted_quantity.normalize().to_string())
+                .bind(format_time(item.occurred_at)?)
+                .execute(&mut *tx)
+                .await?;
+                outcome.unchanged += 1;
+            } else {
+                let kind = if difference.is_sign_negative() {
+                    StockMovementKind::AdjustmentOut
+                } else {
+                    StockMovementKind::AdjustmentIn
+                };
+                let quantity = if difference.is_sign_negative() {
+                    -difference
+                } else {
+                    difference
+                };
+                let movement = StockMovement::new(
+                    item.movement_id,
+                    command.store_id,
+                    item.product_id,
+                    kind,
+                    Quantity::new(quantity)?,
+                    Some(item.reason.clone()),
+                    None,
+                    None,
+                    item.occurred_at,
+                )?;
+                insert_stock_movement_tx(&mut tx, &movement).await?;
+                outcome.adjusted += 1;
+            }
+            insert_audit_tx(&mut tx, audit).await?;
+        }
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
     async fn set_stock_minimum_inner(
         &self,
         store_id: StoreId,
@@ -591,5 +660,12 @@ impl StockRepository for SqliteStore {
         audit: &AuditEvent,
     ) -> AppResult<StockCountResult> {
         Ok(self.set_stock_count_inner(command, audit).await?)
+    }
+
+    async fn import_counts(
+        &self,
+        command: &StockCountImportCommand,
+    ) -> AppResult<StockCountImportOutcome> {
+        Ok(self.import_stock_counts_inner(command).await?)
     }
 }

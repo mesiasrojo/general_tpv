@@ -19,13 +19,13 @@ use tpv_application::{
     RecordStockMovementRequest, RectifyInvoiceLinesRequest, RectifyInvoiceRequest,
     ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository, SaleService, SaleView,
     SellerService, SequenceRepository, SessionUser, SetStockCountRequest, SetStockMinimumRequest,
-    StartSaleRequest, StockCountResult, StockLevelStatus, StockLevelsQuery, StockMovementPage,
-    StockRepository, StockService, StoreService, SyncContext, SyncOutboxRepository, SyncService,
-    SyncStatus, TaxService, TimeClockRepository, TimeClockService, TimeClockStatus,
-    UpdateUserRequest, UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest,
-    UpsertProductRequest, UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest,
-    UserRepository, stock_count_sheet_csv, stock_levels_csv, stock_movement_ledger_csv,
-    stock_movements_csv, stock_replenishment_csv,
+    StartSaleRequest, StockCountImportReport, StockCountResult, StockLevelStatus, StockLevelsQuery,
+    StockMovementPage, StockRepository, StockService, StoreService, SyncContext,
+    SyncOutboxRepository, SyncService, SyncStatus, TaxService, TimeClockRepository,
+    TimeClockService, TimeClockStatus, UpdateUserRequest, UpsertCustomerRequest,
+    UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest, UpsertSellerRequest,
+    UpsertStoreRequest, UpsertTaxRequest, UserRepository, stock_count_sheet_csv, stock_levels_csv,
+    stock_movement_ledger_csv, stock_movements_csv, stock_replenishment_csv,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -1294,6 +1294,34 @@ async fn set_stock_count(
 }
 
 #[tauri::command]
+async fn preview_stock_count_import(
+    state: State<'_, AppState>,
+    csv: String,
+) -> Result<StockCountImportReport, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .preview_count_import(state.demo.store_id, &csv)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn commit_stock_count_import(
+    state: State<'_, AppState>,
+    csv: String,
+) -> Result<StockCountImportReport, String> {
+    let session = require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .commit_count_import(state.demo.store_id, Some(session.user.id), &csv)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn time_clock_status(state: State<'_, AppState>) -> Result<TimeClockStatus, String> {
     let session = require_session(state.inner())?;
     load_time_clock_status(state.inner(), &session).await
@@ -1871,6 +1899,8 @@ fn main() {
             record_stock_movement,
             set_stock_minimum,
             set_stock_count,
+            preview_stock_count_import,
+            commit_stock_count_import,
             time_clock_status,
             time_clock_in,
             time_clock_out,
@@ -1988,6 +2018,8 @@ mod e2e_tests {
                 record_stock_movement,
                 set_stock_minimum,
                 set_stock_count,
+                preview_stock_count_import,
+                commit_stock_count_import,
                 time_clock_status,
                 time_clock_in,
                 time_clock_out,
@@ -2468,6 +2500,97 @@ mod e2e_tests {
         )
         .expect("query future ledger");
         assert_eq!(future_ledger["total"], 0);
+
+        let invalid_import =
+            "Codigo;Conteo fisico;Motivo\n3;2,5;Importación E2E\nNO-EXISTE;1;Error\n";
+        let preview = invoke(
+            &webview,
+            "preview_stock_count_import",
+            json!({ "csv": invalid_import }),
+        )
+        .expect("preview stock count import");
+        assert_eq!(preview["total_rows"], 2);
+        assert_eq!(preview["valid_rows"], 1);
+        assert_eq!(preview["invalid_rows"], 1);
+        assert_eq!(preview["adjusted"], 1);
+        assert_eq!(preview["unchanged"], 0);
+        assert_eq!(preview["committed"], false);
+        assert_eq!(preview["errors"][0]["line"], 3);
+        let unchanged_after_preview = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("stock movements after preview");
+        assert_eq!(
+            unchanged_after_preview
+                .as_array()
+                .expect("stock movements array")
+                .len(),
+            4
+        );
+        let rejected_import = invoke(
+            &webview,
+            "commit_stock_count_import",
+            json!({ "csv": invalid_import }),
+        )
+        .expect("reject stock count import");
+        assert_eq!(rejected_import["committed"], false);
+
+        let valid_import = "Codigo;Conteo fisico;Motivo\n3;2,5;Importación E2E\n";
+        let committed_import = invoke(
+            &webview,
+            "commit_stock_count_import",
+            json!({ "csv": valid_import }),
+        )
+        .expect("commit stock count import");
+        assert_eq!(committed_import["committed"], true);
+        assert_eq!(committed_import["valid_rows"], 1);
+        assert_eq!(committed_import["adjusted"], 1);
+        assert_eq!(committed_import["unchanged"], 0);
+        let imported_movements = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("stock movements after import");
+        assert_eq!(
+            imported_movements
+                .as_array()
+                .expect("stock movements array")
+                .len(),
+            5
+        );
+        assert!(
+            imported_movements
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|movement| {
+                    movement["kind"] == "adjustment_out"
+                        && movement["quantity"] == "1.5"
+                        && movement["reason"] == "Importación E2E"
+                })
+        );
+        let repeated_import = invoke(
+            &webview,
+            "commit_stock_count_import",
+            json!({ "csv": valid_import }),
+        )
+        .expect("repeat stock count import");
+        assert_eq!(repeated_import["committed"], true);
+        assert_eq!(repeated_import["adjusted"], 0);
+        assert_eq!(repeated_import["unchanged"], 1);
+        let final_stock = invoke(
+            &webview,
+            "list_stock_movements",
+            json!({ "productId": sold_product_id, "limit": 20 }),
+        )
+        .expect("stock movements after repeated import");
+        assert_eq!(
+            final_stock.as_array().expect("stock movements array").len(),
+            5
+        );
 
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);

@@ -189,6 +189,23 @@ export interface StockLevelsQuery {
   status?: StockLevelStatus;
 }
 
+export interface StockCountImportError {
+  line: number;
+  sku: string | null;
+  message: string;
+}
+
+export interface StockCountImportReport {
+  total_rows: number;
+  skipped_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  adjusted: number;
+  unchanged: number;
+  committed: boolean;
+  errors: StockCountImportError[];
+}
+
 export interface Tax {
   id: string;
   code: string;
@@ -665,6 +682,10 @@ export const api = {
     invoke<StockLevel>('set_stock_minimum', { request }),
   setStockCount: (request: SetStockCountRequest) =>
     invoke<StockCountResult>('set_stock_count', { request }),
+  previewStockCountImport: (csv: string) =>
+    invoke<StockCountImportReport>('preview_stock_count_import', { csv }),
+  commitStockCountImport: (csv: string) =>
+    invoke<StockCountImportReport>('commit_stock_count_import', { csv }),
   listSellers: () => invoke<Seller[]>('list_sellers'),
   saveSeller: (request: SaveSellerRequest) => invoke<Seller>('save_seller', { request }),
   saveStore: (request: SaveStoreRequest) => invoke<Store>('save_store', { request }),

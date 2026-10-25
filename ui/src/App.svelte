@@ -32,6 +32,7 @@
     type SaveTaxRequest,
     type Seller,
     type SessionUser,
+    type StockCountImportReport,
     type StockLevel,
     type StockMovement,
     type StockMovementKind,
@@ -199,6 +200,12 @@
   let stockExporting = $state(false);
   let stockReplenishmentExporting = $state(false);
   let stockCountSheetExporting = $state(false);
+  let stockCountImportOpen = $state(false);
+  let stockCountImportCsv = $state('');
+  let stockCountImportFileName = $state('');
+  let stockCountImportReport = $state<StockCountImportReport | null>(null);
+  let stockCountImportError = $state('');
+  let stockCountImportBusy = $state(false);
   let stockMovementsExporting = $state(false);
   let stockLoading = $state(false);
   let stockLedger = $state<StockMovementView[]>([]);
@@ -311,6 +318,13 @@
       }, 0)
       .toString()
   );
+  let stockCountImportCanCommit = $derived(
+    !!stockCountImportReport &&
+      !stockCountImportReport.committed &&
+      stockCountImportReport.invalid_rows === 0 &&
+      stockCountImportReport.valid_rows > 0
+  );
+
   let stockCountDifference = $derived.by(() => {
     if (!selectedStockLevel || !stockCountedQuantity.trim()) return null;
     const current = Number.parseFloat(selectedStockLevel.quantity);
@@ -1094,6 +1108,70 @@
     stockCountedQuantity = preferred.quantity;
     stockCountReason = '';
     await loadStockMovements(preferred.product_id);
+  }
+
+  function resetStockCountImport() {
+    stockCountImportCsv = '';
+    stockCountImportFileName = '';
+    stockCountImportReport = null;
+    stockCountImportError = '';
+  }
+
+  async function selectStockCountImportFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    stockCountImportReport = null;
+    stockCountImportError = '';
+    if (!file) {
+      stockCountImportCsv = '';
+      stockCountImportFileName = '';
+      return;
+    }
+    stockCountImportBusy = true;
+    try {
+      stockCountImportCsv = await file.text();
+      stockCountImportFileName = file.name;
+      stockCountImportReport = await api.previewStockCountImport(stockCountImportCsv);
+    } catch (error) {
+      stockCountImportError = String(error);
+    } finally {
+      stockCountImportBusy = false;
+      input.value = '';
+    }
+  }
+
+  async function previewStockCountImport() {
+    if (!stockCountImportCsv.trim() || stockCountImportBusy) return;
+    stockCountImportBusy = true;
+    stockCountImportError = '';
+    try {
+      stockCountImportReport = await api.previewStockCountImport(stockCountImportCsv);
+    } catch (error) {
+      stockCountImportError = String(error);
+    } finally {
+      stockCountImportBusy = false;
+    }
+  }
+
+  async function commitStockCountImport() {
+    if (!stockCountImportCsv.trim() || !stockCountImportCanCommit || stockCountImportBusy) return;
+    stockCountImportBusy = true;
+    stockCountImportError = '';
+    try {
+      const report = await api.commitStockCountImport(stockCountImportCsv);
+      stockCountImportReport = report;
+      if (report.committed) {
+        message = `Conteo importado · ${report.adjusted} ajustes · ${report.unchanged} sin cambios`;
+        await refreshStockLevels(stockSelectedProductId ?? undefined);
+        await refreshLowStockAlert();
+      } else {
+        stockCountImportError = 'El conteo no se ha aplicado porque contiene filas no válidas.';
+      }
+    } catch (error) {
+      stockCountImportError = String(error);
+    } finally {
+      stockCountImportBusy = false;
+    }
   }
 
   async function saveStockCount() {
@@ -3529,6 +3607,90 @@
             </div>
           </div>
 
+          {#if stockCountImportOpen && (session?.user.role === 'admin' || session?.user.role === 'manager')}
+            <section class="stock-count-import" aria-label="Importar conteo físico">
+              <div class="stock-count-import-heading">
+                <div>
+                  <strong>Importar conteo físico</strong>
+                  <p class="muted small">
+                    Sube una hoja de conteo completada. Primero se simula el lote completo y solo
+                    se aplica si todas las filas son válidas.
+                  </p>
+                </div>
+                {#if stockCountImportFileName}
+                  <span class="badge">{stockCountImportFileName}</span>
+                {/if}
+              </div>
+              <div class="stock-count-import-actions">
+                <label class="field">
+                  <span>Fichero CSV</span>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    aria-label="Fichero de conteo CSV"
+                    onchange={(event) => void selectStockCountImportFile(event)}
+                  />
+                </label>
+                <button
+                  class="secondary"
+                  type="button"
+                  disabled={!stockCountImportCsv.trim() || stockCountImportBusy}
+                  onclick={() => void previewStockCountImport()}
+                >
+                  Previsualizar
+                </button>
+                <button
+                  type="button"
+                  disabled={!stockCountImportCanCommit || stockCountImportBusy}
+                  onclick={() => void commitStockCountImport()}
+                >
+                  {stockCountImportBusy ? 'Procesando…' : 'Confirmar conteo'}
+                </button>
+              </div>
+              {#if stockCountImportError}
+                <p class="stock-count-import-error" role="alert">{stockCountImportError}</p>
+              {/if}
+              {#if stockCountImportReport}
+                <div class="import-report">
+                  <div class="import-summary">
+                    <strong>{stockCountImportReport.total_rows}</strong>
+                    <span class="muted small">filas</span>
+                    <span class="badge ok">{stockCountImportReport.valid_rows} válidas</span>
+                    <span class="badge">{stockCountImportReport.skipped_rows} ignoradas</span>
+                    <span
+                      class="badge"
+                      class:inactive={stockCountImportReport.invalid_rows > 0}
+                    >
+                      {stockCountImportReport.invalid_rows} con error
+                    </span>
+                    <span class="badge">{stockCountImportReport.adjusted} ajustes</span>
+                    <span class="badge">{stockCountImportReport.unchanged} sin cambios</span>
+                    {#if stockCountImportReport.committed}
+                      <span class="badge ok">CONTEO IMPORTADO</span>
+                    {/if}
+                  </div>
+                  {#if stockCountImportReport.errors.length > 0}
+                    <ul class="import-errors">
+                      {#each stockCountImportReport.errors as importError}
+                        <li>
+                          Línea {importError.line} · {importError.sku ?? '—'} · {importError.message}
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else if stockCountImportReport.committed}
+                    <p class="muted small">
+                      Conteo aplicado. Los ajustes ya están reflejados en las existencias.
+                    </p>
+                  {:else}
+                    <p class="muted small">
+                      Simulación correcta. Todavía no se ha modificado ninguna existencia.
+                    </p>
+                  {/if}
+                </div>
+              {/if}
+            </section>
+          {/if}
+
           <div class="stock-layout">
             <div class="stock-levels-panel">
               <div class="catalog-toolbar">
@@ -3562,6 +3724,17 @@
                     onclick={() => void exportStockCountSheet()}
                   >
                     {stockCountSheetExporting ? 'Exportando…' : 'Hoja de conteo'}
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    aria-expanded={stockCountImportOpen}
+                    onclick={() => {
+                      stockCountImportOpen = !stockCountImportOpen;
+                      if (!stockCountImportOpen) resetStockCountImport();
+                    }}
+                  >
+                    {stockCountImportOpen ? 'Cerrar importación' : 'Importar conteo'}
                   </button>
                 {/if}
               </div>
@@ -5523,6 +5696,44 @@
     color: var(--danger-text);
   }
 
+  .stock-count-import {
+    margin-bottom: 18px;
+    padding: 12px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .stock-count-import-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .stock-count-import-heading p {
+    margin: 4px 0 0;
+  }
+
+  .stock-count-import-actions {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto auto;
+    align-items: end;
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  .stock-count-import-actions input[type='file'] {
+    padding: 6px;
+    font-size: 0.82rem;
+  }
+
+  .stock-count-import-error {
+    margin: 10px 0 0;
+    color: var(--danger-text);
+    font-size: 0.85rem;
+  }
+
   .stock-levels-panel .catalog-toolbar {
     flex-wrap: wrap;
   }
@@ -6142,8 +6353,13 @@
     .stock-form,
     .stock-count-form,
     .stock-ledger-toolbar,
+    .stock-count-import-actions,
     .user-fields {
       grid-template-columns: 1fr;
+    }
+
+    .stock-count-import-heading {
+      flex-direction: column;
     }
 
     .stock-ledger-row {

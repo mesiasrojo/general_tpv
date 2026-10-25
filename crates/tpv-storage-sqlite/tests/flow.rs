@@ -1677,6 +1677,103 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
         Err(tpv_application::ApplicationError::Validation(_))
     ));
 
+    let invalid_import = format!(
+        "Codigo;Conteo fisico;Motivo\n{};2,25;Conteo importado\nNO-EXISTE;4;Error\n",
+        product.sku.as_str()
+    );
+    let preview = stock
+        .preview_count_import(services.demo.store_id, &invalid_import)
+        .await
+        .unwrap();
+    assert_eq!(preview.total_rows, 2);
+    assert_eq!(preview.valid_rows, 1);
+    assert_eq!(preview.invalid_rows, 1);
+    assert_eq!(preview.adjusted, 1);
+    assert!(!preview.committed);
+    assert!(!preview.can_commit());
+    assert_eq!(preview.errors[0].line, 3);
+    assert!(!preview.errors[0].message.is_empty());
+    assert_eq!(
+        stock
+            .get_level(services.demo.store_id, product.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quantity,
+        Decimal::new(15, 1)
+    );
+    let rejected_commit = stock
+        .commit_count_import(services.demo.store_id, None, &invalid_import)
+        .await
+        .unwrap();
+    assert!(!rejected_commit.committed);
+    assert_eq!(
+        stock
+            .get_level(services.demo.store_id, product.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quantity,
+        Decimal::new(15, 1)
+    );
+
+    let valid_import = format!(
+        "Codigo;Conteo fisico;Motivo\n{};2,25;Conteo importado\n",
+        product.sku.as_str()
+    );
+    let committed = stock
+        .commit_count_import(services.demo.store_id, None, &valid_import)
+        .await
+        .unwrap();
+    assert!(committed.committed);
+    assert_eq!(committed.valid_rows, 1);
+    assert_eq!(committed.adjusted, 1);
+    assert_eq!(committed.unchanged, 0);
+    let imported_level = stock
+        .get_level(services.demo.store_id, product.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(imported_level.quantity, Decimal::new(225, 2));
+    let imported_movements = stock
+        .list_movements(services.demo.store_id, product.id, 20)
+        .await
+        .unwrap();
+    assert_eq!(imported_movements.len(), 4);
+    assert_eq!(imported_movements[0].kind, StockMovementKind::AdjustmentIn);
+    assert_eq!(
+        imported_movements[0].quantity.as_decimal(),
+        Decimal::new(75, 2)
+    );
+    assert_eq!(
+        imported_movements[0].reason.as_deref(),
+        Some("Conteo importado")
+    );
+    let repeated_import = stock
+        .commit_count_import(services.demo.store_id, None, &valid_import)
+        .await
+        .unwrap();
+    assert!(repeated_import.committed);
+    assert_eq!(repeated_import.adjusted, 0);
+    assert_eq!(repeated_import.unchanged, 1);
+    assert_eq!(
+        stock
+            .list_movements(services.demo.store_id, product.id, 20)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        stock
+            .get_level(other_store.id, product.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .quantity,
+        Decimal::ZERO
+    );
+
     let rejected = stock
         .record_movement(
             services.demo.store_id,

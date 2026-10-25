@@ -14,7 +14,13 @@ use crate::dto::{
     StockLevelsQuery, StockMovementPage, StockMovementView,
 };
 use crate::error::{ApplicationError, Result};
-use crate::ports::{CatalogRepository, Clock, StockMovementFilter, StockRepository};
+use crate::ports::{
+    CatalogRepository, Clock, StockCountImportCommand, StockCountImportItem, StockMovementFilter,
+    StockRepository,
+};
+use crate::stock_count_import::{
+    StockCountImportError, StockCountImportReport, parse_stock_count_import_csv,
+};
 
 /// Coordinates stock levels and their auditable movement ledger.
 #[derive(Clone)]
@@ -247,6 +253,131 @@ impl StockService {
         self.stock.set_count(&command, &audit).await
     }
 
+    /// Validates a count worksheet and resolves every SKU without writing.
+    /// The report contains the adjustment that would be applied on commit.
+    pub async fn preview_count_import(
+        &self,
+        store_id: StoreId,
+        csv: &str,
+    ) -> Result<StockCountImportReport> {
+        let plan = parse_stock_count_import_csv(csv)?;
+        let prepared = self.prepare_count_import(store_id, None, plan).await?;
+        Ok(prepared.report)
+    }
+
+    /// Applies a whole worksheet atomically. Files with any invalid or
+    /// unresolved row are rejected before the transaction starts.
+    pub async fn commit_count_import(
+        &self,
+        store_id: StoreId,
+        actor_id: Option<UserId>,
+        csv: &str,
+    ) -> Result<StockCountImportReport> {
+        let plan = parse_stock_count_import_csv(csv)?;
+        let prepared = self.prepare_count_import(store_id, actor_id, plan).await?;
+        if !prepared.report.can_commit() {
+            return Ok(prepared.report);
+        }
+        let PreparedStockCountImport {
+            mut report,
+            items,
+            audits,
+        } = prepared;
+        let outcome = self
+            .stock
+            .import_counts(&StockCountImportCommand {
+                store_id,
+                items,
+                audits,
+            })
+            .await?;
+        report.adjusted = usize::try_from(outcome.adjusted).unwrap_or(usize::MAX);
+        report.unchanged = usize::try_from(outcome.unchanged).unwrap_or(usize::MAX);
+        report.committed = true;
+        Ok(report)
+    }
+
+    async fn prepare_count_import(
+        &self,
+        store_id: StoreId,
+        actor_id: Option<UserId>,
+        plan: crate::stock_count_import::StockCountImportPlan,
+    ) -> Result<PreparedStockCountImport> {
+        let now = self.clock.now();
+        let mut errors = plan.errors;
+        let mut items = Vec::with_capacity(plan.rows.len());
+        let mut audits = Vec::with_capacity(plan.rows.len());
+        let mut adjusted = 0_usize;
+        let mut unchanged = 0_usize;
+
+        for row in plan.rows {
+            let Some(product) = self.catalog.find_product_by_sku(&row.sku).await? else {
+                errors.push(StockCountImportError {
+                    line: row.line,
+                    sku: Some(row.sku.to_string()),
+                    message: "SKU no encontrado en el catálogo".into(),
+                });
+                continue;
+            };
+            let Some(level) = self.stock.get_level(store_id, product.id).await? else {
+                errors.push(StockCountImportError {
+                    line: row.line,
+                    sku: Some(row.sku.to_string()),
+                    message: "el artículo no tiene nivel de stock".into(),
+                });
+                continue;
+            };
+            let difference = row.counted_quantity - level.quantity;
+            if difference.is_zero() {
+                unchanged += 1;
+            } else {
+                adjusted += 1;
+            }
+            let audit = AuditEvent::new(
+                now,
+                actor_id,
+                Some(store_id),
+                AuditAction::StockCount,
+                "stock_level",
+                product.id.to_string(),
+                serde_json::json!({
+                    "source": "csv",
+                    "line": row.line,
+                    "product_id": product.id,
+                    "sku": product.sku.as_str(),
+                    "previous_quantity": level.quantity.normalize().to_string(),
+                    "counted_quantity": row.counted_quantity.to_string(),
+                    "difference": difference.normalize().to_string(),
+                    "reason": row.reason,
+                }),
+            )?;
+            items.push(StockCountImportItem {
+                product_id: product.id,
+                counted_quantity: row.counted_quantity,
+                movement_id: StockMovementId::new(),
+                reason: row.reason,
+                occurred_at: now,
+            });
+            audits.push(audit);
+        }
+
+        let valid_rows = items.len();
+        Ok(PreparedStockCountImport {
+            report: StockCountImportReport {
+                total_rows: plan.total_rows,
+                skipped_rows: plan.skipped_rows,
+                valid_rows,
+                invalid_rows: errors.len(),
+                adjusted,
+                unchanged,
+                committed: false,
+                errors,
+            },
+            items,
+            audits,
+        })
+    }
+
     pub async fn record_movement(
         &self,
         store_id: StoreId,
@@ -335,6 +466,12 @@ impl StockService {
             .await?
             .ok_or_else(|| ApplicationError::NotFound(format!("product {product_id}")))
     }
+}
+
+struct PreparedStockCountImport {
+    report: StockCountImportReport,
+    items: Vec<StockCountImportItem>,
+    audits: Vec<AuditEvent>,
 }
 
 fn parse_decimal(value: &str, field: &str) -> Result<Decimal> {
