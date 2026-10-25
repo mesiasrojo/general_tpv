@@ -3,6 +3,8 @@
 use time::format_description::well_known::Rfc3339;
 use tpv_domain::stock::{StockLevel, StockMovement, StockMovementKind};
 
+use crate::dto::StockMovementView;
+
 /// Builds a semicolon-separated CSV suitable for Spanish Excel. Quantities use
 /// a decimal comma and the payload starts with a UTF-8 BOM so accents survive
 /// a double click in Excel.
@@ -47,6 +49,51 @@ pub fn stock_movements_csv(level: &StockLevel, movements: &[StockMovement]) -> S
         output.push_str(&decimal_cell(movement.quantity.as_decimal()));
         output.push(';');
         output.push_str(&decimal_cell(movement.signed_quantity()));
+        output.push(';');
+        output.push_str(&csv_cell(movement.reason.as_deref().unwrap_or_default()));
+        output.push(';');
+        output.push_str(
+            &movement
+                .sale_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        );
+        output.push(';');
+        output.push_str(
+            &movement
+                .sale_line_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        );
+        output.push(';');
+        output.push_str(&csv_cell(&occurred_at));
+        output.push_str("\r\n");
+    }
+    output
+}
+
+/// Builds the store-wide audit ledger, already enriched with SKU and name.
+pub fn stock_movement_ledger_csv(records: &[StockMovementView]) -> String {
+    let mut output = String::from('\u{feff}');
+    output.push_str("Codigo;Articulo;Tipo;Cantidad;Efecto;Motivo;Venta;Linea;Fecha\r\n");
+    for movement in records {
+        let occurred_at = movement.occurred_at.format(&Rfc3339).unwrap_or_default();
+        let signed = match movement.kind {
+            StockMovementKind::Initial
+            | StockMovementKind::Purchase
+            | StockMovementKind::Return
+            | StockMovementKind::AdjustmentIn => movement.quantity,
+            StockMovementKind::Sale | StockMovementKind::AdjustmentOut => -movement.quantity,
+        };
+        output.push_str(&csv_cell(&movement.sku));
+        output.push(';');
+        output.push_str(&csv_cell(&movement.name));
+        output.push(';');
+        output.push_str(movement_kind_label(movement.kind));
+        output.push(';');
+        output.push_str(&decimal_cell(movement.quantity));
+        output.push(';');
+        output.push_str(&decimal_cell(signed));
         output.push(';');
         output.push_str(&csv_cell(movement.reason.as_deref().unwrap_or_default()));
         output.push(';');
@@ -149,6 +196,29 @@ mod tests {
         assert!(csv.contains(
             "A-1;Producto;Entrada;2,5;2,5;\"Compra; proveedor\";;;1970-01-01T00:00:00Z\r\n"
         ));
+    }
+
+    #[test]
+    fn exports_the_store_wide_ledger_with_product_data() {
+        let record = StockMovementView {
+            id: StockMovementId::new(),
+            store_id: StoreId::new(),
+            product_id: ProductId::new(),
+            sku: "A-1".into(),
+            name: "Producto".into(),
+            kind: StockMovementKind::AdjustmentOut,
+            quantity: Decimal::new(25, 1),
+            reason: Some("Merma".into()),
+            sale_id: None,
+            sale_line_id: None,
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let csv = stock_movement_ledger_csv(&[record]);
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv.contains("Codigo;Articulo;Tipo;Cantidad;Efecto;Motivo;Venta;Linea;Fecha\r\n"));
+        assert!(
+            csv.contains("A-1;Producto;Ajuste negativo;2,5;-2,5;Merma;;;1970-01-01T00:00:00Z\r\n")
+        );
     }
 
     #[test]

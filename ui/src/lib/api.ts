@@ -151,6 +151,35 @@ export interface StockCountResult {
   movement: StockMovement | null;
 }
 
+export interface StockMovementView {
+  id: string;
+  store_id: string;
+  product_id: string;
+  sku: string;
+  name: string;
+  kind: StockMovementKind;
+  quantity: string;
+  reason: string | null;
+  sale_id: string | null;
+  sale_line_id: string | null;
+  occurred_at: string;
+}
+
+export interface QueryStockMovementsRequest {
+  search?: string | null;
+  product_id?: string | null;
+  kind?: StockMovementKind | null;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockMovementPage {
+  items: StockMovementView[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface Tax {
   id: string;
   code: string;
@@ -612,6 +641,10 @@ export const api = {
   countLowStock: () => invoke<number>('count_low_stock'),
   listStockMovements: (productId: string, limit = 100) =>
     invoke<StockMovement[]>('list_stock_movements', { productId, limit }),
+  queryStockMovements: (request: QueryStockMovementsRequest) =>
+    invoke<StockMovementPage>('query_stock_movements', { request }),
+  exportStockLedgerCsv: (request: QueryStockMovementsRequest) =>
+    invoke<string | null>('export_stock_ledger_csv', { request }),
   recordStockMovement: (request: RecordStockMovementRequest) =>
     invoke<StockMovement>('record_stock_movement', { request }),
   setStockMinimum: (request: SetStockMinimumRequest) =>

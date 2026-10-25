@@ -17,12 +17,12 @@ use tpv_domain::notes::{Note, NoteRecipient};
 use tpv_domain::people::{Customer, Seller, Store};
 use tpv_domain::pricing::{PriceList, PriceListSnapshot};
 use tpv_domain::sale::{Sale, SaleState};
-use tpv_domain::stock::{StockLevel, StockMovement};
+use tpv_domain::stock::{StockLevel, StockMovement, StockMovementKind};
 use tpv_domain::sync::SyncEvent;
 use tpv_domain::tax::Tax;
 use tpv_domain::timeclock::TimeEntry;
 
-use crate::dto::{StockCountCommand, StockCountResult};
+use crate::dto::{StockCountCommand, StockCountResult, StockMovementPage};
 use crate::error::Result;
 use crate::import::{ProductImportPreview, ProductImportRow};
 
@@ -138,6 +138,17 @@ pub trait InvoiceRepository: Send + Sync {
     async fn list_recent(&self, store_id: StoreId, limit: u32) -> Result<Vec<Invoice>>;
 }
 
+/// Filtros del libro global de movimientos de una tienda.
+#[derive(Debug, Clone)]
+pub struct StockMovementFilter {
+    pub store_id: StoreId,
+    pub search: Option<String>,
+    pub product_id: Option<ProductId>,
+    pub kind: Option<StockMovementKind>,
+    pub limit: u32,
+    pub offset: u32,
+}
+
 #[async_trait]
 pub trait StockRepository: Send + Sync {
     /// Lists every product for the store, including products that have never
@@ -168,6 +179,9 @@ pub trait StockRepository: Send + Sync {
         product_id: ProductId,
         limit: u32,
     ) -> Result<Vec<StockMovement>>;
+
+    /// Store-wide ledger with product data, filters and a matching total.
+    async fn query_movements(&self, filter: &StockMovementFilter) -> Result<StockMovementPage>;
 
     /// Persists the movement, updates the level and appends its audit event in
     /// one transaction. Replaying the same sale line is a no-op.

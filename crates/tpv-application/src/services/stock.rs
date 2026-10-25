@@ -8,11 +8,12 @@ use tpv_domain::money::Quantity;
 use tpv_domain::stock::{StockLevel, StockMovement};
 
 use crate::dto::{
-    RecordStockMovementRequest, SetStockCountRequest, SetStockMinimumRequest, StockCountCommand,
-    StockCountResult,
+    QueryStockMovementsRequest, RecordStockMovementRequest, SetStockCountRequest,
+    SetStockMinimumRequest, StockCountCommand, StockCountResult, StockMovementPage,
+    StockMovementView,
 };
 use crate::error::{ApplicationError, Result};
-use crate::ports::{CatalogRepository, Clock, StockRepository};
+use crate::ports::{CatalogRepository, Clock, StockMovementFilter, StockRepository};
 
 /// Coordinates stock levels and their auditable movement ledger.
 #[derive(Clone)]
@@ -81,6 +82,57 @@ impl StockService {
         self.stock
             .list_movements(store_id, product_id, 50_000)
             .await
+    }
+
+    /// Store-wide paginated ledger for the audit screen.
+    pub async fn query_movements(
+        &self,
+        store_id: StoreId,
+        request: QueryStockMovementsRequest,
+    ) -> Result<StockMovementPage> {
+        self.query_movements_page(store_id, request, 1, 200).await
+    }
+
+    /// Same filters as the on-screen ledger, without pagination, for exports.
+    pub async fn movements_for_ledger_export(
+        &self,
+        store_id: StoreId,
+        request: QueryStockMovementsRequest,
+    ) -> Result<Vec<StockMovementView>> {
+        let page = self
+            .query_movements_page(store_id, request, 50_000, 50_000)
+            .await?;
+        Ok(page.items)
+    }
+
+    async fn query_movements_page(
+        &self,
+        store_id: StoreId,
+        request: QueryStockMovementsRequest,
+        min_limit: u32,
+        max_limit: u32,
+    ) -> Result<StockMovementPage> {
+        let search = request
+            .search
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(100)
+            .collect::<String>();
+        let limit = if request.limit == 0 {
+            min_limit.max(100).min(max_limit)
+        } else {
+            request.limit.clamp(min_limit, max_limit)
+        };
+        let filter = StockMovementFilter {
+            store_id,
+            search: (!search.is_empty()).then_some(search),
+            product_id: request.product_id,
+            kind: request.kind,
+            limit,
+            offset: request.offset,
+        };
+        self.stock.query_movements(&filter).await
     }
 
     /// Sets the stock level to a physically counted quantity. A positive or

@@ -372,6 +372,9 @@ test.describe('TPV desktop UI', () => {
         async export_stock_movements_csv(_productId: string) {
           return '/tmp/movimientos-e2e.csv';
         },
+        async export_stock_ledger_csv(_request: any) {
+          return '/tmp/movimientos-stock-e2e.csv';
+        },
         async count_low_stock() {
           return catalogItems.reduce((count, product) => {
             const level = stockLevelFor(product);
@@ -387,6 +390,36 @@ test.describe('TPV desktop UI', () => {
           return stockMovements
             .filter((movement) => movement.product_id === productId)
             .slice(0, limit);
+        },
+        async query_stock_movements(request: any) {
+          const search = String(request.search ?? '').trim().toLowerCase();
+          const kind = request.kind ?? null;
+          const matches = stockMovements
+            .filter((movement) => !kind || movement.kind === kind)
+            .filter((movement) => {
+              if (!search) return true;
+              const product = catalogItems.find((item) => item.id === movement.product_id);
+              return (
+                String(product?.sku ?? '').toLowerCase().includes(search) ||
+                String(product?.name ?? '').toLowerCase().includes(search)
+              );
+            })
+            .map((movement) => {
+              const product = catalogItems.find((item) => item.id === movement.product_id);
+              return {
+                ...movement,
+                sku: product?.sku ?? '',
+                name: product?.name ?? ''
+              };
+            });
+          const limit = Number(request.limit ?? 100);
+          const offset = Number(request.offset ?? 0);
+          return {
+            items: matches.slice(offset, offset + limit),
+            total: matches.length,
+            limit,
+            offset
+          };
         },
         async record_stock_movement(request: any) {
           const product = catalogItems.find((item) => item.id === request.product_id);
@@ -771,12 +804,16 @@ test.describe('TPV desktop UI', () => {
               return api.count_low_stock();
             case 'list_stock_movements':
               return api.list_stock_movements(String(args.productId), Number(args.limit ?? 100));
+            case 'query_stock_movements':
+              return api.query_stock_movements(args.request);
             case 'record_stock_movement':
               return api.record_stock_movement(args.request);
             case 'set_stock_minimum':
               return api.set_stock_minimum(args.request);
             case 'set_stock_count':
               return api.set_stock_count(args.request);
+            case 'export_stock_ledger_csv':
+              return api.export_stock_ledger_csv(args.request);
             case 'list_master_data_conflicts':
               return [];
             case 'save_product': {
@@ -1118,6 +1155,34 @@ test.describe('TPV desktop UI', () => {
     await expect(allSummary).toHaveAttribute('aria-pressed', 'true');
     await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(allCount);
     await expect(catalogDialog).toBeVisible();
+
+    await page.getByRole('tab', { name: 'Movimientos' }).click();
+    await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(2);
+    await expect(catalogDialog.locator('.stock-ledger')).toContainText('UI-E2E-1');
+    await catalogDialog
+      .getByLabel('Tipo de movimiento del libro')
+      .selectOption('purchase');
+    await catalogDialog.getByRole('button', { name: 'Buscar', exact: true }).click();
+    await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(1);
+    await expect(catalogDialog.locator('.stock-ledger-row')).toContainText('Entrada');
+    await expect(catalogDialog.locator('.stock-ledger-row')).toContainText('Compra UI');
+    await catalogDialog.getByLabel('Buscar movimientos').fill('sin-coincidencias');
+    await catalogDialog.getByRole('button', { name: 'Buscar', exact: true }).click();
+    await expect(
+      catalogDialog.getByText('No hay movimientos que coincidan con los filtros.')
+    ).toBeVisible();
+    await catalogDialog.getByLabel('Buscar movimientos').fill('');
+    await catalogDialog
+      .getByLabel('Tipo de movimiento del libro')
+      .selectOption('all');
+    await catalogDialog.getByRole('button', { name: 'Buscar', exact: true }).click();
+    await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(2);
+    await catalogDialog.getByRole('button', { name: 'Exportar CSV' }).click();
+    await expect(
+      page.getByText(
+        /Libro de movimientos exportado · \/tmp\/movimientos-stock-e2e\.csv/
+      )
+    ).toBeVisible();
 
     await page.getByRole('tab', { name: 'Tarifas' }).click();
     await page.getByLabel('Código', { exact: true }).fill('E2E-PL');

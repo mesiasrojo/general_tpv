@@ -15,15 +15,16 @@ use tpv_application::{
     FamilyService, InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataRepository,
     MasterDataService, NoteInbox, NoteRepository, NoteService, OpenCashRequest, PriceListService,
     PrintQueueRepository, PrintService, PrinterPort, ProductImportReport, ProductImportRepository,
-    ProductImportService, ProductService, QuarantinedEvent, RecordStockMovementRequest,
-    RectifyInvoiceLinesRequest, RectifyInvoiceRequest, ResetPasswordRequest, SaleHistoryPage,
-    SaleQuery, SaleRepository, SaleService, SaleView, SellerService, SequenceRepository,
-    SessionUser, SetStockCountRequest, SetStockMinimumRequest, StartSaleRequest, StockCountResult,
-    StockRepository, StockService, StoreService, SyncContext, SyncOutboxRepository, SyncService,
-    SyncStatus, TaxService, TimeClockRepository, TimeClockService, TimeClockStatus,
-    UpdateUserRequest, UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest,
-    UpsertProductRequest, UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest,
-    UserRepository, stock_levels_csv, stock_movements_csv,
+    ProductImportService, ProductService, QuarantinedEvent, QueryStockMovementsRequest,
+    RecordStockMovementRequest, RectifyInvoiceLinesRequest, RectifyInvoiceRequest,
+    ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository, SaleService, SaleView,
+    SellerService, SequenceRepository, SessionUser, SetStockCountRequest, SetStockMinimumRequest,
+    StartSaleRequest, StockCountResult, StockMovementPage, StockRepository, StockService,
+    StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService,
+    TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
+    UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest,
+    UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest, UserRepository, stock_levels_csv,
+    stock_movement_ledger_csv, stock_movements_csv,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -1100,6 +1101,40 @@ async fn export_stock_movements_csv(
 }
 
 #[tauri::command]
+async fn export_stock_ledger_csv(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: QueryStockMovementsRequest,
+) -> Result<Option<String>, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let movements = state
+        .stock
+        .movements_for_ledger_export(state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let csv = stock_movement_ledger_csv(&movements);
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .set_file_name(format!(
+            "movimientos-stock-{}.csv",
+            OffsetDateTime::now_utc().date()
+        ))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("ruta de exportación no válida: {error}"))?;
+    std::fs::write(&path, csv.as_bytes())
+        .map_err(|error| format!("no se pudo guardar el CSV: {error}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
 async fn list_stock_movements(
     state: State<'_, AppState>,
     product_id: ProductId,
@@ -1124,6 +1159,20 @@ async fn list_stock_levels_for_products(
     state
         .stock
         .levels_for_products(state.demo.store_id, &product_ids)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn query_stock_movements(
+    state: State<'_, AppState>,
+    request: QueryStockMovementsRequest,
+) -> Result<StockMovementPage, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    state
+        .stock
+        .query_movements(state.demo.store_id, request)
         .await
         .map_err(|error| error.to_string())
 }
@@ -1739,8 +1788,10 @@ fn main() {
             count_low_stock,
             export_stock_csv,
             export_stock_movements_csv,
+            export_stock_ledger_csv,
             list_stock_levels_for_products,
             list_stock_movements,
+            query_stock_movements,
             record_stock_movement,
             set_stock_minimum,
             set_stock_count,
@@ -1857,6 +1908,7 @@ mod e2e_tests {
                 count_low_stock,
                 list_stock_levels_for_products,
                 list_stock_movements,
+                query_stock_movements,
                 record_stock_movement,
                 set_stock_minimum,
                 set_stock_count,
@@ -2253,6 +2305,76 @@ mod e2e_tests {
         let low_after_count =
             invoke(&webview, "count_low_stock", json!({})).expect("count low stock after count");
         assert_eq!(low_after_count, json!(1));
+        let ledger = invoke(
+            &webview,
+            "query_stock_movements",
+            json!({
+                "request": {
+                    "search": "3",
+                    "kind": null,
+                    "limit": 2,
+                    "offset": 0
+                }
+            }),
+        )
+        .expect("query stock ledger");
+        assert_eq!(ledger["total"], 4);
+        assert_eq!(ledger["items"].as_array().expect("ledger items").len(), 2);
+        assert_eq!(ledger["items"][0]["sku"], "3");
+        assert_eq!(ledger["items"][0]["kind"], "adjustment_out");
+        let purchase_ledger = invoke(
+            &webview,
+            "query_stock_movements",
+            json!({
+                "request": {
+                    "search": null,
+                    "kind": "purchase",
+                    "limit": 20,
+                    "offset": 0
+                }
+            }),
+        )
+        .expect("query purchase ledger");
+        assert_eq!(purchase_ledger["total"], 1);
+        assert_eq!(purchase_ledger["items"][0]["reason"], "Reposición E2E");
+        let second_ledger_page = invoke(
+            &webview,
+            "query_stock_movements",
+            json!({
+                "request": {
+                    "search": null,
+                    "product_id": sold_product_id,
+                    "kind": null,
+                    "limit": 1,
+                    "offset": 3
+                }
+            }),
+        )
+        .expect("query second ledger page");
+        assert_eq!(second_ledger_page["total"], 4);
+        assert_eq!(
+            second_ledger_page["items"]
+                .as_array()
+                .expect("ledger page items")
+                .len(),
+            1
+        );
+        assert_eq!(second_ledger_page["items"][0]["kind"], "sale");
+        let empty_ledger = invoke(
+            &webview,
+            "query_stock_movements",
+            json!({
+                "request": {
+                    "search": "no-existe",
+                    "kind": null,
+                    "limit": 20,
+                    "offset": 0
+                }
+            }),
+        )
+        .expect("query empty ledger");
+        assert_eq!(empty_ledger["total"], 0);
+        assert!(empty_ledger["items"].as_array().unwrap().is_empty());
 
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);

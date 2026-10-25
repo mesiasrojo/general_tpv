@@ -8,10 +8,11 @@ use tpv_application::{
     CatalogRepository, CloseCashRequest, ConfirmSaleRequest, CreateUserRequest,
     InvoiceLineSelection, InvoiceRepository, InvoiceService, MasterDataService, OpenCashRequest,
     PriceListItemRequest, PriceListService, PrintQueueRepository, PrintService,
-    RecordStockMovementRequest, RectifyInvoiceLinesRequest, ResetPasswordRequest, SaleQuery,
-    SaleRepository, SaleService, SequenceRepository, SetStockCountRequest, SetStockMinimumRequest,
-    StartSaleRequest, StockRepository, StockService, SyncContext, SyncOutboxRepository,
-    SyncService, UpdateUserRequest, UpsertPriceListRequest, UserRepository,
+    QueryStockMovementsRequest, RecordStockMovementRequest, RectifyInvoiceLinesRequest,
+    ResetPasswordRequest, SaleQuery, SaleRepository, SaleService, SequenceRepository,
+    SetStockCountRequest, SetStockMinimumRequest, StartSaleRequest, StockRepository, StockService,
+    SyncContext, SyncOutboxRepository, SyncService, UpdateUserRequest, UpsertPriceListRequest,
+    UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::audit::{AuditAction, AuditEvent};
@@ -1453,6 +1454,73 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
             .count()
             >= 2
     );
+
+    let ledger = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: None,
+                product_id: None,
+                kind: None,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ledger.total, 3);
+    assert_eq!(ledger.items.len(), 3);
+    assert_eq!(ledger.items[0].sku, product.sku.as_str());
+    assert_eq!(ledger.items[0].name, product.name);
+    assert_eq!(ledger.items[0].kind, StockMovementKind::AdjustmentOut);
+    let purchases = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: Some(product.sku.to_string()),
+                product_id: None,
+                kind: Some(StockMovementKind::Purchase),
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(purchases.total, 1);
+    assert_eq!(purchases.items.len(), 1);
+    assert_eq!(purchases.items[0].kind, StockMovementKind::Purchase);
+    let second_page = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: None,
+                product_id: Some(product.id),
+                kind: None,
+                limit: 1,
+                offset: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_page.total, 3);
+    assert_eq!(second_page.items.len(), 1);
+    assert_eq!(second_page.limit, 1);
+    assert_eq!(second_page.offset, 1);
+    let other_ledger = stock
+        .query_movements(
+            other_store.id,
+            QueryStockMovementsRequest {
+                search: None,
+                product_id: None,
+                kind: None,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(other_ledger.total, 0);
+    assert!(other_ledger.items.is_empty());
 
     let negative_count = stock
         .set_count(

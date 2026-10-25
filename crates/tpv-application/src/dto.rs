@@ -136,6 +136,45 @@ pub struct StockCountResult {
     pub movement: Option<StockMovement>,
 }
 
+/// Movement enriched with product data for the store-wide audit ledger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockMovementView {
+    pub id: StockMovementId,
+    pub store_id: StoreId,
+    pub product_id: ProductId,
+    pub sku: String,
+    pub name: String,
+    pub kind: StockMovementKind,
+    pub quantity: Decimal,
+    pub reason: Option<String>,
+    pub sale_id: Option<SaleId>,
+    pub sale_line_id: Option<SaleLineId>,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryStockMovementsRequest {
+    #[serde(default)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub product_id: Option<ProductId>,
+    #[serde(default)]
+    pub kind: Option<StockMovementKind>,
+    #[serde(default)]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockMovementPage {
+    pub items: Vec<StockMovementView>,
+    /// Total rows matching the filter, not only the returned page.
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertSellerRequest {
     #[serde(default)]

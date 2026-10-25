@@ -35,6 +35,7 @@
     type StockLevel,
     type StockMovement,
     type StockMovementKind,
+    type StockMovementView,
     type Store,
     type SyncStatus,
     type SyncSummary,
@@ -125,7 +126,14 @@
   let catalogBusy = $state(false);
   let catalogFilter = $state('');
   let catalogSection = $state<
-    'products' | 'families' | 'taxes' | 'price-lists' | 'stock' | 'sellers' | 'stores'
+    | 'products'
+    | 'families'
+    | 'taxes'
+    | 'price-lists'
+    | 'stock'
+    | 'movements'
+    | 'sellers'
+    | 'stores'
   >('products');
   let families = $state<Family[]>([]);
   let taxes = $state<Tax[]>([]);
@@ -191,6 +199,15 @@
   let stockExporting = $state(false);
   let stockMovementsExporting = $state(false);
   let stockLoading = $state(false);
+  let stockLedger = $state<StockMovementView[]>([]);
+  let stockLedgerTotal = $state(0);
+  let stockLedgerSearch = $state('');
+  let stockLedgerKind = $state<'all' | StockMovementKind>('all');
+  let stockLedgerLoading = $state(false);
+  let stockLedgerError = $state('');
+  let stockLedgerExporting = $state(false);
+  const stockLedgerPageSize = 100;
+  let stockLedgerHasMore = $derived(stockLedger.length < stockLedgerTotal);
   let importSourceSystem = $state('micro_server');
   let importBatchId = $state('');
   let importFileName = $state('');
@@ -759,6 +776,52 @@
     stockStatusFilter = 'low';
     stockFilter = '';
     await openCatalog();
+  }
+
+  async function openStockLedger() {
+    catalogSection = 'movements';
+    await refreshStockLedger(true);
+  }
+
+  async function exportStockLedger() {
+    if (stockLedgerExporting) return;
+    stockLedgerExporting = true;
+    stockLedgerError = '';
+    try {
+      const path = await api.exportStockLedgerCsv({
+        search: stockLedgerSearch.trim() || null,
+        kind: stockLedgerKind === 'all' ? null : stockLedgerKind,
+        limit: 0,
+        offset: 0
+      });
+      if (path) {
+        message = `Libro de movimientos exportado · ${path}`;
+      }
+    } catch (error) {
+      stockLedgerError = String(error);
+    } finally {
+      stockLedgerExporting = false;
+    }
+  }
+
+  async function refreshStockLedger(reset = true) {
+    if (stockLedgerLoading) return;
+    stockLedgerLoading = true;
+    stockLedgerError = '';
+    try {
+      const page = await api.queryStockMovements({
+        search: stockLedgerSearch.trim() || null,
+        kind: stockLedgerKind === 'all' ? null : stockLedgerKind,
+        limit: stockLedgerPageSize,
+        offset: reset ? 0 : stockLedger.length
+      });
+      stockLedger = reset ? page.items : [...stockLedger, ...page.items];
+      stockLedgerTotal = page.total;
+    } catch (error) {
+      stockLedgerError = String(error);
+    } finally {
+      stockLedgerLoading = false;
+    }
   }
 
   async function refreshCatalog() {
@@ -3041,6 +3104,15 @@
           <button
             type="button"
             role="tab"
+            class:active={catalogSection === 'movements'}
+            aria-selected={catalogSection === 'movements'}
+            onclick={() => void openStockLedger()}
+          >
+            Movimientos
+          </button>
+          <button
+            type="button"
+            role="tab"
             class:active={catalogSection === 'families'}
             aria-selected={catalogSection === 'families'}
             onclick={() => (catalogSection = 'families')}
@@ -3571,6 +3643,102 @@
                 <p class="muted small">Selecciona un artículo para ver sus existencias.</p>
               {/if}
             </div>
+          </div>
+        {/if}
+
+        {#if catalogSection === 'movements'}
+          <div class="stock-ledger">
+            <form
+              class="stock-ledger-toolbar"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void refreshStockLedger(true);
+              }}
+            >
+              <label class="field">
+                <span>Buscar por artículo o SKU</span>
+                <input
+                  bind:value={stockLedgerSearch}
+                  aria-label="Buscar movimientos"
+                  placeholder="Nombre o código"
+                />
+              </label>
+              <label class="field">
+                <span>Tipo de movimiento</span>
+                <select bind:value={stockLedgerKind} aria-label="Tipo de movimiento del libro">
+                  <option value="all">Todos los tipos</option>
+                  <option value="initial">Stock inicial</option>
+                  <option value="purchase">Entrada</option>
+                  <option value="sale">Venta</option>
+                  <option value="return">Devolución</option>
+                  <option value="adjustment_in">Ajuste positivo</option>
+                  <option value="adjustment_out">Ajuste negativo</option>
+                </select>
+              </label>
+              <button class="primary" type="submit" disabled={stockLedgerLoading}>
+                {stockLedgerLoading ? 'Buscando…' : 'Buscar'}
+              </button>
+              <button
+                class="secondary"
+                type="button"
+                disabled={stockLedgerExporting || stockLedgerLoading}
+                onclick={() => void exportStockLedger()}
+              >
+                {stockLedgerExporting ? 'Exportando…' : 'Exportar CSV'}
+              </button>
+            </form>
+
+            {#if stockLedgerError}
+              <p class="error small">{stockLedgerError}</p>
+            {/if}
+
+            <div class="stock-ledger-heading">
+              <p class="eyebrow">LIBRO DE MOVIMIENTOS</p>
+              <span class="muted small">
+                {stockLedger.length} de {stockLedgerTotal} movimientos
+              </span>
+            </div>
+
+            {#if stockLedgerLoading && stockLedger.length === 0}
+              <p class="muted small">Cargando movimientos…</p>
+            {:else if stockLedger.length === 0}
+              <p class="muted small">No hay movimientos que coincidan con los filtros.</p>
+            {:else}
+              <div class="stock-ledger-list">
+                {#each stockLedger as movement (movement.id)}
+                  <div class="stock-ledger-row">
+                    <span class="stock-ledger-main">
+                      <strong>{movement.sku} · {movement.name}</strong>
+                      <span class="muted small">
+                        {stockKindLabel(movement.kind)}
+                        {movement.reason ? ` · ${movement.reason}` : ''}
+                      </span>
+                    </span>
+                    <span class="stock-ledger-side">
+                      <strong
+                        class:negative={movement.kind === 'sale' ||
+                          movement.kind === 'adjustment_out'}
+                      >
+                        {movement.kind === 'sale' || movement.kind === 'adjustment_out'
+                          ? '−'
+                          : '+'}{formatQuantity(movement.quantity)}
+                      </strong>
+                      <span class="muted small">{formatDateTime(movement.occurred_at)}</span>
+                    </span>
+                  </div>
+                {/each}
+              </div>
+              {#if stockLedgerHasMore}
+                <button
+                  class="secondary stock-ledger-more"
+                  type="button"
+                  disabled={stockLedgerLoading}
+                  onclick={() => void refreshStockLedger(false)}
+                >
+                  {stockLedgerLoading ? 'Cargando…' : 'Cargar más'}
+                </button>
+              {/if}
+            {/if}
           </div>
         {/if}
 
@@ -5311,6 +5479,71 @@
     color: var(--danger-text);
   }
 
+  .stock-ledger {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .stock-ledger-toolbar {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.6fr) auto auto;
+    align-items: end;
+    gap: 10px;
+  }
+
+  .stock-ledger-toolbar .field {
+    margin: 0;
+  }
+
+  .stock-ledger-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .stock-ledger-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stock-ledger-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .stock-ledger-main,
+  .stock-ledger-side {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .stock-ledger-main strong {
+    overflow-wrap: anywhere;
+  }
+
+  .stock-ledger-side {
+    align-items: flex-end;
+    flex: 0 0 auto;
+  }
+
+  .stock-ledger-side .negative {
+    color: var(--danger-text);
+  }
+
+  .stock-ledger-more {
+    align-self: center;
+  }
+
   .stock-movements {
     margin-top: 12px;
   }
@@ -5644,8 +5877,17 @@
     .product-form,
     .stock-form,
     .stock-count-form,
+    .stock-ledger-toolbar,
     .user-fields {
       grid-template-columns: 1fr;
+    }
+
+    .stock-ledger-row {
+      align-items: flex-start;
+    }
+
+    .stock-ledger-side {
+      align-items: flex-end;
     }
   }
 </style>

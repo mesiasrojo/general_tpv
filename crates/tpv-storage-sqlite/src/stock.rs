@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
-use tpv_application::{Result as AppResult, StockCountCommand, StockCountResult, StockRepository};
+use tpv_application::{
+    Result as AppResult, StockCountCommand, StockCountResult, StockMovementFilter,
+    StockMovementPage, StockMovementView, StockRepository,
+};
 use tpv_domain::Sku;
 use tpv_domain::audit::AuditEvent;
 use tpv_domain::ids::{ProductId, SaleId, SaleLineId, StockMovementId, StoreId};
@@ -29,6 +32,52 @@ fn row_to_level(row: &SqliteRow) -> StorageResult<StockLevel> {
         min_quantity: parse_decimal(&row.try_get::<String, _>("min_quantity")?)?,
         updated_at: parse_optional_time(row.try_get("updated_at")?)?,
     })
+}
+
+fn row_to_movement_view(row: &SqliteRow) -> StorageResult<StockMovementView> {
+    let movement = row_to_movement(row)?;
+    Ok(StockMovementView {
+        id: movement.id,
+        store_id: movement.store_id,
+        product_id: movement.product_id,
+        sku: row.try_get("sku")?,
+        name: row.try_get("name")?,
+        kind: movement.kind,
+        quantity: movement.quantity.as_decimal(),
+        reason: movement.reason,
+        sale_id: movement.sale_id,
+        sale_line_id: movement.sale_line_id,
+        occurred_at: movement.occurred_at,
+    })
+}
+
+fn push_movement_filters(
+    query: &mut QueryBuilder<'_, Sqlite>,
+    filter: &StockMovementFilter,
+) -> StorageResult<()> {
+    query
+        .push(" WHERE sm.store_id = ")
+        .push_bind(filter.store_id.to_string());
+    if let Some(product_id) = filter.product_id {
+        query
+            .push(" AND sm.product_id = ")
+            .push_bind(product_id.to_string());
+    }
+    if let Some(kind) = filter.kind {
+        query
+            .push(" AND sm.kind = ")
+            .push_bind(enum_to_text(&kind)?);
+    }
+    if let Some(search) = &filter.search {
+        let pattern = format!("%{}%", search.to_lowercase());
+        query
+            .push(" AND (lower(p.sku) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR lower(p.name) LIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+    Ok(())
 }
 
 fn row_to_movement(row: &SqliteRow) -> StorageResult<StockMovement> {
@@ -306,6 +355,42 @@ impl SqliteStore {
         rows.iter().map(row_to_movement).collect()
     }
 
+    async fn query_stock_movements_inner(
+        &self,
+        filter: &StockMovementFilter,
+    ) -> StorageResult<StockMovementPage> {
+        let mut count = QueryBuilder::new(
+            "SELECT COUNT(*)
+             FROM stock_movements sm
+             JOIN products p ON p.id = sm.product_id",
+        );
+        push_movement_filters(&mut count, filter)?;
+        let total: i64 = count.build_query_scalar().fetch_one(self.pool()).await?;
+        let mut query = QueryBuilder::new(
+            "SELECT sm.id, sm.store_id, sm.product_id, sm.kind, sm.quantity, sm.reason,
+                    sm.sale_id, sm.sale_line_id, sm.occurred_at, p.sku, p.name
+             FROM stock_movements sm
+             JOIN products p ON p.id = sm.product_id",
+        );
+        push_movement_filters(&mut query, filter)?;
+        query
+            .push(" ORDER BY sm.occurred_at DESC, sm.rowid DESC LIMIT ")
+            .push_bind(i64::from(filter.limit))
+            .push(" OFFSET ")
+            .push_bind(i64::from(filter.offset));
+        let rows = query.build().fetch_all(self.pool()).await?;
+        let items = rows
+            .iter()
+            .map(row_to_movement_view)
+            .collect::<StorageResult<Vec<_>>>()?;
+        Ok(StockMovementPage {
+            items,
+            total: u64::try_from(total).unwrap_or_default(),
+            limit: filter.limit,
+            offset: filter.offset,
+        })
+    }
+
     async fn record_stock_movement_inner(
         &self,
         movement: &StockMovement,
@@ -466,6 +551,10 @@ impl StockRepository for SqliteStore {
         Ok(self
             .list_stock_movements_inner(store_id, product_id, limit)
             .await?)
+    }
+
+    async fn query_movements(&self, filter: &StockMovementFilter) -> AppResult<StockMovementPage> {
+        Ok(self.query_stock_movements_inner(filter).await?)
     }
 
     async fn record_movement(&self, movement: &StockMovement, audit: &AuditEvent) -> AppResult<()> {
