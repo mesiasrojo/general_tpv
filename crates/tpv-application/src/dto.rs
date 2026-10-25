@@ -115,6 +115,7 @@ pub enum StockLevelStatus {
     #[default]
     All,
     Low,
+    Restock,
     Out,
 }
 

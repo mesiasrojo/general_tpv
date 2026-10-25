@@ -19,12 +19,13 @@ use tpv_application::{
     RecordStockMovementRequest, RectifyInvoiceLinesRequest, RectifyInvoiceRequest,
     ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository, SaleService, SaleView,
     SellerService, SequenceRepository, SessionUser, SetStockCountRequest, SetStockMinimumRequest,
-    StartSaleRequest, StockCountResult, StockLevelsQuery, StockMovementPage, StockRepository,
-    StockService, StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus,
-    TaxService, TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
-    UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest,
-    UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest, UserRepository, stock_levels_csv,
-    stock_movement_ledger_csv, stock_movements_csv,
+    StartSaleRequest, StockCountResult, StockLevelStatus, StockLevelsQuery, StockMovementPage,
+    StockRepository, StockService, StoreService, SyncContext, SyncOutboxRepository, SyncService,
+    SyncStatus, TaxService, TimeClockRepository, TimeClockService, TimeClockStatus,
+    UpdateUserRequest, UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest,
+    UpsertProductRequest, UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest,
+    UserRepository, stock_count_sheet_csv, stock_levels_csv, stock_movement_ledger_csv,
+    stock_movements_csv, stock_replenishment_csv,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::cash::{CashCount, CashMovementKind, CashSession};
@@ -1050,6 +1051,78 @@ async fn export_stock_csv(
 }
 
 #[tauri::command]
+async fn export_stock_replenishment_csv(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: StockLevelsQuery,
+) -> Result<Option<String>, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let request = StockLevelsQuery {
+        search: request.search,
+        status: StockLevelStatus::Restock,
+    };
+    let levels = state
+        .stock
+        .levels_for_export(state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let csv = stock_replenishment_csv(&levels);
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .set_file_name(format!(
+            "pedido-reposicion-{}.csv",
+            OffsetDateTime::now_utc().date()
+        ))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("ruta de exportación no válida: {error}"))?;
+    std::fs::write(&path, csv.as_bytes())
+        .map_err(|error| format!("no se pudo guardar el CSV: {error}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+async fn export_stock_count_sheet_csv(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: StockLevelsQuery,
+) -> Result<Option<String>, String> {
+    require_manager(state.inner())?;
+    let state = state.inner().clone();
+    let levels = state
+        .stock
+        .levels_for_export(state.demo.store_id, request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let csv = stock_count_sheet_csv(&levels);
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .set_file_name(format!(
+            "conteo-fisico-{}.csv",
+            OffsetDateTime::now_utc().date()
+        ))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("ruta de exportación no válida: {error}"))?;
+    std::fs::write(&path, csv.as_bytes())
+        .map_err(|error| format!("no se pudo guardar el CSV: {error}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
 async fn export_stock_movements_csv(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1788,6 +1861,8 @@ fn main() {
             list_stock_levels,
             count_low_stock,
             export_stock_csv,
+            export_stock_replenishment_csv,
+            export_stock_count_sheet_csv,
             export_stock_movements_csv,
             export_stock_ledger_csv,
             list_stock_levels_for_products,

@@ -182,7 +182,7 @@ export interface StockMovementPage {
   offset: number;
 }
 
-export type StockLevelStatus = 'all' | 'low' | 'out';
+export type StockLevelStatus = 'all' | 'low' | 'restock' | 'out';
 
 export interface StockLevelsQuery {
   search?: string | null;
@@ -644,6 +644,10 @@ export const api = {
   listStockLevels: () => invoke<StockLevel[]>('list_stock_levels'),
   exportStockCsv: (request: StockLevelsQuery) =>
     invoke<string | null>('export_stock_csv', { request }),
+  exportStockReplenishmentCsv: (request: StockLevelsQuery) =>
+    invoke<string | null>('export_stock_replenishment_csv', { request }),
+  exportStockCountSheetCsv: (request: StockLevelsQuery) =>
+    invoke<string | null>('export_stock_count_sheet_csv', { request }),
   exportStockMovementsCsv: (productId: string) =>
     invoke<string | null>('export_stock_movements_csv', { productId }),
   listStockLevelsForProducts: (productIds: string[]) =>

@@ -370,6 +370,14 @@ test.describe('TPV desktop UI', () => {
           (window as any).__lastStockExportRequest = request;
           return '/tmp/stock-e2e.csv';
         },
+        async export_stock_replenishment_csv(request: any) {
+          (window as any).__lastReplenishmentRequest = request;
+          return '/tmp/pedido-reposicion-e2e.csv';
+        },
+        async export_stock_count_sheet_csv(request: any) {
+          (window as any).__lastCountSheetRequest = request;
+          return '/tmp/conteo-fisico-e2e.csv';
+        },
         async export_stock_movements_csv(_productId: string) {
           return '/tmp/movimientos-e2e.csv';
         },
@@ -393,11 +401,14 @@ test.describe('TPV desktop UI', () => {
             .slice(0, limit);
         },
         async query_stock_movements(request: any) {
+          (window as any).__lastLedgerRequest = request;
           const search = String(request.search ?? '').trim().toLowerCase();
+          const productId = request.product_id ?? null;
           const kind = request.kind ?? null;
           const from = request.from_ms == null ? null : Number(request.from_ms);
           const to = request.to_ms == null ? null : Number(request.to_ms);
           const matches = stockMovements
+            .filter((movement) => !productId || movement.product_id === productId)
             .filter((movement) => !kind || movement.kind === kind)
             .filter((movement) => {
               const occurred = Date.parse(movement.occurred_at);
@@ -407,7 +418,8 @@ test.describe('TPV desktop UI', () => {
               const product = catalogItems.find((item) => item.id === movement.product_id);
               return (
                 String(product?.sku ?? '').toLowerCase().includes(search) ||
-                String(product?.name ?? '').toLowerCase().includes(search)
+                String(product?.name ?? '').toLowerCase().includes(search) ||
+                String(movement.reason ?? '').toLowerCase().includes(search)
               );
             })
             .map((movement) => {
@@ -802,6 +814,10 @@ test.describe('TPV desktop UI', () => {
               return api.list_stock_levels();
             case 'export_stock_csv':
               return api.export_stock_csv(args.request);
+            case 'export_stock_replenishment_csv':
+              return api.export_stock_replenishment_csv(args.request);
+            case 'export_stock_count_sheet_csv':
+              return api.export_stock_count_sheet_csv(args.request);
             case 'export_stock_movements_csv':
               return api.export_stock_movements_csv(String(args.productId));
             case 'list_stock_levels_for_products':
@@ -1136,15 +1152,40 @@ test.describe('TPV desktop UI', () => {
     await expect(page.locator('.stock-current')).toContainText('7');
     await expect(page.locator('.stock-current')).toContainText('Reponer 13');
     await expect(page.locator('.stock-level-row.selected')).toContainText('reponer 13');
+    await catalogDialog.getByRole('button', { name: 'Preparar entrada' }).click();
+    const stockDetail = catalogDialog.locator('.stock-detail-panel');
+    await expect(stockDetail.getByLabel('Cantidad', { exact: true })).toHaveValue('13');
+    await expect(stockDetail.getByLabel('Motivo', { exact: true })).toHaveValue(
+      'Reposición sugerida'
+    );
+    await expect(stockDetail.getByLabel('Tipo de movimiento')).toHaveValue('purchase');
+    await stockDetail.getByLabel('Cantidad', { exact: true }).fill('1');
+    await stockDetail.getByLabel('Motivo', { exact: true }).fill('');
     await expect(page.locator('.stock-movements')).toContainText('Ajuste negativo');
     await expect(page.locator('.stock-movements')).toContainText('Conteo UI');
     await catalogDialog.getByRole('button', { name: 'Exportar CSV' }).click();
     await expect(page.getByText(/Stock exportado · \/tmp\/stock-e2e\.csv/)).toBeVisible();
+    await catalogDialog.getByRole('button', { name: 'Pedido de reposición' }).click();
+    await expect(
+      page.getByText(/Pedido de reposición exportado · \/tmp\/pedido-reposicion-e2e\.csv/)
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__lastReplenishmentRequest?.status)
+      )
+      .toBe('restock');
     await expect(page.locator('.stock-movements')).toContainText('Compra UI');
     await catalogDialog.getByRole('button', { name: 'Exportar historial' }).click();
     await expect(
       page.getByText(/Historial exportado · \/tmp\/movimientos-e2e\.csv/)
     ).toBeVisible();
+    const restockSummary = catalogDialog.locator('.stock-summary-card.restock');
+    await expect(restockSummary.locator('strong')).toHaveText('1');
+    await expect(restockSummary).toContainText('13 uds');
+    await restockSummary.click();
+    await expect(restockSummary).toHaveAttribute('aria-pressed', 'true');
+    await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(1);
+
     const lowSummary = catalogDialog.locator('.stock-summary-card.low');
     await expect(lowSummary.locator('strong')).toHaveText('1');
     await lowSummary.click();
@@ -1161,6 +1202,15 @@ test.describe('TPV desktop UI', () => {
         page.evaluate(() => (window as any).__lastStockExportRequest?.search)
       )
       .toBeNull();
+    await catalogDialog.getByRole('button', { name: 'Hoja de conteo' }).click();
+    await expect(
+      page.getByText(/Hoja de conteo exportada · \/tmp\/conteo-fisico-e2e\.csv/)
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__lastCountSheetRequest?.status)
+      )
+      .toBe('low');
 
     const outSummary = catalogDialog.locator('.stock-summary-card.out');
     const outCount = Number(await outSummary.locator('strong').textContent());
@@ -1175,6 +1225,26 @@ test.describe('TPV desktop UI', () => {
     await expect(catalogDialog.locator('.stock-level-row')).toHaveCount(allCount);
     await expect(catalogDialog).toBeVisible();
 
+    await catalogDialog.getByRole('button', { name: 'Ver libro completo' }).click();
+    await expect(page.getByRole('tab', { name: 'Movimientos' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(catalogDialog.locator('.stock-ledger-filter')).toContainText('UI-E2E-1');
+    await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(2);
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__lastLedgerRequest?.product_id)
+      )
+      .toBeTruthy();
+    await catalogDialog.getByRole('button', { name: 'Quitar filtro' }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__lastLedgerRequest?.product_id)
+      )
+      .toBeNull();
+    await expect(catalogDialog.locator('.stock-ledger-filter')).toHaveCount(0);
+
     await page.getByRole('tab', { name: 'Movimientos' }).click();
     await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(2);
     await expect(catalogDialog.locator('.stock-ledger')).toContainText('UI-E2E-1');
@@ -1184,6 +1254,10 @@ test.describe('TPV desktop UI', () => {
     await catalogDialog.getByRole('button', { name: 'Buscar', exact: true }).click();
     await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(1);
     await expect(catalogDialog.locator('.stock-ledger-row')).toContainText('Entrada');
+    await expect(catalogDialog.locator('.stock-ledger-row')).toContainText('Compra UI');
+    await catalogDialog.getByLabel('Buscar movimientos').fill('compra ui');
+    await catalogDialog.getByRole('button', { name: 'Buscar', exact: true }).click();
+    await expect(catalogDialog.locator('.stock-ledger-row')).toHaveCount(1);
     await expect(catalogDialog.locator('.stock-ledger-row')).toContainText('Compra UI');
     await catalogDialog.getByLabel('Buscar movimientos').fill('sin-coincidencias');
     await catalogDialog.getByRole('button', { name: 'Buscar', exact: true }).click();

@@ -74,6 +74,8 @@ fn push_movement_filters(
             .push(" AND (lower(p.sku) LIKE ")
             .push_bind(pattern.clone())
             .push(" OR lower(p.name) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR lower(COALESCE(sm.reason, '')) LIKE ")
             .push_bind(pattern)
             .push(")");
     }

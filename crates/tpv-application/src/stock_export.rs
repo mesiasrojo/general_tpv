@@ -34,6 +34,63 @@ pub fn stock_levels_csv(levels: &[StockLevel]) -> String {
     output
 }
 
+/// Printable worksheet for a physical inventory count. Registered quantities
+/// are included as a reference, while the count, difference and reason columns
+/// stay empty so staff can fill them during the count.
+pub fn stock_count_sheet_csv(levels: &[StockLevel]) -> String {
+    let mut output = String::from('\u{feff}');
+    output.push_str(
+        "Codigo;Articulo;Existencia registrada;Minimo;A reponer;Bajo minimo;Conteo fisico;Diferencia;Motivo\r\n",
+    );
+    for level in levels {
+        output.push_str(&csv_cell(level.sku.as_str()));
+        output.push(';');
+        output.push_str(&csv_cell(&level.name));
+        output.push(';');
+        output.push_str(&decimal_cell(level.quantity));
+        output.push(';');
+        output.push_str(&decimal_cell(level.min_quantity));
+        output.push(';');
+        output.push_str(&decimal_cell(level.restock_quantity()));
+        output.push(';');
+        output.push_str(if level.is_low() { "SI" } else { "NO" });
+        output.push(';');
+        output.push_str(";;\r\n");
+    }
+    output
+}
+
+/// Builds a purchase order proposal with only the products that need stock.
+/// Rows are defensive: a level without a pending restock is omitted even if a
+/// caller passes a wider collection.
+pub fn stock_replenishment_csv(levels: &[StockLevel]) -> String {
+    let mut output = String::from('\u{feff}');
+    output.push_str("Codigo;Articulo;Existencia;Minimo;Cantidad a pedir;Actualizado\r\n");
+    for level in levels {
+        let quantity = level.restock_quantity();
+        if quantity <= rust_decimal::Decimal::ZERO {
+            continue;
+        }
+        let updated_at = level
+            .updated_at
+            .and_then(|value| value.format(&Rfc3339).ok())
+            .unwrap_or_default();
+        output.push_str(&csv_cell(level.sku.as_str()));
+        output.push(';');
+        output.push_str(&csv_cell(&level.name));
+        output.push(';');
+        output.push_str(&decimal_cell(level.quantity));
+        output.push(';');
+        output.push_str(&decimal_cell(level.min_quantity));
+        output.push(';');
+        output.push_str(&decimal_cell(quantity));
+        output.push(';');
+        output.push_str(&csv_cell(&updated_at));
+        output.push_str("\r\n");
+    }
+    output
+}
+
 /// Builds the auditable movement history of one product. The quantity is the
 /// positive amount recorded in the ledger and `Efecto` carries its signed
 /// effect on the level.
@@ -135,10 +192,18 @@ fn decimal_cell(value: rust_decimal::Decimal) -> String {
 }
 
 fn csv_cell(value: &str) -> String {
-    if value.contains([';', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    // Spreadsheet applications may evaluate text cells beginning with these
+    // characters as formulas. A leading apostrophe keeps the content literal.
+    let first = value.trim_start().chars().next();
+    let guarded = if matches!(first, Some('=' | '+' | '-' | '@' | '\t' | '\r')) {
+        format!("'{value}")
     } else {
         value.to_string()
+    };
+    if guarded.contains([';', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
     }
 }
 
@@ -238,5 +303,61 @@ mod tests {
         };
         let csv = stock_levels_csv(&[level]);
         assert!(csv.contains("A-1;Producto;5;3,5;0;NO;\r\n"));
+    }
+
+    #[test]
+    fn csv_cells_cannot_inject_spreadsheet_formulas() {
+        assert_eq!(csv_cell("=SUM(A1:A2)"), "'=SUM(A1:A2)");
+        assert_eq!(csv_cell("@cmd"), "'@cmd");
+        assert_eq!(csv_cell("-A-1"), "'-A-1");
+        assert_eq!(csv_cell("  +cmd"), "'  +cmd");
+        assert_eq!(csv_cell("A;B"), "\"A;B\"");
+        assert_eq!(csv_cell("Producto normal"), "Producto normal");
+    }
+
+    #[test]
+    fn purchase_order_contains_only_pending_products() {
+        let pending = StockLevel {
+            store_id: StoreId::new(),
+            product_id: ProductId::new(),
+            sku: Sku::new("A-1").unwrap(),
+            name: "Producto".into(),
+            quantity: Decimal::new(15, 1),
+            min_quantity: Decimal::new(4, 0),
+            updated_at: None,
+        };
+        let healthy = StockLevel {
+            store_id: StoreId::new(),
+            product_id: ProductId::new(),
+            sku: Sku::new("A-2").unwrap(),
+            name: "Sobrado".into(),
+            quantity: Decimal::new(6, 0),
+            min_quantity: Decimal::new(4, 0),
+            updated_at: None,
+        };
+        let csv = stock_replenishment_csv(&[pending, healthy]);
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv.contains("Codigo;Articulo;Existencia;Minimo;Cantidad a pedir;Actualizado\r\n"));
+        assert!(csv.contains("A-1;Producto;1,5;4;2,5;\r\n"));
+        assert!(!csv.contains("A-2"));
+    }
+
+    #[test]
+    fn count_sheet_leaves_manual_columns_empty() {
+        let level = StockLevel {
+            store_id: StoreId::new(),
+            product_id: ProductId::new(),
+            sku: Sku::new("A-1").unwrap(),
+            name: "Producto".into(),
+            quantity: Decimal::new(15, 1),
+            min_quantity: Decimal::new(4, 0),
+            updated_at: None,
+        };
+        let csv = stock_count_sheet_csv(&[level]);
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv.contains(
+            "Codigo;Articulo;Existencia registrada;Minimo;A reponer;Bajo minimo;Conteo fisico;Diferencia;Motivo\r\n"
+        ));
+        assert!(csv.contains("A-1;Producto;1,5;4;2,5;SI;;;\r\n"));
     }
 }

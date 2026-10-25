@@ -184,7 +184,7 @@
   let priceListProductPrice = $state('');
   let stockLevels = $state<StockLevel[]>([]);
   let stockFilter = $state('');
-  let stockStatusFilter = $state<'all' | 'low' | 'out'>('all');
+  let stockStatusFilter = $state<'all' | 'low' | 'restock' | 'out'>('all');
   let lowStockAlertCount = $state(0);
   let stockSelectedProductId = $state<string | null>(null);
   let stockMovements = $state<StockMovement[]>([]);
@@ -197,11 +197,15 @@
   let stockCountReason = $state('');
   let stockCountBusy = $state(false);
   let stockExporting = $state(false);
+  let stockReplenishmentExporting = $state(false);
+  let stockCountSheetExporting = $state(false);
   let stockMovementsExporting = $state(false);
   let stockLoading = $state(false);
   let stockLedger = $state<StockMovementView[]>([]);
   let stockLedgerTotal = $state(0);
   let stockLedgerSearch = $state('');
+  let stockLedgerProductId = $state<string | null>(null);
+  let stockLedgerProductLabel = $state('');
   let stockLedgerKind = $state<'all' | StockMovementKind>('all');
   let stockLedgerFrom = $state('');
   let stockLedgerTo = $state('');
@@ -263,6 +267,9 @@
   let filteredStock = $derived(
     stockLevels.filter((level) => {
       if (stockStatusFilter === 'low' && !isStockLow(level)) return false;
+      if (stockStatusFilter === 'restock' && Number.parseFloat(stockRestock(level)) <= 0) {
+        return false;
+      }
       if (stockStatusFilter === 'out') {
         const quantity = Number.parseFloat(level.quantity);
         if (!Number.isFinite(quantity) || quantity > 0) return false;
@@ -279,6 +286,17 @@
     stockLevels.find((level) => level.product_id === stockSelectedProductId) ?? null
   );
   let lowStockCount = $derived(stockLevels.filter((level) => isStockLow(level)).length);
+  let stockRestockCount = $derived(
+    stockLevels.filter((level) => Number.parseFloat(stockRestock(level)) > 0).length
+  );
+  let stockRestockUnits = $derived(
+    stockLevels
+      .reduce((total, level) => {
+        const missing = Number.parseFloat(stockRestock(level));
+        return total + (Number.isFinite(missing) ? missing : 0);
+      }, 0)
+      .toFixed(3)
+  );
   let stockOutCount = $derived(
     stockLevels.filter((level) => {
       const quantity = Number.parseFloat(level.quantity);
@@ -781,7 +799,26 @@
   }
 
   async function openStockLedger() {
+    stockLedgerProductId = null;
+    stockLedgerProductLabel = '';
     catalogSection = 'movements';
+    await refreshStockLedger(true);
+  }
+
+  async function openProductLedger(level: StockLevel) {
+    stockLedgerProductId = level.product_id;
+    stockLedgerProductLabel = `${level.sku} · ${level.name}`;
+    stockLedgerSearch = '';
+    stockLedgerKind = 'all';
+    stockLedgerFrom = '';
+    stockLedgerTo = '';
+    catalogSection = 'movements';
+    await refreshStockLedger(true);
+  }
+
+  async function clearStockLedgerProduct() {
+    stockLedgerProductId = null;
+    stockLedgerProductLabel = '';
     await refreshStockLedger(true);
   }
 
@@ -800,6 +837,7 @@
     try {
       const path = await api.exportStockLedgerCsv({
         search: stockLedgerSearch.trim() || null,
+        product_id: stockLedgerProductId,
         kind: stockLedgerKind === 'all' ? null : stockLedgerKind,
         from_ms: localDateBoundary(stockLedgerFrom, false),
         to_ms: localDateBoundary(stockLedgerTo, true),
@@ -823,6 +861,7 @@
     try {
       const page = await api.queryStockMovements({
         search: stockLedgerSearch.trim() || null,
+        product_id: stockLedgerProductId,
         kind: stockLedgerKind === 'all' ? null : stockLedgerKind,
         from_ms: localDateBoundary(stockLedgerFrom, false),
         to_ms: localDateBoundary(stockLedgerTo, true),
@@ -961,7 +1000,13 @@
     const quantity = Number.parseFloat(level.quantity);
     if (!Number.isFinite(minimum) || !Number.isFinite(quantity) || minimum <= 0) return '0';
     const missing = minimum - quantity;
-    return missing > 0 ? missing.toFixed(3) : '0';
+    return missing > 0 ? missing.toFixed(3).replace(/\.?0+$/, '') : '0';
+  }
+
+  function prepareRestock(level: StockLevel) {
+    stockMovementKind = 'purchase';
+    stockQuantity = stockRestock(level);
+    stockReason = 'Reposición sugerida';
   }
 
   async function refreshLowStockAlert() {
@@ -1010,6 +1055,8 @@
   async function selectStockLevel(level: StockLevel) {
     stockSelectedProductId = level.product_id;
     stockMinQuantity = level.min_quantity;
+    stockMovementKind = 'purchase';
+    stockQuantity = '1';
     stockReason = '';
     stockCountedQuantity = level.quantity;
     stockCountReason = '';
@@ -1130,6 +1177,44 @@
       catalogError = String(error);
     } finally {
       stockExporting = false;
+    }
+  }
+
+  async function exportStockReplenishment() {
+    if (stockReplenishmentExporting) return;
+    stockReplenishmentExporting = true;
+    catalogError = '';
+    try {
+      const path = await api.exportStockReplenishmentCsv({
+        search: stockFilter.trim() || null,
+        status: 'restock'
+      });
+      if (path) {
+        message = `Pedido de reposición exportado · ${path}`;
+      }
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockReplenishmentExporting = false;
+    }
+  }
+
+  async function exportStockCountSheet() {
+    if (stockCountSheetExporting) return;
+    stockCountSheetExporting = true;
+    catalogError = '';
+    try {
+      const path = await api.exportStockCountSheetCsv({
+        search: stockFilter.trim() || null,
+        status: stockStatusFilter
+      });
+      if (path) {
+        message = `Hoja de conteo exportada · ${path}`;
+      }
+    } catch (error) {
+      catalogError = String(error);
+    } finally {
+      stockCountSheetExporting = false;
     }
   }
 
@@ -3418,6 +3503,17 @@
               <strong>{lowStockCount}</strong>
             </button>
             <button
+              class="stock-summary-card restock"
+              class:active={stockStatusFilter === 'restock'}
+              type="button"
+              aria-pressed={stockStatusFilter === 'restock'}
+              onclick={() => (stockStatusFilter = 'restock')}
+            >
+              <span class="muted small">A reponer</span>
+              <strong>{stockRestockCount}</strong>
+              <span class="muted small">{formatQuantity(stockRestockUnits)} uds</span>
+            </button>
+            <button
               class="stock-summary-card out"
               class:active={stockStatusFilter === 'out'}
               type="button"
@@ -3450,6 +3546,22 @@
                     onclick={() => void exportStockCsv()}
                   >
                     {stockExporting ? 'Exportando…' : 'Exportar CSV'}
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={stockReplenishmentExporting}
+                    onclick={() => void exportStockReplenishment()}
+                  >
+                    {stockReplenishmentExporting ? 'Exportando…' : 'Pedido de reposición'}
+                  </button>
+                  <button
+                    class="secondary"
+                    type="button"
+                    disabled={stockCountSheetExporting}
+                    onclick={() => void exportStockCountSheet()}
+                  >
+                    {stockCountSheetExporting ? 'Exportando…' : 'Hoja de conteo'}
                   </button>
                 {/if}
               </div>
@@ -3489,6 +3601,8 @@
                   <p class="muted small">
                     {#if stockStatusFilter === 'low'}
                       No hay artículos por debajo de su mínimo.
+                    {:else if stockStatusFilter === 'restock'}
+                      No hay artículos que reponer.
                     {:else if stockStatusFilter === 'out'}
                       No hay artículos sin existencias.
                     {:else}
@@ -3521,6 +3635,21 @@
                 </div>
 
                 {#if session?.user.role === 'admin' || session?.user.role === 'manager'}
+                  {#if Number.parseFloat(stockRestock(selectedStockLevel)) > 0}
+                    <div class="stock-restock-suggestion">
+                      <span class="muted small">
+                        Entrada sugerida: {formatQuantity(stockRestock(selectedStockLevel))} uds
+                        para alcanzar el mínimo.
+                      </span>
+                      <button
+                        class="secondary"
+                        type="button"
+                        onclick={() => prepareRestock(selectedStockLevel)}
+                      >
+                        Preparar entrada
+                      </button>
+                    </div>
+                  {/if}
                   <form
                     class="stock-form"
                     onsubmit={(event) => {
@@ -3635,14 +3764,23 @@
                   <div class="stock-movements-heading">
                     <p class="eyebrow">ÚLTIMOS MOVIMIENTOS</p>
                     {#if session?.user.role === 'admin' || session?.user.role === 'manager'}
-                      <button
-                        class="secondary stock-history-export"
-                        type="button"
-                        disabled={stockMovementsExporting}
-                        onclick={() => void exportStockMovements()}
-                      >
-                        {stockMovementsExporting ? 'Exportando…' : 'Exportar historial'}
-                      </button>
+                      <div class="stock-history-actions">
+                        <button
+                          class="secondary"
+                          type="button"
+                          onclick={() => void openProductLedger(selectedStockLevel)}
+                        >
+                          Ver libro completo
+                        </button>
+                        <button
+                          class="secondary stock-history-export"
+                          type="button"
+                          disabled={stockMovementsExporting}
+                          onclick={() => void exportStockMovements()}
+                        >
+                          {stockMovementsExporting ? 'Exportando…' : 'Exportar historial'}
+                        </button>
+                      </div>
                     {/if}
                   </div>
                   {#if stockLoading}
@@ -3688,11 +3826,11 @@
               }}
             >
               <label class="field">
-                <span>Buscar por artículo o SKU</span>
+                <span>Buscar por artículo, SKU o motivo</span>
                 <input
                   bind:value={stockLedgerSearch}
                   aria-label="Buscar movimientos"
-                  placeholder="Nombre o código"
+                  placeholder="Nombre, código o motivo"
                 />
               </label>
               <label class="field">
@@ -3738,6 +3876,19 @@
                 {stockLedger.length} de {stockLedgerTotal} movimientos
               </span>
             </div>
+            {#if stockLedgerProductId}
+              <div class="stock-ledger-filter">
+                <span>Artículo: <strong>{stockLedgerProductLabel}</strong></span>
+                <button
+                  class="icon"
+                  type="button"
+                  disabled={stockLedgerLoading}
+                  onclick={() => void clearStockLedgerProduct()}
+                >
+                  Quitar filtro
+                </button>
+              </div>
+            {/if}
 
             {#if stockLedgerLoading && stockLedger.length === 0}
               <p class="muted small">Cargando movimientos…</p>
@@ -5364,6 +5515,10 @@
     color: var(--warning);
   }
 
+  .stock-summary-card.restock strong {
+    color: var(--accent);
+  }
+
   .stock-summary-card.out strong {
     color: var(--danger-text);
   }
@@ -5458,6 +5613,36 @@
 
   .stock-detail-heading h3 {
     margin: 2px 0;
+  }
+
+  .stock-history-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .stock-ledger-filter {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--panel-2);
+  }
+
+  .stock-restock-suggestion {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    background: var(--panel);
   }
 
   .stock-restock {

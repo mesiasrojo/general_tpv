@@ -63,6 +63,7 @@ impl StockService {
             .filter(|level| match query.status {
                 StockLevelStatus::All => true,
                 StockLevelStatus::Low => level.is_low(),
+                StockLevelStatus::Restock => level.restock_quantity() > Decimal::ZERO,
                 StockLevelStatus::Out => level.quantity <= Decimal::ZERO,
             })
             .filter(|level| {

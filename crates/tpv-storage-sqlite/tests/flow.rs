@@ -1493,6 +1493,23 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
     assert_eq!(purchases.total, 1);
     assert_eq!(purchases.items.len(), 1);
     assert_eq!(purchases.items[0].kind, StockMovementKind::Purchase);
+    let by_reason = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: Some("reposición inicial".into()),
+                product_id: None,
+                kind: None,
+                from_ms: None,
+                to_ms: None,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_reason.total, 1);
+    assert_eq!(by_reason.items[0].kind, StockMovementKind::Purchase);
     let second_page = stock
         .query_movements(
             services.demo.store_id,
@@ -1594,6 +1611,18 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
         .unwrap();
     assert_eq!(low_export.len(), 1);
     assert_eq!(low_export[0].product_id, product.id);
+    let restock_export = stock
+        .levels_for_export(
+            services.demo.store_id,
+            StockLevelsQuery {
+                search: Some(product.sku.to_string()),
+                status: StockLevelStatus::Restock,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(restock_export.len(), 1);
+    assert_eq!(restock_export[0].restock_quantity(), Decimal::new(25, 1));
     let out_export = stock
         .levels_for_export(
             services.demo.store_id,
