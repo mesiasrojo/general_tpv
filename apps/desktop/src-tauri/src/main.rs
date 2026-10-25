@@ -19,9 +19,9 @@ use tpv_application::{
     RecordStockMovementRequest, RectifyInvoiceLinesRequest, RectifyInvoiceRequest,
     ResetPasswordRequest, SaleHistoryPage, SaleQuery, SaleRepository, SaleService, SaleView,
     SellerService, SequenceRepository, SessionUser, SetStockCountRequest, SetStockMinimumRequest,
-    StartSaleRequest, StockCountResult, StockMovementPage, StockRepository, StockService,
-    StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus, TaxService,
-    TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
+    StartSaleRequest, StockCountResult, StockLevelsQuery, StockMovementPage, StockRepository,
+    StockService, StoreService, SyncContext, SyncOutboxRepository, SyncService, SyncStatus,
+    TaxService, TimeClockRepository, TimeClockService, TimeClockStatus, UpdateUserRequest,
     UpsertCustomerRequest, UpsertFamilyRequest, UpsertPriceListRequest, UpsertProductRequest,
     UpsertSellerRequest, UpsertStoreRequest, UpsertTaxRequest, UserRepository, stock_levels_csv,
     stock_movement_ledger_csv, stock_movements_csv,
@@ -1022,12 +1022,13 @@ async fn count_low_stock(state: State<'_, AppState>) -> Result<u64, String> {
 async fn export_stock_csv(
     app: AppHandle,
     state: State<'_, AppState>,
+    request: StockLevelsQuery,
 ) -> Result<Option<String>, String> {
     require_manager(state.inner())?;
     let state = state.inner().clone();
     let levels = state
         .stock
-        .list_levels(state.demo.store_id)
+        .levels_for_export(state.demo.store_id, request)
         .await
         .map_err(|error| error.to_string())?;
     let csv = stock_levels_csv(&levels);
@@ -2360,6 +2361,7 @@ mod e2e_tests {
             1
         );
         assert_eq!(second_ledger_page["items"][0]["kind"], "sale");
+        assert_eq!(second_ledger_page["items"][0]["sale_id"], json!(sale_id));
         let empty_ledger = invoke(
             &webview,
             "query_stock_movements",
@@ -2375,6 +2377,22 @@ mod e2e_tests {
         .expect("query empty ledger");
         assert_eq!(empty_ledger["total"], 0);
         assert!(empty_ledger["items"].as_array().unwrap().is_empty());
+        let future_ms = (OffsetDateTime::now_utc().unix_timestamp() + 3_600) * 1_000;
+        let future_ledger = invoke(
+            &webview,
+            "query_stock_movements",
+            json!({
+                "request": {
+                    "search": null,
+                    "kind": null,
+                    "from_ms": future_ms,
+                    "limit": 20,
+                    "offset": 0
+                }
+            }),
+        )
+        .expect("query future ledger");
+        assert_eq!(future_ledger["total"], 0);
 
         let sales = invoke(&webview, "list_sales", json!({})).expect("list sales");
         assert_eq!(sales.as_array().expect("sales array").len(), 1);

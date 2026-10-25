@@ -169,6 +169,8 @@ export interface QueryStockMovementsRequest {
   search?: string | null;
   product_id?: string | null;
   kind?: StockMovementKind | null;
+  from_ms?: number | null;
+  to_ms?: number | null;
   limit?: number;
   offset?: number;
 }
@@ -178,6 +180,13 @@ export interface StockMovementPage {
   total: number;
   limit: number;
   offset: number;
+}
+
+export type StockLevelStatus = 'all' | 'low' | 'out';
+
+export interface StockLevelsQuery {
+  search?: string | null;
+  status?: StockLevelStatus;
 }
 
 export interface Tax {
@@ -633,7 +642,8 @@ export const api = {
   savePriceList: (request: SavePriceListRequest) =>
     invoke<PriceListSnapshot>('save_price_list', { request }),
   listStockLevels: () => invoke<StockLevel[]>('list_stock_levels'),
-  exportStockCsv: () => invoke<string | null>('export_stock_csv'),
+  exportStockCsv: (request: StockLevelsQuery) =>
+    invoke<string | null>('export_stock_csv', { request }),
   exportStockMovementsCsv: (productId: string) =>
     invoke<string | null>('export_stock_movements_csv', { productId }),
   listStockLevelsForProducts: (productIds: string[]) =>

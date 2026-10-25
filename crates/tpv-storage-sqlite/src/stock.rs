@@ -77,6 +77,16 @@ fn push_movement_filters(
             .push_bind(pattern)
             .push(")");
     }
+    if let Some(from) = filter.from {
+        query
+            .push(" AND sm.occurred_at >= ")
+            .push_bind(format_time(from)?);
+    }
+    if let Some(to) = filter.to {
+        query
+            .push(" AND sm.occurred_at <= ")
+            .push_bind(format_time(to)?);
+    }
     Ok(())
 }
 

@@ -10,9 +10,9 @@ use tpv_application::{
     PriceListItemRequest, PriceListService, PrintQueueRepository, PrintService,
     QueryStockMovementsRequest, RecordStockMovementRequest, RectifyInvoiceLinesRequest,
     ResetPasswordRequest, SaleQuery, SaleRepository, SaleService, SequenceRepository,
-    SetStockCountRequest, SetStockMinimumRequest, StartSaleRequest, StockRepository, StockService,
-    SyncContext, SyncOutboxRepository, SyncService, UpdateUserRequest, UpsertPriceListRequest,
-    UserRepository,
+    SetStockCountRequest, SetStockMinimumRequest, StartSaleRequest, StockLevelStatus,
+    StockLevelsQuery, StockRepository, StockService, SyncContext, SyncOutboxRepository,
+    SyncService, UpdateUserRequest, UpsertPriceListRequest, UserRepository,
 };
 use tpv_auth::Argon2PasswordHasher;
 use tpv_domain::audit::{AuditAction, AuditEvent};
@@ -1462,6 +1462,8 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
                 search: None,
                 product_id: None,
                 kind: None,
+                from_ms: None,
+                to_ms: None,
                 limit: 20,
                 offset: 0,
             },
@@ -1480,6 +1482,8 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
                 search: Some(product.sku.to_string()),
                 product_id: None,
                 kind: Some(StockMovementKind::Purchase),
+                from_ms: None,
+                to_ms: None,
                 limit: 20,
                 offset: 0,
             },
@@ -1496,6 +1500,8 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
                 search: None,
                 product_id: Some(product.id),
                 kind: None,
+                from_ms: None,
+                to_ms: None,
                 limit: 1,
                 offset: 1,
             },
@@ -1513,6 +1519,8 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
                 search: None,
                 product_id: None,
                 kind: None,
+                from_ms: None,
+                to_ms: None,
                 limit: 20,
                 offset: 0,
             },
@@ -1521,6 +1529,93 @@ async fn stock_tracks_manual_movements_and_sale_confirmation() {
         .unwrap();
     assert_eq!(other_ledger.total, 0);
     assert!(other_ledger.items.is_empty());
+
+    let now_ms = OffsetDateTime::now_utc().unix_timestamp() * 1_000;
+    let recent_ledger = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: None,
+                product_id: None,
+                kind: None,
+                from_ms: Some(now_ms - 3_600_000),
+                to_ms: Some(now_ms + 3_600_000),
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(recent_ledger.total, 3);
+    let past_ledger = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: None,
+                product_id: None,
+                kind: None,
+                from_ms: Some(now_ms - 7_200_000),
+                to_ms: Some(now_ms - 3_600_000),
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(past_ledger.total, 0);
+    let invalid_range = stock
+        .query_movements(
+            services.demo.store_id,
+            QueryStockMovementsRequest {
+                search: None,
+                product_id: None,
+                kind: None,
+                from_ms: Some(now_ms + 3_600_000),
+                to_ms: Some(now_ms - 3_600_000),
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await;
+    assert!(matches!(
+        invalid_range,
+        Err(tpv_application::ApplicationError::Validation(_))
+    ));
+
+    let low_export = stock
+        .levels_for_export(
+            services.demo.store_id,
+            StockLevelsQuery {
+                search: Some(product.sku.to_string()),
+                status: StockLevelStatus::Low,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(low_export.len(), 1);
+    assert_eq!(low_export[0].product_id, product.id);
+    let out_export = stock
+        .levels_for_export(
+            services.demo.store_id,
+            StockLevelsQuery {
+                search: Some(product.sku.to_string()),
+                status: StockLevelStatus::Out,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(out_export.is_empty());
+    let unmatched_export = stock
+        .levels_for_export(
+            services.demo.store_id,
+            StockLevelsQuery {
+                search: Some("no-existe".into()),
+                status: StockLevelStatus::All,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(unmatched_export.is_empty());
 
     let negative_count = stock
         .set_count(

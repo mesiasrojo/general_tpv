@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use rust_decimal::Decimal;
+use time::OffsetDateTime;
 use tpv_domain::audit::{AuditAction, AuditEvent};
 use tpv_domain::ids::{ProductId, StockMovementId, StoreId, UserId};
 use tpv_domain::money::Quantity;
@@ -9,8 +10,8 @@ use tpv_domain::stock::{StockLevel, StockMovement};
 
 use crate::dto::{
     QueryStockMovementsRequest, RecordStockMovementRequest, SetStockCountRequest,
-    SetStockMinimumRequest, StockCountCommand, StockCountResult, StockMovementPage,
-    StockMovementView,
+    SetStockMinimumRequest, StockCountCommand, StockCountResult, StockLevelStatus,
+    StockLevelsQuery, StockMovementPage, StockMovementView,
 };
 use crate::error::{ApplicationError, Result};
 use crate::ports::{CatalogRepository, Clock, StockMovementFilter, StockRepository};
@@ -38,6 +39,38 @@ impl StockService {
 
     pub async fn list_levels(&self, store_id: StoreId) -> Result<Vec<StockLevel>> {
         self.stock.list_levels(store_id).await
+    }
+
+    /// Stock rows matching the current UI filters. The dataset is local and
+    /// capped by the catalog size, so filtering here keeps the export and the
+    /// visible list perfectly aligned.
+    pub async fn levels_for_export(
+        &self,
+        store_id: StoreId,
+        query: StockLevelsQuery,
+    ) -> Result<Vec<StockLevel>> {
+        let needle = query
+            .search
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .chars()
+            .take(100)
+            .collect::<String>();
+        let levels = self.stock.list_levels(store_id).await?;
+        Ok(levels
+            .into_iter()
+            .filter(|level| match query.status {
+                StockLevelStatus::All => true,
+                StockLevelStatus::Low => level.is_low(),
+                StockLevelStatus::Out => level.quantity <= Decimal::ZERO,
+            })
+            .filter(|level| {
+                needle.is_empty()
+                    || level.name.to_lowercase().contains(&needle)
+                    || level.sku.as_str().to_lowercase().contains(&needle)
+            })
+            .collect())
     }
 
     pub async fn count_low_stock(&self, store_id: StoreId) -> Result<u64> {
@@ -112,6 +145,21 @@ impl StockService {
         min_limit: u32,
         max_limit: u32,
     ) -> Result<StockMovementPage> {
+        let from = request
+            .from_ms
+            .map(|value| millis_to_time(value, "from_ms"))
+            .transpose()?;
+        let to = request
+            .to_ms
+            .map(|value| millis_to_time(value, "to_ms"))
+            .transpose()?;
+        if let (Some(from), Some(to)) = (from, to) {
+            if from > to {
+                return Err(ApplicationError::Validation(
+                    "la fecha inicial no puede ser posterior a la final".into(),
+                ));
+            }
+        }
         let search = request
             .search
             .unwrap_or_default()
@@ -129,6 +177,8 @@ impl StockService {
             search: (!search.is_empty()).then_some(search),
             product_id: request.product_id,
             kind: request.kind,
+            from,
+            to,
             limit,
             offset: request.offset,
         };
@@ -293,4 +343,12 @@ fn parse_decimal(value: &str, field: &str) -> Result<Decimal> {
     }
     Decimal::from_str(&normalized)
         .map_err(|_| ApplicationError::Validation(format!("invalid {field}: {value}")))
+}
+
+fn millis_to_time(value: i64, field: &str) -> Result<OffsetDateTime> {
+    let nanos = i128::from(value)
+        .checked_mul(1_000_000)
+        .ok_or_else(|| ApplicationError::Validation(format!("{field} fuera de rango")))?;
+    OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        .map_err(|_| ApplicationError::Validation(format!("{field} fuera de rango")))
 }

@@ -107,6 +107,25 @@ pub struct SetStockMinimumRequest {
     pub min_quantity: String,
 }
 
+/// On-screen stock filters reused by the CSV export so the file matches what
+/// the manager is actually seeing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StockLevelStatus {
+    #[default]
+    All,
+    Low,
+    Out,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StockLevelsQuery {
+    #[serde(default)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub status: StockLevelStatus,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetStockCountRequest {
     pub product_id: ProductId,
@@ -160,6 +179,12 @@ pub struct QueryStockMovementsRequest {
     pub product_id: Option<ProductId>,
     #[serde(default)]
     pub kind: Option<StockMovementKind>,
+    /// Inclusive lower bound as Unix milliseconds, interpreted in UTC.
+    #[serde(default)]
+    pub from_ms: Option<i64>,
+    /// Inclusive upper bound as Unix milliseconds, interpreted in UTC.
+    #[serde(default)]
+    pub to_ms: Option<i64>,
     #[serde(default)]
     pub limit: u32,
     #[serde(default)]

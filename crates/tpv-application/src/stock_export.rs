@@ -10,7 +10,7 @@ use crate::dto::StockMovementView;
 /// a double click in Excel.
 pub fn stock_levels_csv(levels: &[StockLevel]) -> String {
     let mut output = String::from('\u{feff}');
-    output.push_str("Codigo;Articulo;Cantidad;Minimo;Bajo minimo;Actualizado\r\n");
+    output.push_str("Codigo;Articulo;Cantidad;Minimo;A reponer;Bajo minimo;Actualizado\r\n");
     for level in levels {
         let updated_at = level
             .updated_at
@@ -23,6 +23,8 @@ pub fn stock_levels_csv(levels: &[StockLevel]) -> String {
         output.push_str(&decimal_cell(level.quantity));
         output.push(';');
         output.push_str(&decimal_cell(level.min_quantity));
+        output.push(';');
+        output.push_str(&decimal_cell(level.restock_quantity()));
         output.push(';');
         output.push_str(if level.is_low() { "SI" } else { "NO" });
         output.push(';');
@@ -163,8 +165,10 @@ mod tests {
         };
         let csv = stock_levels_csv(&[level]);
         assert!(csv.starts_with('\u{feff}'));
-        assert!(csv.contains("Codigo;Articulo;Cantidad;Minimo;Bajo minimo;Actualizado\r\n"));
-        assert!(csv.contains("\"A;1\";\"Café \"\"especial\"\"\";3,5;5;SI;\r\n"));
+        assert!(
+            csv.contains("Codigo;Articulo;Cantidad;Minimo;A reponer;Bajo minimo;Actualizado\r\n")
+        );
+        assert!(csv.contains("\"A;1\";\"Café \"\"especial\"\"\";3,5;5;1,5;SI;\r\n"));
     }
 
     #[test]
@@ -233,6 +237,6 @@ mod tests {
             updated_at: None,
         };
         let csv = stock_levels_csv(&[level]);
-        assert!(csv.contains("A-1;Producto;5;3,5;NO;\r\n"));
+        assert!(csv.contains("A-1;Producto;5;3,5;0;NO;\r\n"));
     }
 }

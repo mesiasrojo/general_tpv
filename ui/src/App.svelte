@@ -203,6 +203,8 @@
   let stockLedgerTotal = $state(0);
   let stockLedgerSearch = $state('');
   let stockLedgerKind = $state<'all' | StockMovementKind>('all');
+  let stockLedgerFrom = $state('');
+  let stockLedgerTo = $state('');
   let stockLedgerLoading = $state(false);
   let stockLedgerError = $state('');
   let stockLedgerExporting = $state(false);
@@ -783,6 +785,14 @@
     await refreshStockLedger(true);
   }
 
+  async function openStockFromLedger(movement: StockMovementView) {
+    stockSelectedProductId = movement.product_id;
+    stockFilter = '';
+    stockStatusFilter = 'all';
+    catalogSection = 'stock';
+    await openCatalog();
+  }
+
   async function exportStockLedger() {
     if (stockLedgerExporting) return;
     stockLedgerExporting = true;
@@ -791,6 +801,8 @@
       const path = await api.exportStockLedgerCsv({
         search: stockLedgerSearch.trim() || null,
         kind: stockLedgerKind === 'all' ? null : stockLedgerKind,
+        from_ms: localDateBoundary(stockLedgerFrom, false),
+        to_ms: localDateBoundary(stockLedgerTo, true),
         limit: 0,
         offset: 0
       });
@@ -812,6 +824,8 @@
       const page = await api.queryStockMovements({
         search: stockLedgerSearch.trim() || null,
         kind: stockLedgerKind === 'all' ? null : stockLedgerKind,
+        from_ms: localDateBoundary(stockLedgerFrom, false),
+        to_ms: localDateBoundary(stockLedgerTo, true),
         limit: stockLedgerPageSize,
         offset: reset ? 0 : stockLedger.length
       });
@@ -941,6 +955,13 @@
   function isStockLow(level: StockLevel): boolean {
     const minimum = Number.parseFloat(level.min_quantity);
     return Number.isFinite(minimum) && minimum > 0 && Number.parseFloat(level.quantity) <= minimum;
+  }
+  function stockRestock(level: StockLevel): string {
+    const minimum = Number.parseFloat(level.min_quantity);
+    const quantity = Number.parseFloat(level.quantity);
+    if (!Number.isFinite(minimum) || !Number.isFinite(quantity) || minimum <= 0) return '0';
+    const missing = minimum - quantity;
+    return missing > 0 ? missing.toFixed(3) : '0';
   }
 
   async function refreshLowStockAlert() {
@@ -1098,7 +1119,10 @@
     stockExporting = true;
     catalogError = '';
     try {
-      const path = await api.exportStockCsv();
+      const path = await api.exportStockCsv({
+        search: stockFilter.trim() || null,
+        status: stockStatusFilter
+      });
       if (path) {
         message = `Stock exportado · ${path}`;
       }
@@ -3441,6 +3465,9 @@
                       <strong>{level.name}</strong>
                       <span class="muted small mono">
                         {level.sku} · mínimo {formatQuantity(level.min_quantity)}
+                        {#if Number.parseFloat(stockRestock(level)) > 0}
+                          · reponer {formatQuantity(stockRestock(level))}
+                        {/if}
                       </span>
                     </span>
                     <span class="stock-level-side">
@@ -3485,6 +3512,11 @@
                       {formatQuantity(selectedStockLevel.quantity)}
                     </strong>
                     <span class="muted small">unidades</span>
+                    {#if Number.parseFloat(stockRestock(selectedStockLevel)) > 0}
+                      <span class="stock-restock">
+                        Reponer {formatQuantity(stockRestock(selectedStockLevel))} para alcanzar el mínimo
+                      </span>
+                    {/if}
                   </div>
                 </div>
 
@@ -3675,6 +3707,14 @@
                   <option value="adjustment_out">Ajuste negativo</option>
                 </select>
               </label>
+              <label class="field">
+                <span>Desde</span>
+                <input type="date" bind:value={stockLedgerFrom} aria-label="Desde el día" />
+              </label>
+              <label class="field">
+                <span>Hasta</span>
+                <input type="date" bind:value={stockLedgerTo} aria-label="Hasta el día" />
+              </label>
               <button class="primary" type="submit" disabled={stockLedgerLoading}>
                 {stockLedgerLoading ? 'Buscando…' : 'Buscar'}
               </button>
@@ -3707,13 +3747,22 @@
               <div class="stock-ledger-list">
                 {#each stockLedger as movement (movement.id)}
                   <div class="stock-ledger-row">
-                    <span class="stock-ledger-main">
+                    <button
+                      class="stock-ledger-main stock-ledger-product"
+                      type="button"
+                      aria-label={`Ver stock de ${movement.name}`}
+                      onclick={() => void openStockFromLedger(movement)}
+                    >
                       <strong>{movement.sku} · {movement.name}</strong>
                       <span class="muted small">
                         {stockKindLabel(movement.kind)}
                         {movement.reason ? ` · ${movement.reason}` : ''}
                       </span>
-                    </span>
+                      {#if movement.sale_id}
+                        <span class="muted small mono">Venta {shortId(movement.sale_id)}</span>
+                      {/if}
+                      <span class="stock-ledger-open">Ver stock →</span>
+                    </button>
                     <span class="stock-ledger-side">
                       <strong
                         class:negative={movement.kind === 'sale' ||
@@ -5411,6 +5460,14 @@
     margin: 2px 0;
   }
 
+  .stock-restock {
+    max-width: 150px;
+    color: var(--warn-text, #a15c00);
+    font-size: 11px;
+    line-height: 1.3;
+    text-align: right;
+  }
+
   .stock-current {
     display: grid;
     justify-items: end;
@@ -5487,7 +5544,9 @@
 
   .stock-ledger-toolbar {
     display: grid;
-    grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.6fr) auto auto;
+    grid-template-columns:
+      minmax(190px, 1fr) minmax(150px, 0.55fr) minmax(125px, 0.35fr)
+      minmax(125px, 0.35fr) auto auto;
     align-items: end;
     gap: 10px;
   }
@@ -5529,6 +5588,26 @@
 
   .stock-ledger-main strong {
     overflow-wrap: anywhere;
+  }
+
+  .stock-ledger-product {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .stock-ledger-product:hover strong,
+  .stock-ledger-product:focus-visible strong {
+    text-decoration: underline;
+  }
+
+  .stock-ledger-open {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
   }
 
   .stock-ledger-side {

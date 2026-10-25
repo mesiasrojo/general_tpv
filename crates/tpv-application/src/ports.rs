@@ -145,6 +145,9 @@ pub struct StockMovementFilter {
     pub search: Option<String>,
     pub product_id: Option<ProductId>,
     pub kind: Option<StockMovementKind>,
+    /// Inclusive bounds on `occurred_at`.
+    pub from: Option<OffsetDateTime>,
+    pub to: Option<OffsetDateTime>,
     pub limit: u32,
     pub offset: u32,
 }

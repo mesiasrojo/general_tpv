@@ -135,6 +135,21 @@ impl StockLevel {
         self.min_quantity > Decimal::ZERO && self.quantity <= self.min_quantity
     }
 
+    /// Units needed to reach the configured minimum. Zero means no purchase
+    /// suggestion, either because the level is healthy or the alert is off.
+    #[must_use]
+    pub fn restock_quantity(&self) -> Decimal {
+        if self.min_quantity <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let missing = self.min_quantity - self.quantity;
+        if missing > Decimal::ZERO {
+            missing.normalize()
+        } else {
+            Decimal::ZERO
+        }
+    }
+
     pub fn set_minimum(&mut self, value: Decimal) -> Result<()> {
         if value < Decimal::ZERO {
             return Err(DomainError::Validation(
@@ -250,5 +265,25 @@ mod tests {
         level.set_minimum(Decimal::new(2, 0)).unwrap();
         assert!(level.is_low());
         assert!(level.set_minimum(Decimal::new(-1, 0)).is_err());
+    }
+
+    #[test]
+    fn restock_quantity_reaches_the_minimum_only_when_low() {
+        let mut level = StockLevel {
+            store_id: StoreId::new(),
+            product_id: ProductId::new(),
+            sku: Sku::new("A-1").unwrap(),
+            name: "Test".into(),
+            quantity: Decimal::new(15, 1),
+            min_quantity: Decimal::new(4, 0),
+            updated_at: None,
+        };
+        assert_eq!(level.restock_quantity(), Decimal::new(25, 1));
+        level.quantity = Decimal::new(5, 0);
+        assert_eq!(level.restock_quantity(), Decimal::ZERO);
+        level.quantity = Decimal::new(-2, 0);
+        assert_eq!(level.restock_quantity(), Decimal::new(6, 0));
+        level.min_quantity = Decimal::ZERO;
+        assert_eq!(level.restock_quantity(), Decimal::ZERO);
     }
 }
